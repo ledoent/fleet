@@ -7,7 +7,6 @@ on:
 
 env:
   GCR_IMAGE: gcr.io/kencove-prod/fleet
-  IMAGE_TAG: v4.80.2-premium
 
 jobs:
   build-and-push:
@@ -18,6 +17,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Derive Fleet version from upstream tag
+        id: version
+        run: |
+          # Find the nearest fleet-v* tag in history
+          BASE_TAG=$(git describe --tags --match 'fleet-v*' --abbrev=0 2>/dev/null || echo "unknown")
+          # Strip "fleet-" prefix: fleet-v4.80.2 -> v4.80.2
+          FLEET_VERSION="${BASE_TAG#fleet-}"
+          echo "fleet_version=${FLEET_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${FLEET_VERSION}-kencove" >> "$GITHUB_OUTPUT"
+          echo "Fleet version: ${FLEET_VERSION}, image tag: ${FLEET_VERSION}-kencove"
 
       - id: auth
         uses: google-github-actions/auth@v2
@@ -35,7 +48,9 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.GCR_IMAGE }}:${{ env.IMAGE_TAG }}
+            ${{ env.GCR_IMAGE }}:${{ steps.version.outputs.image_tag }}
             ${{ env.GCR_IMAGE }}:latest
+          build-args: |
+            FLEET_VERSION=${{ steps.version.outputs.fleet_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

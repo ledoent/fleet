@@ -17,10 +17,11 @@ COPY --from=frontend /build .
 RUN go run github.com/kevinburke/go-bindata/go-bindata -pkg=bindata -tags full \
     -o=server/bindata/generated.go \
     frontend/templates/ assets/... server/mail/templates
+ARG FLEET_VERSION=dev
 RUN CGO_ENABLED=1 go build -tags full,fts5,netgo -trimpath \
     -ldflags "-extldflags '-static' \
-    -X github.com/fleetdm/fleet/v4/server/version.version=4.80.2-kencove \
-    -X github.com/fleetdm/fleet/v4/server/version.branch=premium/v4.80.2" \
+    -X github.com/fleetdm/fleet/v4/server/version.version=${FLEET_VERSION}-kencove \
+    -X github.com/fleetdm/fleet/v4/server/version.branch=kencove" \
     -o fleet ./cmd/fleet
 
 # Stage 3: Runtime image
