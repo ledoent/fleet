@@ -37,7 +37,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: 'projects/103143301688/locations/global/workloadIdentityPools/github-wlif/providers/github-oidc'
-          service_account: 'github-actions@kencove-prod.iam.gserviceaccount.com'
+          service_account: 'github-actions-seer@kencove-prod.iam.gserviceaccount.com'
 
       - uses: google-github-actions/setup-gcloud@v2
 
