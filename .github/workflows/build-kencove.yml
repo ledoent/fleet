@@ -3,6 +3,24 @@ name: Build & Push Kencove Fleet Image
 on:
   push:
     branches: [kencove]
+    tags:
+      - 'fleet-v*'
+    paths:
+      - 'cmd/**'
+      - 'ee/**'
+      - 'server/**'
+      - 'frontend/**'
+      - 'orbit/**'
+      - 'pkg/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'package.json'
+      - 'yarn.lock'
+      - 'webpack.config.js'
+      - 'Dockerfile'
+      - '.github/workflows/build-kencove.yml'
+  # Tag pushes ignore paths filter per GitHub docs, so fleet-v* tags always build.
+  # For branch pushes, only source code changes trigger a rebuild.
   workflow_dispatch:
 
 env:
@@ -24,10 +42,14 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Derive Fleet version from upstream tag
+      - name: Derive Fleet version from tag
         id: version
         run: |
-          BASE_TAG=$(git describe --tags --match 'fleet-v*' --abbrev=0 2>/dev/null || echo "unknown")
+          if [[ "$GITHUB_REF" == refs/tags/fleet-v* ]]; then
+            BASE_TAG="${GITHUB_REF#refs/tags/}"
+          else
+            BASE_TAG=$(git describe --tags --match 'fleet-v*' --abbrev=0 2>/dev/null || echo "fleet-vdev")
+          fi
           FLEET_VERSION="${BASE_TAG#fleet-}"
           echo "fleet_version=${FLEET_VERSION}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${FLEET_VERSION}-kencove" >> "$GITHUB_OUTPUT"
