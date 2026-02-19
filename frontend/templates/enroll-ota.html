@@ -478,37 +478,45 @@
 
         let templateId = getTemplateIdFromPlatform(platform);
 
-        // handle android rendering
-        if (platform === "android") {
-          if (!ANDROID_MDM_ENABLED) {
-            renderError(
-              "Android MDM is turned off.",
-              "To enroll your Android device please contact your IT admin."
-            );
-            return;
-          }
-
+        // For fully-managed Android enrollment, the QR code must display regardless of
+        // the browser's platform (user opens the URL on a computer for the device to scan).
+        // Check enrollment mode before platform-specific rendering.
+        if (ANDROID_MDM_ENABLED) {
           try {
             const data = await getEnrollmentToken();
-            if (!data.android_enrollment_url) {
-              throw new Error("Failed to get enrollment token");
-            }
-
             if (data.android_enrollment_mode === "fully_managed" && data.android_enrollment_qr_code) {
               renderContent("android-fully-managed-template");
               const container = document.getElementById("qr-code-container");
               renderQRCode(container, data.android_enrollment_qr_code);
-            } else {
+              return;
+            }
+
+            // For Android browsers with work_profile mode, show the enrollment URL
+            if (platform === "android") {
+              if (!data.android_enrollment_url) {
+                throw new Error("Failed to get enrollment token");
+              }
               renderContent(templateId);
               setEnrollTokenUrl(data.android_enrollment_url);
+              return;
             }
           } catch (error) {
-            renderError(
-              "This URL is invalid.",
-              "Enroll secret is invalid. Please contact your IT admin."
-            );
-            return;
+            // If this is an Android device, show the error. Otherwise, fall through
+            // to platform-specific rendering (the secret may be for a non-Android team).
+            if (platform === "android") {
+              renderError(
+                "This URL is invalid.",
+                "Enroll secret is invalid. Please contact your IT admin."
+              );
+              return;
+            }
           }
+        } else if (platform === "android") {
+          renderError(
+            "Android MDM is turned off.",
+            "To enroll your Android device please contact your IT admin."
+          );
+          return;
         }
 
         // handle rendering for macos
