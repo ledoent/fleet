@@ -544,12 +544,23 @@ func (svc *Service) CreateEnrollmentToken(ctx context.Context, enrollSecret, idp
 		return nil, err
 	}
 
-	_, err = svc.ds.VerifyEnrollSecret(ctx, enrollSecret)
+	enrollSecretObj, err := svc.ds.VerifyEnrollSecret(ctx, enrollSecret)
 	switch {
 	case fleet.IsNotFound(err):
 		return nil, fleet.NewAuthFailedError("invalid secret")
 	case err != nil:
 		return nil, ctxerr.Wrap(ctx, err, "verifying enroll secret")
+	}
+
+	// Resolve enrollment mode from team settings (default: work_profile).
+	enrollmentMode := fleet.AndroidEnrollmentModeWorkProfile
+	if enrollSecretObj.TeamID != nil {
+		team, teamErr := svc.fleetDS.TeamLite(ctx, *enrollSecretObj.TeamID)
+		if teamErr != nil {
+			level.Warn(svc.logger).Log("msg", "failed to get team for enrollment mode, defaulting to work_profile", "team_id", *enrollSecretObj.TeamID, "err", teamErr)
+		} else if team.Config.MDM.AndroidSettings.EnrollmentMode != "" {
+			enrollmentMode = team.Config.MDM.AndroidSettings.EnrollmentMode
+		}
 	}
 
 	appCfg, err := svc.ds.AppConfig(ctx)
@@ -594,16 +605,16 @@ func (svc *Service) CreateEnrollmentToken(ctx context.Context, enrollSecret, idp
 		return nil, ctxerr.Wrap(ctx, err, "marshalling enrollment token request")
 	}
 
-	personalUsageSetting := "PERSONAL_USAGE_ALLOWED"
-	if fullyManaged {
-		personalUsageSetting = "PERSONAL_USAGE_DISALLOWED"
+	allowPersonalUsage := "PERSONAL_USAGE_ALLOWED"
+	if enrollmentMode == fleet.AndroidEnrollmentModeFullyManaged {
+		allowPersonalUsage = "PERSONAL_USAGE_DISALLOWED_USERLESS"
 	}
 
 	token := &androidmanagement.EnrollmentToken{
 		// Default duration is 1 hour
 
 		AdditionalData:     string(enrollmentTokenRequest),
-		AllowPersonalUsage: personalUsageSetting,
+		AllowPersonalUsage: allowPersonalUsage,
 		PolicyName:         fmt.Sprintf("%s/policies/%d", enterprise.Name(), android.DefaultAndroidPolicyID),
 		OneTimeOnly:        true,
 	}
@@ -612,11 +623,15 @@ func (svc *Service) CreateEnrollmentToken(ctx context.Context, enrollSecret, idp
 		return nil, ctxerr.Wrap(ctx, err, "creating Android enrollment token")
 	}
 
-	return &android.EnrollmentToken{
-		EnrollmentToken:  token.Value,
-		EnrollmentURL:    "https://enterprise.google.com/android/enroll?et=" + token.Value,
-		EnrollmentQRCode: token.QrCode,
-	}, nil
+	result := &android.EnrollmentToken{
+		EnrollmentToken: token.Value,
+		EnrollmentURL:   "https://enterprise.google.com/android/enroll?et=" + token.Value,
+		EnrollmentMode:  enrollmentMode,
+	}
+	if enrollmentMode == fleet.AndroidEnrollmentModeFullyManaged && token.QrCode != "" {
+		result.QrCode = token.QrCode
+	}
+	return result, nil
 }
 
 func (svc *Service) checkIfAndroidNotConfigured(ctx context.Context, statusOfError int) (*fleet.AppConfig, error) {

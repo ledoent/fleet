@@ -1017,6 +1017,11 @@ func parseControls(top map[string]json.RawMessage, result *GitOps, logFn Logf, y
 			}
 		}
 
+		if mode := androidSettings.EnrollmentMode; mode != "" && mode != fleet.AndroidEnrollmentModeWorkProfile && mode != fleet.AndroidEnrollmentModeFullyManaged {
+			multiError = multierror.Append(multiError, fmt.Errorf("android_settings.enrollment_mode: must be one of %q, %q, or empty",
+				fleet.AndroidEnrollmentModeWorkProfile, fleet.AndroidEnrollmentModeFullyManaged))
+		}
+
 		// Since we already unmarshalled and updated the path, we need to update the result struct.
 		result.Controls.AndroidSettings = androidSettings
 	}

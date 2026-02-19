@@ -19,8 +19,24 @@ on:
       - 'webpack.config.js'
       - 'Dockerfile'
       - '.github/workflows/build-kencove.yml'
+  pull_request:
+    branches: [kencove]
+    paths:
+      - 'cmd/**'
+      - 'ee/**'
+      - 'server/**'
+      - 'frontend/**'
+      - 'orbit/**'
+      - 'pkg/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'package.json'
+      - 'yarn.lock'
+      - 'webpack.config.js'
+      - 'Dockerfile'
+      - '.github/workflows/build-kencove.yml'
   # Tag pushes ignore paths filter per GitHub docs, so fleet-v* tags always build.
-  # For branch pushes, only source code changes trigger a rebuild.
+  # For branch and PR pushes, only source code changes trigger a rebuild.
   workflow_dispatch:
 
 env:
@@ -42,7 +58,7 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Derive Fleet version from tag
+      - name: Derive Fleet version and image tag
         id: version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/fleet-v* ]]; then
@@ -52,8 +68,19 @@ jobs:
           fi
           FLEET_VERSION="${BASE_TAG#fleet-}"
           echo "fleet_version=${FLEET_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${FLEET_VERSION}-kencove" >> "$GITHUB_OUTPUT"
-          echo "Fleet version: ${FLEET_VERSION}, image tag: ${FLEET_VERSION}-kencove"
+
+          # PR builds get a pr-N tag; branch/tag builds get the release tag + latest
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            IMAGE_TAG="${FLEET_VERSION}-kencove-pr${{ github.event.number }}"
+            echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+            echo "extra_tags=" >> "$GITHUB_OUTPUT"
+          else
+            IMAGE_TAG="${FLEET_VERSION}-kencove"
+            echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+            EXTRA="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest"
+            echo "extra_tags=${EXTRA}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Fleet version: ${FLEET_VERSION}, image tag: ${IMAGE_TAG}"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -68,13 +95,20 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Build image tags
+        id: tags
+        run: |
+          TAGS="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.image_tag }}"
+          if [[ -n "${{ steps.version.outputs.extra_tags }}" ]]; then
+            TAGS="${TAGS},${{ steps.version.outputs.extra_tags }}"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.image_tag }}
-            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             FLEET_VERSION=${{ steps.version.outputs.fleet_version }}
           cache-from: type=gha

@@ -1707,11 +1707,17 @@ func (ws WindowsSettings) GetMDMProfileSpecs() []MDMProfileSpec {
 // Compile-time interface check
 var _ WithMDMProfileSpecs = WindowsSettings{}
 
+const (
+	AndroidEnrollmentModeWorkProfile  = "work_profile"
+	AndroidEnrollmentModeFullyManaged = "fully_managed"
+)
+
 type AndroidSettings struct {
 	// NOTE: These are only present here for informational purposes.
 	// (The source of truth for profiles is in MySQL.)
 	CustomSettings optjson.Slice[MDMProfileSpec]          `json:"custom_settings" renameto:"configuration_profiles"`
 	Certificates   optjson.Slice[CertificateTemplateSpec] `json:"certificates"`
+	EnrollmentMode string                                 `json:"enrollment_mode,omitempty"`
 }
 
 func (ws AndroidSettings) GetMDMProfileSpecs() []MDMProfileSpec {

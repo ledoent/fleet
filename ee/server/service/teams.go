@@ -1616,11 +1616,14 @@ func (svc *Service) editTeamFromSpec(
 		if !androidEnabledAndConfigured &&
 			len(spec.MDM.AndroidSettings.CustomSettings.Value) > 0 &&
 			!fleet.MDMProfileSpecsMatch(team.Config.MDM.AndroidSettings.CustomSettings.Value, spec.MDM.AndroidSettings.CustomSettings.Value) {
-			return ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("android_settings.configuration_profiles",
-				`Couldn’t edit android_settings.configuration_profiles. `+fleet.ErrAndroidMDMNotConfigured.Error()))
+			return ctxerr.Wrap(ctx, fleet.NewInvalidArgumentError("android_settings.custom_settings",
+				`Couldn’t edit android_settings.custom_settings. `+fleet.ErrAndroidMDMNotConfigured.Error()))
 		}
 
 		team.Config.MDM.AndroidSettings.CustomSettings = spec.MDM.AndroidSettings.CustomSettings
+	}
+	if spec.MDM.AndroidSettings.EnrollmentMode != "" {
+		team.Config.MDM.AndroidSettings.EnrollmentMode = spec.MDM.AndroidSettings.EnrollmentMode
 	}
 
 	if spec.Scripts.Set {
