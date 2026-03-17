@@ -1161,7 +1161,7 @@ const HostDetailsPage = ({
       isHostTeamTechnician);
 
   const showSoftwareLibraryTab = isPremiumTier;
-
+  const showQueriesCard = mdm?.enrollment_status === "Pending";
   const showActivityCard = !isAndroidHost;
   const showAgentOptionsCard = !isIosOrIpadosHost && !isAndroidHost;
   const showLocalUserAccountsCard = !isIosOrIpadosHost && !isAndroidHost;
@@ -1363,22 +1363,26 @@ const HostDetailsPage = ({
                   )}
                   toggleLocationModal={toggleLocationModal}
                 />
-                <QueriesCard
-                  hostId={host.id}
-                  router={router}
-                  hostPlatform={host.platform}
-                  schedule={schedule}
-                  queryReportsDisabled={
-                    config?.server_settings?.query_reports_disabled
-                  }
-                  canAddQuery={
-                    isAnyMaintainerAdminObserverPlus &&
-                    isSupportedHostQueriesPlatform
-                  }
-                  onClickAddQuery={onClickAddQuery}
-                />
+                {showQueriesCard && (
+                  <QueriesCard
+                    hostId={host.id}
+                    router={router}
+                    hostPlatform={host.platform}
+                    schedule={schedule}
+                    queryReportsDisabled={
+                      config?.server_settings?.query_reports_disabled
+                    }
+                    canAddQuery={
+                      isAnyMaintainerAdminObserverPlus &&
+                      isSupportedHostQueriesPlatform
+                    }
+                    onClickAddQuery={onClickAddQuery}
+                  />
+                )}
                 <UserCard
-                  className={defaultCardClass}
+                  className={
+                    showQueriesCard ? defaultCardClass : fullWidthCardClass
+                  }
                   endUsers={host.end_users ?? []}
                   canWriteEndUser={
                     isTeamMaintainerOrTeamAdmin ||
