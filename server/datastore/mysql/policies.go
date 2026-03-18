@@ -80,7 +80,7 @@ func (ds *Datastore) NewGlobalPolicy(ctx context.Context, authorID *uint, args f
 	var newPolicy *fleet.Policy
 
 	if err := ds.withTx(ctx, func(tx sqlx.ExtContext) error {
-		p, err := newGlobalPolicy(ctx, tx, authorID, args)
+		p, err := newGlobalPolicy(ctx, tx, authorID, args, ds.dialect)
 		if err != nil {
 			return err
 		}
@@ -93,7 +93,7 @@ func (ds *Datastore) NewGlobalPolicy(ctx context.Context, authorID *uint, args f
 	return newPolicy, nil
 }
 
-func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, args fleet.PolicyPayload) (*fleet.Policy, error) {
+func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, args fleet.PolicyPayload, dialect DialectHelper) (*fleet.Policy, error) {
 	if args.SoftwareInstallerID != nil {
 		return nil, ctxerr.Wrap(ctx, errSoftwareTitleIDOnGlobalPolicy, "create policy")
 	}
@@ -101,7 +101,7 @@ func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, ar
 		return nil, ctxerr.Wrap(ctx, errScriptIDOnGlobalPolicy, "create policy")
 	}
 	if args.QueryID != nil {
-		q, err := query(ctx, db, *args.QueryID)
+		q, err := query(ctx, db, *args.QueryID, dialect)
 		if err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "fetching query from id")
 		}
@@ -1083,7 +1083,7 @@ func (ds *Datastore) NewTeamPolicy(ctx context.Context, teamID uint, authorID *u
 	}
 
 	if err := ds.withTx(ctx, func(tx sqlx.ExtContext) error {
-		p, err := newTeamPolicy(ctx, tx, teamID, authorID, args)
+		p, err := newTeamPolicy(ctx, tx, teamID, authorID, args, ds.dialect)
 		if err != nil {
 			return err
 		}
@@ -1096,9 +1096,9 @@ func (ds *Datastore) NewTeamPolicy(ctx context.Context, teamID uint, authorID *u
 	return newPolicy, nil
 }
 
-func newTeamPolicy(ctx context.Context, db sqlx.ExtContext, teamID uint, authorID *uint, args fleet.PolicyPayload) (*fleet.Policy, error) {
+func newTeamPolicy(ctx context.Context, db sqlx.ExtContext, teamID uint, authorID *uint, args fleet.PolicyPayload, dialect DialectHelper) (*fleet.Policy, error) {
 	if args.QueryID != nil {
-		q, err := query(ctx, db, *args.QueryID)
+		q, err := query(ctx, db, *args.QueryID, dialect)
 		if err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "fetching query from id")
 		}

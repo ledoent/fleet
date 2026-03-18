@@ -15,7 +15,7 @@ import (
 
 // ListScheduledQueriesInPackWithStats loads a pack's scheduled queries and its aggregated stats.
 func (ds *Datastore) ListScheduledQueriesInPackWithStats(ctx context.Context, id uint, opts fleet.ListOptions) ([]*fleet.ScheduledQuery, error) {
-	query := `
+	query := fmt.Sprintf(`
 		SELECT
 			sq.id,
 			sq.pack_id,
@@ -31,16 +31,22 @@ func (ds *Datastore) ListScheduledQueriesInPackWithStats(ctx context.Context, id
 			sq.denylist,
 			q.query,
 			q.id AS query_id,
-			JSON_EXTRACT(ag.json_value, '$.user_time_p50') as user_time_p50,
-			JSON_EXTRACT(ag.json_value, '$.user_time_p95') as user_time_p95,
-			JSON_EXTRACT(ag.json_value, '$.system_time_p50') as system_time_p50,
-			JSON_EXTRACT(ag.json_value, '$.system_time_p95') as system_time_p95,
-			JSON_EXTRACT(ag.json_value, '$.total_executions') as total_executions
+			%s as user_time_p50,
+			%s as user_time_p95,
+			%s as system_time_p50,
+			%s as system_time_p95,
+			%s as total_executions
 		FROM scheduled_queries sq
 		JOIN (SELECT * FROM queries WHERE team_id IS NULL) q ON (sq.query_name = q.name)
 		LEFT JOIN aggregated_stats ag ON (ag.id = sq.id AND ag.global_stats = ? AND ag.type = ?)
 		WHERE sq.pack_id = ?
-	`
+	`,
+		ds.dialect.JSONExtract("ag.json_value", "$.user_time_p50"),
+		ds.dialect.JSONExtract("ag.json_value", "$.user_time_p95"),
+		ds.dialect.JSONExtract("ag.json_value", "$.system_time_p50"),
+		ds.dialect.JSONExtract("ag.json_value", "$.system_time_p95"),
+		ds.dialect.JSONExtract("ag.json_value", "$.total_executions"),
+	)
 	params := []interface{}{false, fleet.AggregatedStatsTypeScheduledQuery, id}
 	query, params = appendListOptionsWithCursorToSQL(query, params, &opts)
 	results := []*fleet.ScheduledQuery{}

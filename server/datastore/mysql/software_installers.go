@@ -485,7 +485,7 @@ func (ds *Datastore) createAutomaticPolicy(ctx context.Context, tx sqlx.ExtConte
 		SoftwareInstallerID: softwareInstallerID,
 		VPPAppsTeamsID:      vppAppsTeamsID,
 		Type:                fleet.PolicyTypeDynamic,
-	})
+	}, ds.dialect)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "create automatic policy query")
 	}
