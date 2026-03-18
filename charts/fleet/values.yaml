@@ -327,5 +327,11 @@ environments:
 mysql:
   enabled: false
 
+# PostgreSQL subchart (experimental). Enable when database.driver is "postgres"
+# and you want Helm to provision a PG instance. For production, use a managed
+# PostgreSQL service (e.g., AWS RDS, GCP Cloud SQL) and set database.address.
+postgresql:
+  enabled: false
+
 redis:
   enabled: false

@@ -586,10 +586,10 @@ e2e-set-desktop-token:
 e2e-reset-db-pg:
 	docker compose exec -T postgres_test psql -U fleet -c 'DROP DATABASE IF EXISTS e2e;' && \
 	docker compose exec -T postgres_test psql -U fleet -c 'CREATE DATABASE e2e;'
-	./build/fleet prepare db --mysql_driver=postgres --mysql_address=localhost:$${FLEET_POSTGRES_TEST_PORT:-5432} --mysql_username=fleet --mysql_password=insecure --mysql_database=e2e
+	./build/fleet prepare db --mysql_driver=postgres --mysql_address=localhost:$${FLEET_POSTGRES_TEST_PORT:-5434} --mysql_username=fleet --mysql_password=insecure --mysql_database=e2e
 
 e2e-serve-pg: e2e-reset-db-pg
-	./build/fleet serve --mysql_driver=postgres --mysql_address=localhost:$${FLEET_POSTGRES_TEST_PORT:-5432} --mysql_username=fleet --mysql_password=insecure --mysql_database=e2e --server_address=0.0.0.0:8642
+	./build/fleet serve --mysql_driver=postgres --mysql_address=localhost:$${FLEET_POSTGRES_TEST_PORT:-5434} --mysql_username=fleet --mysql_password=insecure --mysql_database=e2e --server_address=0.0.0.0:8642
 
 changelog:
 	find changes -type f ! -name .keep -exec awk 'NF' {} + > new-CHANGELOG.md

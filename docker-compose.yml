@@ -91,7 +91,7 @@ services:
       POSTGRES_PASSWORD: insecure
       POSTGRES_DB: fleet
     ports:
-      - "${FLEET_POSTGRES_TEST_PORT:-5432}:5432"
+      - "${FLEET_POSTGRES_TEST_PORT:-5434}:5432"
     tmpfs:
       - /var/lib/postgresql/data:rw,noexec,nosuid
     command: [

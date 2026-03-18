@@ -434,7 +434,7 @@ func CreateNamedMySQLDSWithConns(t *testing.T, name string) (*Datastore, *common
 }
 
 // CreatePostgresDS creates a test Datastore backed by PostgreSQL.
-// Requires POSTGRES_TEST=1 and a running postgres_test container (port 5432).
+// Requires POSTGRES_TEST=1 and a running postgres_test container (default port 5434).
 // The database is created fresh for each test to ensure isolation.
 func CreatePostgresDS(t *testing.T) *Datastore {
 	if _, ok := os.LookupEnv("POSTGRES_TEST"); !ok {
@@ -443,12 +443,19 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 
 	port := os.Getenv("FLEET_POSTGRES_TEST_PORT")
 	if port == "" {
-		port = "5432"
+		port = "5434"
 	}
 
-	dbName := strings.ReplaceAll(t.Name(), "/", "_")
-	dbName = strings.ReplaceAll(dbName, " ", "_")
-	dbName = strings.ToLower(dbName)
+	// Sanitize test name into a valid PG identifier (alphanumeric + underscore only).
+	dbName := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A') // lowercase
+		}
+		return '_'
+	}, t.Name())
 	if len(dbName) > 63 {
 		dbName = dbName[:63] // PG identifier limit
 	}
