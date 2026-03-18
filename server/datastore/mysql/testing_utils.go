@@ -39,6 +39,7 @@ import (
 	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
 	"github.com/fleetdm/fleet/v4/server/platform/mysql/testing_utils"
 	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib" // register pgx driver for PostgreSQL tests
 	"github.com/jmoiron/sqlx"
 	"github.com/olekukonko/tablewriter"
 	"github.com/smallstep/pkcs7"
@@ -430,6 +431,60 @@ func CreateNamedMySQLDSWithConns(t *testing.T, name string) (*Datastore, *common
 	t.Cleanup(func() { ds.Close() })
 
 	return ds, TestDBConnections(t, ds)
+}
+
+// CreatePostgresDS creates a test Datastore backed by PostgreSQL.
+// Requires POSTGRES_TEST=1 and a running postgres_test container (port 5432).
+// The database is created fresh for each test to ensure isolation.
+func CreatePostgresDS(t *testing.T) *Datastore {
+	if _, ok := os.LookupEnv("POSTGRES_TEST"); !ok {
+		t.Skip("PostgreSQL tests are disabled")
+	}
+
+	port := os.Getenv("FLEET_POSTGRES_TEST_PORT")
+	if port == "" {
+		port = "5432"
+	}
+
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	dbName = strings.ReplaceAll(dbName, " ", "_")
+	dbName = strings.ToLower(dbName)
+	if len(dbName) > 63 {
+		dbName = dbName[:63] // PG identifier limit
+	}
+
+	// Connect to default db to create test database
+	adminDSN := fmt.Sprintf("host=localhost port=%s user=fleet password=insecure dbname=fleet sslmode=disable", port)
+	adminDB, err := sqlx.Open("pgx", adminDSN)
+	require.NoError(t, err)
+	defer adminDB.Close()
+
+	_, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName)
+	_, err = adminDB.Exec("CREATE DATABASE " + dbName)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName)
+	})
+
+	// Connect to the test database
+	testDSN := fmt.Sprintf("host=localhost port=%s user=fleet password=insecure dbname=%s sslmode=disable", port, dbName)
+	testDB, err := sqlx.Open("pgx", testDSN)
+	require.NoError(t, err)
+
+	ds := &Datastore{
+		primary:   testDB,
+		replica:   testDB,
+		logger:    slog.New(slog.DiscardHandler),
+		dialect:   postgresDialect{},
+		writeCh:   make(chan itemToWrite),
+		stmtCache: make(map[string]*sqlx.Stmt),
+	}
+	t.Cleanup(func() { ds.Close() })
+
+	go ds.writeChanLoop()
+
+	return ds
 }
 
 func ExecAdhocSQL(tb testing.TB, ds *Datastore, fn func(q sqlx.ExtContext) error) {
