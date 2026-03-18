@@ -249,6 +249,7 @@ func mockDatastore(t *testing.T) (sqlmock.Sqlmock, *Datastore) {
 		primary: dbmock,
 		replica: dbmock,
 		logger:  slog.New(slog.DiscardHandler),
+		dialect: mysqlDialect{},
 	}
 
 	return mock, ds
