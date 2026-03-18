@@ -358,7 +358,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, teamID *uint, hostID 
 
 // loadhostPacksStatsDB will load all the "2017 pack" stats for the given host. The scheduled
 // queries that haven't run yet are returned with zero values.
-func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, hostPlatform string) ([]fleet.PackStats, error) {
+func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, hostPlatform string, dh DialectHelper) ([]fleet.PackStats, error) {
 	packs, err := listPacksForHost(ctx, db, hid)
 	if err != nil {
 		return nil, ctxerr.Wrapf(ctx, err, "list packs for host: %d", hid)
@@ -372,7 +372,7 @@ func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, 
 		packIDs[i] = packs[i].ID
 		packTypes[packs[i].ID] = packs[i].Type
 	}
-	ds := dialect.From(goqu.I("scheduled_queries").As("sq")).Select(
+	ds := dh.GoquDialect().From(goqu.I("scheduled_queries").As("sq")).Select(
 		goqu.I("sq.name").As("scheduled_query_name"),
 		goqu.I("sq.id").As("scheduled_query_id"),
 		goqu.I("sq.query_name").As("query_name"),
@@ -389,7 +389,7 @@ func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, 
 		goqu.COALESCE(goqu.I("sqs.user_time"), 0).As("user_time"),
 		goqu.COALESCE(goqu.I("sqs.wall_time"), 0).As("wall_time"),
 	).Join(
-		dialect.From("packs").As("p").Select(
+		dh.GoquDialect().From("packs").As("p").Select(
 			goqu.I("id"),
 			goqu.I("name"),
 		).Where(goqu.I("id").In(packIDs)),
@@ -422,7 +422,7 @@ func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, 
 			goqu.I("sq.platform").IsNull(),
 			// scheduled_queries.platform can be a comma-separated list of
 			// platforms, e.g. "darwin,windows".
-			goqu.L("FIND_IN_SET(?, sq.platform)", fleet.PlatformFromHost(hostPlatform)).Neq(0),
+			goqu.L(dh.FindInSet("?", "sq.platform"), fleet.PlatformFromHost(hostPlatform)).Neq(0),
 		),
 	)
 	sql, args, err := ds.ToSQL()
@@ -453,7 +453,7 @@ func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, 
 // The filter is split into two statements joined by a UNION ALL to take advantage of indexes.
 // Using an OR in the WHERE clause causes a full table scan which causes issues with a large
 // queries table due to the high volume of live queries (created by zero trust workflows)
-func loadHostScheduledQueryStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, hostPlatform string, teamID *uint) ([]fleet.QueryStats, error) {
+func loadHostScheduledQueryStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, hostPlatform string, teamID *uint, dialect DialectHelper) ([]fleet.QueryStats, error) {
 	var teamID_ uint
 	if teamID != nil {
 		teamID_ = *teamID
@@ -494,9 +494,9 @@ func loadHostScheduledQueryStatsDB(ctx context.Context, db sqlx.QueryerContext, 
 		LEFT JOIN query_results qr ON (q.id = qr.query_id AND qr.host_id = ?)
 	`
 
-	filter1 := `
+	filter1 := fmt.Sprintf(`
 		WHERE
-			(q.platform = '' OR q.platform IS NULL OR FIND_IN_SET(?, q.platform) != 0)
+			(q.platform = '' OR q.platform IS NULL OR %s != 0)`, dialect.FindInSet("?", "q.platform")) + `
 			AND q.is_scheduled = 1
 			AND (q.automations_enabled IS TRUE OR (q.discard_data IS FALSE AND q.logging_type = ?))
 			AND (q.team_id IS NULL OR q.team_id = ?)
@@ -880,12 +880,12 @@ LIMIT
 		host.DiskEncryptionEnabled = nil
 	}
 
-	packStats, err := loadHostPackStatsDB(ctx, ds.reader(ctx), host.ID, host.Platform)
+	packStats, err := loadHostPackStatsDB(ctx, ds.reader(ctx), host.ID, host.Platform, ds.dialect)
 	if err != nil {
 		return nil, err
 	}
 	host.PackStats = packStats
-	queriesStats, err := loadHostScheduledQueryStatsDB(ctx, ds.reader(ctx), host.ID, host.Platform, host.TeamID)
+	queriesStats, err := loadHostScheduledQueryStatsDB(ctx, ds.reader(ctx), host.ID, host.Platform, host.TeamID, ds.dialect)
 	if err != nil {
 		return nil, err
 	}
@@ -3402,7 +3402,7 @@ func (ds *Datastore) HostByIdentifier(ctx context.Context, identifier string) (*
 		return nil, ctxerr.Wrap(ctx, err, "get host by identifier")
 	}
 
-	packStats, err := loadHostPackStatsDB(ctx, ds.reader(ctx), host.ID, host.Platform)
+	packStats, err := loadHostPackStatsDB(ctx, ds.reader(ctx), host.ID, host.Platform, ds.dialect)
 	if err != nil {
 		return nil, err
 	}
@@ -3619,7 +3619,7 @@ func (ds *Datastore) ListPoliciesForHost(ctx context.Context, host *fleet.Host) 
 		// We log to help troubleshooting in case this happens.
 		ds.logger.ErrorContext(ctx, "unrecognized platform", "hostID", host.ID, "platform", host.Platform)
 	}
-	query := `SELECT p.id, p.team_id, p.resolution, p.name, p.query, p.description, p.author_id, p.platforms, p.critical, p.created_at, p.updated_at, p.conditional_access_enabled, p.type,
+	query := fmt.Sprintf(`SELECT p.id, p.team_id, p.resolution, p.name, p.query, p.description, p.author_id, p.platforms, p.critical, p.created_at, p.updated_at, p.conditional_access_enabled, p.type,
 		COALESCE(u.name, '<deleted>') AS author_name,
 		COALESCE(u.email, '') AS author_email,
 		CASE
@@ -3632,7 +3632,7 @@ func (ds *Datastore) ListPoliciesForHost(ctx context.Context, host *fleet.Host) 
 	LEFT JOIN policy_membership pm ON (p.id=pm.policy_id AND host_id=?)
 	LEFT JOIN users u ON p.author_id = u.id
 	WHERE (p.team_id IS NULL OR p.team_id = COALESCE((SELECT team_id FROM hosts WHERE id = ?), 0))
-	AND (p.platforms IS NULL OR p.platforms = '' OR FIND_IN_SET(?, p.platforms) != 0)
+	AND (p.platforms IS NULL OR p.platforms = '' OR %s != 0)`, ds.dialect.FindInSet("?", "p.platforms")) + `
 	AND (
 		-- Policy has no include labels
 		NOT EXISTS (
@@ -5322,7 +5322,7 @@ ON DUPLICATE KEY UPDATE
 //
 // If the host doesn't exist, a NotFoundError is returned.
 func (ds *Datastore) HostLite(ctx context.Context, id uint) (*fleet.Host, error) {
-	query, args, err := dialect.From(goqu.I("hosts")).Select(
+	query, args, err := ds.dialect.GoquDialect().From(goqu.I("hosts")).Select(
 		"id",
 		"created_at",
 		"updated_at",
@@ -5826,7 +5826,7 @@ func (ds *Datastore) HostIDsByOSID(
 ) ([]uint, error) {
 	var ids []uint
 
-	stmt := dialect.From("host_operating_system").
+	stmt := ds.dialect.GoquDialect().From("host_operating_system").
 		Select("host_id").
 		Where(
 			goqu.C("os_id").Eq(osID)).
@@ -5855,7 +5855,7 @@ func (ds *Datastore) HostIDsByOSVersion(
 ) ([]uint, error) {
 	var ids []uint
 
-	stmt := dialect.From("hosts").
+	stmt := ds.dialect.GoquDialect().From("hosts").
 		Select("id").
 		Where(
 			goqu.C("platform").Eq(osVersion.Platform),

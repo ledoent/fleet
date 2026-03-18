@@ -340,7 +340,7 @@ func (ds *Datastore) PolicyLite(ctx context.Context, id uint) (*fleet.PolicyLite
 // Currently, SavePolicy does not allow updating the team of an existing policy.
 func (ds *Datastore) SavePolicy(ctx context.Context, p *fleet.Policy, shouldRemoveAllPolicyMemberships bool, removePolicyStats bool) error {
 	if err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return savePolicy(ctx, tx, ds.logger, p, shouldRemoveAllPolicyMemberships, removePolicyStats)
+		return savePolicy(ctx, tx, ds.logger, p, shouldRemoveAllPolicyMemberships, removePolicyStats, ds.dialect)
 	}); err != nil {
 		return ctxerr.Wrap(ctx, err, "updating policy")
 	}
@@ -348,7 +348,7 @@ func (ds *Datastore) SavePolicy(ctx context.Context, p *fleet.Policy, shouldRemo
 	return nil
 }
 
-func savePolicy(ctx context.Context, db sqlx.ExtContext, logger *slog.Logger, p *fleet.Policy, shouldRemoveAllPolicyMemberships bool, removePolicyStats bool) error {
+func savePolicy(ctx context.Context, db sqlx.ExtContext, logger *slog.Logger, p *fleet.Policy, shouldRemoveAllPolicyMemberships bool, removePolicyStats bool, dialect DialectHelper) error {
 	if p.TeamID == nil && p.SoftwareInstallerID != nil {
 		return ctxerr.Wrap(ctx, errSoftwareTitleIDOnGlobalPolicy, "save policy")
 	}
@@ -396,7 +396,7 @@ func savePolicy(ctx context.Context, db sqlx.ExtContext, logger *slog.Logger, p 
 	}
 
 	return cleanupPolicy(
-		ctx, db, db, p.ID, p.Platform, shouldRemoveAllPolicyMemberships, removePolicyStats, logger,
+		ctx, db, db, p.ID, p.Platform, shouldRemoveAllPolicyMemberships, removePolicyStats, logger, dialect,
 	)
 }
 
@@ -491,14 +491,14 @@ func assertTeamMatches(ctx context.Context, db sqlx.QueryerContext, teamID uint,
 func cleanupPolicy(
 	ctx context.Context, queryerContext sqlx.QueryerContext, extContext sqlx.ExtContext, policyID uint, policyPlatform string,
 	shouldRemoveAllPolicyMemberships bool,
-	removePolicyStats bool, logger *slog.Logger,
+	removePolicyStats bool, logger *slog.Logger, dialect DialectHelper,
 ) error {
 	var err error
 
 	if shouldRemoveAllPolicyMemberships {
 		err = cleanupPolicyMembershipForPolicy(ctx, queryerContext, extContext, policyID)
 	} else {
-		err = cleanupPolicyMembershipOnPolicyUpdate(ctx, queryerContext, extContext, policyID, policyPlatform)
+		err = cleanupPolicyMembershipOnPolicyUpdate(ctx, queryerContext, extContext, policyID, policyPlatform, dialect)
 	}
 	if err != nil {
 		return err
@@ -1008,7 +1008,7 @@ func (ds *Datastore) PolicyQueriesForHost(ctx context.Context, host *fleet.Host)
 		// won't be receiving any policies targeted for specific platforms.
 		ds.logger.ErrorContext(ctx, "unrecognized platform", "hostID", host.ID, "platform", host.Platform)
 	}
-	const stmt = `
+	stmt := fmt.Sprintf(`
 		SELECT p.id, p.query
 		FROM policies p
 		WHERE
@@ -1016,7 +1016,7 @@ func (ds *Datastore) PolicyQueriesForHost(ctx context.Context, host *fleet.Host)
 			-- team_id == 0 are policies that apply to hosts in "No team"
 			-- team_id > 0 are policies that apply to hosts in teams
 			(team_id IS NULL OR team_id = COALESCE(?, 0)) AND
-			(platforms = '' OR FIND_IN_SET(?, platforms)) AND
+			(platforms = '' OR %s) AND
 			(
 				-- Policy has no include labels
 				NOT EXISTS (
@@ -1042,7 +1042,7 @@ func (ds *Datastore) PolicyQueriesForHost(ctx context.Context, host *fleet.Host)
 				WHERE pl.policy_id = p.id
 				AND pl.exclude = 1
 			)
-`
+`, ds.dialect.FindInSet("?", "platforms"))
 	var rows []struct {
 		ID    string `db:"id"`
 		Query string `db:"query"`
@@ -1630,6 +1630,7 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			args.shouldRemoveAllPolicyMemberships,
 			args.removePolicyStats,
 			ds.logger,
+			ds.dialect,
 		); err != nil {
 			return err
 		}
@@ -1826,7 +1827,7 @@ func cleanupConditionalAccessOnTeamChange(ctx context.Context, tx sqlx.ExtContex
 }
 
 func cleanupPolicyMembershipOnPolicyUpdate(
-	ctx context.Context, queryerContext sqlx.QueryerContext, db sqlx.ExecerContext, policyID uint, platforms string,
+	ctx context.Context, queryerContext sqlx.QueryerContext, db sqlx.ExecerContext, policyID uint, platforms string, dialect DialectHelper,
 ) error {
 	// Clean up hosts that don't match the platform criteria.
 	// Page through rows using the (policy_id, host_id) PK as a cursor so each SELECT+DELETE
@@ -1841,14 +1842,14 @@ func cleanupPolicyMembershipOnPolicyUpdate(
 		var afterHostID uint
 		for {
 			var batchHostIDs []uint
-			err := sqlx.SelectContext(ctx, queryerContext, &batchHostIDs, `
+			err := sqlx.SelectContext(ctx, queryerContext, &batchHostIDs, fmt.Sprintf(`
 				SELECT pm.host_id
 				FROM policy_membership pm
 				INNER JOIN hosts h ON pm.host_id = h.id
-				WHERE pm.policy_id = ? AND FIND_IN_SET(h.platform, ?) = 0
+				WHERE pm.policy_id = ? AND %s = 0
 				  AND pm.host_id > ?
 				ORDER BY pm.host_id ASC
-				LIMIT ?`, policyID, expandedPlatformsStr, afterHostID, policyMembershipDeleteBatchSize)
+				LIMIT ?`, dialect.FindInSet("h.platform", "?")), policyID, expandedPlatformsStr, afterHostID, policyMembershipDeleteBatchSize)
 			if err != nil {
 				return ctxerr.Wrap(ctx, err, "select batch of hosts to cleanup policy membership for platform")
 			}
@@ -2019,7 +2020,7 @@ func (ds *Datastore) CleanupPolicyMembership(ctx context.Context, now time.Time)
 	}
 
 	for _, pol := range pols {
-		if err := cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform); err != nil {
+		if err := cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform, ds.dialect); err != nil {
 			return ctxerr.Wrapf(ctx, err, "delete outdated hosts membership for policy: %d; platforms: %v", pol.ID, pol.Platform)
 		}
 	}

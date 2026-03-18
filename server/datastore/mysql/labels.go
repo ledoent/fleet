@@ -1277,10 +1277,11 @@ func (ds *Datastore) searchLabelsWithOmits(ctx context.Context, filter fleet.Tea
 				) AS host_count
 			FROM labels l
 			WHERE (
-				MATCH(l.name) AGAINST(? IN BOOLEAN MODE)
+				%s
 			)
 			AND l.id NOT IN (?)
 		`, ds.whereFilterHostsByTeams(filter, "h"),
+		ds.dialect.FullTextMatch([]string{"l.name"}, "?"),
 	)
 
 	sql, args, err := applyLabelTeamFilter(sqlStatement, filter, transformQuery(query), omit)
@@ -1408,9 +1409,10 @@ func (ds *Datastore) SearchLabels(ctx context.Context, filter fleet.TeamFilter, 
 					) AS host_count
 				FROM labels l
 			WHERE (
-				MATCH(name) AGAINST(? IN BOOLEAN MODE)
+				%s
 			)
 		`, ds.whereFilterHostsByTeams(filter, "h"),
+		ds.dialect.FullTextMatch([]string{"name"}, "?"),
 	)
 
 	sql, args, err := applyLabelTeamFilter(sql, filter, transformQuery(query))

@@ -1521,7 +1521,10 @@ func updateSoftwareUpdatedAt(
 	return nil
 }
 
-var dialect = goqu.Dialect("mysql")
+// goquMySQLDialect is a package-level fallback for standalone functions that
+// haven't been refactored to accept a goqu.DialectWrapper parameter yet.
+// TODO(pg): remove once all standalone functions accept a dialect parameter.
+var goquMySQLDialect = goqu.Dialect("mysql")
 
 // listSoftwareDB returns software installed on hosts. Use opts for pagination, filtering, and controlling
 // fields populated in the returned software.
@@ -1818,7 +1821,7 @@ func selectSoftwareSQL(opts fleet.SoftwareListOptions) (string, []interface{}, e
 	}
 
 	// Fallback to the original goqu-based query builder for complex cases
-	ds := dialect.
+	ds := goquMySQLDialect.
 		From(goqu.I("software").As("s")).
 		Select(
 			"s.id",
@@ -2022,7 +2025,7 @@ func selectSoftwareSQL(opts fleet.SoftwareListOptions) (string, []interface{}, e
 	ds = appendListOptionsToSelect(ds, opts.ListOptions)
 
 	// join on software_cve and cve_meta after apply pagination using the sub-query above
-	ds = dialect.From(ds.As("s")).
+	ds = goquMySQLDialect.From(ds.As("s")).
 		Select(
 			"s.id",
 			"s.name",
@@ -2295,12 +2298,12 @@ func (ds *Datastore) AllSoftwareIterator(
 	}
 
 	if query.NameMatch != "" {
-		conditionals = append(conditionals, "s.name REGEXP ?")
+		conditionals = append(conditionals, ds.dialect.RegexpMatch("s.name", "?"))
 		args = append(args, query.NameMatch)
 	}
 
 	if query.NameExclude != "" {
-		conditionals = append(conditionals, "s.name NOT REGEXP ?")
+		conditionals = append(conditionals, "NOT ("+ds.dialect.RegexpMatch("s.name", "?")+")")
 		args = append(args, query.NameExclude)
 	}
 
@@ -2485,7 +2488,7 @@ func (ds *Datastore) DeleteOrphanedSoftwareVulnerabilities(ctx context.Context) 
 }
 
 func (ds *Datastore) SoftwareByID(ctx context.Context, id uint, teamID *uint, includeCVEScores bool, tmFilter *fleet.TeamFilter) (*fleet.Software, error) {
-	q := dialect.From(goqu.I("software").As("s")).
+	q := ds.dialect.GoquDialect().From(goqu.I("software").As("s")).
 		Select(
 			"s.id",
 			"s.name",
@@ -3142,7 +3145,7 @@ func (ds *Datastore) ListSoftwareVulnerabilitiesByHostIDsSource(
 	}
 	var queryR []softwareVulnerabilityWithHostId
 
-	stmt := dialect.
+	stmt := ds.dialect.GoquDialect().
 		From(goqu.T("software_cve").As("sc")).
 		Join(
 			goqu.T("host_software").As("hs"),
@@ -3246,7 +3249,7 @@ func (ds *Datastore) ListCVEs(ctx context.Context, maxAge time.Duration) ([]flee
 	var result []fleet.CVEMeta
 
 	maxAgeDate := time.Now().Add(-1 * maxAge)
-	stmt := dialect.From(goqu.T("cve_meta")).
+	stmt := ds.dialect.GoquDialect().From(goqu.T("cve_meta")).
 		Select(
 			goqu.C("cve"),
 			goqu.C("cvss_score"),

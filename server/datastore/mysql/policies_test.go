@@ -7237,7 +7237,7 @@ func testBatchedPolicyMembershipCleanupOnPolicyUpdate(t *testing.T, ds *Datastor
 	require.Equal(t, 6, count)
 
 	// Run the platform-aware cleanup (simulates CleanupPolicyMembership cron).
-	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform)
+	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform, ds.dialect)
 	require.NoError(t, err)
 
 	// Only the windows host should remain.
@@ -7302,7 +7302,7 @@ func testBatchedPolicyMembershipCleanupOnPolicyUpdate(t *testing.T, ds *Datastor
 
 	// Run cleanupPolicyMembershipOnPolicyUpdate with no platform restriction so
 	// only the label-based branch fires.
-	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), lblPol.ID, "" /* no platform filter */)
+	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), lblPol.ID, "" /* no platform filter */, ds.dialect)
 	require.NoError(t, err)
 
 	// Only the host that belongs to the include label should remain.
