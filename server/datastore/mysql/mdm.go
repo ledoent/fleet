@@ -1779,9 +1779,9 @@ func (ds *Datastore) SetCommandForPendingSCEPRenewal(ctx context.Context, assocs
 
 	stmt := fmt.Sprintf(`
 		INSERT INTO nano_cert_auth_associations (id, sha256, renew_command_uuid) VALUES %s
-		ON DUPLICATE KEY UPDATE
+		`+ds.dialect.OnDuplicateKey("", `
 			renew_command_uuid = VALUES(renew_command_uuid)
-	`, strings.TrimSuffix(sb.String(), ","))
+	`), strings.TrimSuffix(sb.String(), ","))
 
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		res, err := tx.ExecContext(ctx, stmt, args...)
@@ -2738,13 +2738,13 @@ func (ds *Datastore) BulkUpsertMDMManagedCertificates(ctx context.Context, paylo
 			  serial
             )
             VALUES %s
-            ON DUPLICATE KEY UPDATE
+            `+ds.dialect.OnDuplicateKey("", `
               challenge_retrieved_at = VALUES(challenge_retrieved_at),
 			  not_valid_before = VALUES(not_valid_before),
 			  not_valid_after = VALUES(not_valid_after),
 			  type = VALUES(type),
 			  ca_name = VALUES(ca_name),
-			  serial = VALUES(serial)`,
+			  serial = VALUES(serial)`),
 			strings.TrimSuffix(valuePart, ","),
 		)
 

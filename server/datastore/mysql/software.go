@@ -2332,7 +2332,7 @@ func (ds *Datastore) UpsertSoftwareCPEs(ctx context.Context, cpes []fleet.Softwa
 
 	values := strings.TrimSuffix(strings.Repeat("(?,?),", len(cpes)), ",")
 	sql := fmt.Sprintf(
-		`INSERT INTO software_cpe (software_id, cpe) VALUES %s ON DUPLICATE KEY UPDATE cpe = VALUES(cpe)`,
+		`INSERT INTO software_cpe (software_id, cpe) VALUES %s `+ds.dialect.OnDuplicateKey("", `cpe = VALUES(cpe)`),
 		values,
 	)
 
@@ -2653,17 +2653,17 @@ func (ds *Datastore) SyncHostsSoftware(ctx context.Context, updatedAt time.Time)
       WHERE h.team_id IS NULL AND hs.software_id > ? AND hs.software_id <= ?
       GROUP BY hs.software_id`
 
-		insertStmt = `
+		valuesPart = `(?, ?, ?, ?, ?),`
+	)
+
+	insertStmt := `
       INSERT INTO ` + swapTable + `
         (software_id, hosts_count, team_id, global_stats, updated_at)
       VALUES
         %s
-      ON DUPLICATE KEY UPDATE
+      ` + ds.dialect.OnDuplicateKey("", `
         hosts_count = VALUES(hosts_count),
-        updated_at = VALUES(updated_at)`
-
-		valuesPart = `(?, ?, ?, ?, ?),`
-	)
+        updated_at = VALUES(updated_at)`)
 
 	// Create a fresh swap table to populate with new counts. If a previous run left a partial swap table, drop it first.
 	w := ds.writer(ctx)
@@ -2984,13 +2984,13 @@ func (ds *Datastore) InsertCVEMeta(ctx context.Context, cveMeta []fleet.CVEMeta)
 	query := `
 INSERT INTO cve_meta (cve, cvss_score, epss_probability, cisa_known_exploit, published, description)
 VALUES %s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
     cvss_score = VALUES(cvss_score),
     epss_probability = VALUES(epss_probability),
     cisa_known_exploit = VALUES(cisa_known_exploit),
     published = VALUES(published),
     description = VALUES(description)
-`
+`)
 
 	batchSize := 500
 	for i := 0; i < len(cveMeta); i += batchSize {
@@ -3032,11 +3032,11 @@ func (ds *Datastore) InsertSoftwareVulnerability(
 	stmt := `
 		INSERT INTO software_cve (cve, source, software_id, resolved_in_version)
 		VALUES (?,?,?,?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			updated_at=?
-	`
+	`)
 	args = append(args, vuln.CVE, source, vuln.SoftwareID, vuln.ResolvedInVersion, time.Now().UTC())
 
 	res, err := ds.writer(ctx).ExecContext(ctx, stmt, args...)
@@ -3109,11 +3109,11 @@ func (ds *Datastore) InsertSoftwareVulnerabilities(
 		stmt := fmt.Sprintf(`
 			INSERT INTO software_cve (cve, source, software_id, resolved_in_version)
 			VALUES %s
-			ON DUPLICATE KEY UPDATE
+			`+ds.dialect.OnDuplicateKey("", `
 				source = VALUES(source),
 				resolved_in_version = VALUES(resolved_in_version),
 				updated_at = ?
-		`, values)
+		`), values)
 
 		var args []any
 		for _, v := range batch {
@@ -6420,7 +6420,7 @@ func (ds *Datastore) CreateIntermediateInstallFailureRecord(ctx context.Context,
 
 	// Create or update a record with the failure details
 	// Use INSERT ... ON DUPLICATE KEY UPDATE to make this idempotent
-	const insertStmt = `
+	insertStmt := `
 		INSERT INTO host_software_installs (
 			execution_id,
 			host_id,
@@ -6438,14 +6438,14 @@ func (ds *Datastore) CreateIntermediateInstallFailureRecord(ctx context.Context,
 			post_install_script_exit_code,
 			post_install_script_output
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("", `
 			install_script_exit_code = VALUES(install_script_exit_code),
 			install_script_output = VALUES(install_script_output),
 			pre_install_query_output = VALUES(pre_install_query_output),
 			post_install_script_exit_code = VALUES(post_install_script_exit_code),
 			post_install_script_output = VALUES(post_install_script_output),
 			updated_at = CURRENT_TIMESTAMP(6)
-	`
+	`)
 
 	truncateOutput := func(output *string) *string {
 		if output != nil {

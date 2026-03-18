@@ -734,17 +734,17 @@ WHERE
 }
 
 func (ds *Datastore) BatchSetInHouseAppsInstallers(ctx context.Context, tmID *uint, installers []*fleet.UploadSoftwareInstallerPayload) error {
-	const upsertSoftwareTitles = `
+	upsertSoftwareTitles := `
 INSERT INTO software_titles
   (name, source, extension_for, bundle_identifier)
 VALUES
   %s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
   name = VALUES(name),
   source = VALUES(source),
   extension_for = VALUES(extension_for),
   bundle_identifier = VALUES(bundle_identifier)
-`
+`)
 
 	const loadSoftwareTitles = `
 SELECT
@@ -916,7 +916,7 @@ WHERE
 	title_id = ?
 `
 
-	const insertNewOrEditedInstaller = `
+	insertNewOrEditedInstaller := `
 INSERT INTO in_house_apps (
 	title_id,
 	team_id,
@@ -931,7 +931,7 @@ INSERT INTO in_house_apps (
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
   filename = VALUES(filename),
   version = VALUES(version),
   storage_id = VALUES(storage_id),
@@ -939,7 +939,7 @@ ON DUPLICATE KEY UPDATE
   bundle_identifier = VALUES(bundle_identifier),
   self_service = VALUES(self_service),
   url = VALUES(url)
-`
+`)
 
 	const loadInHouseInstallerID = `
 SELECT
@@ -968,7 +968,7 @@ WHERE
 	in_house_app_id = ?
 `
 
-	const upsertInHouseLabels = `
+	upsertInHouseLabels := `
 INSERT INTO
 	in_house_app_labels (
 		in_house_app_id,
@@ -978,10 +978,10 @@ INSERT INTO
 	)
 VALUES
 	%s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("id", `
 	exclude = VALUES(exclude),
 	require_all = VALUES(require_all)
-`
+`)
 
 	const loadExistingInHouseLabels = `
 SELECT

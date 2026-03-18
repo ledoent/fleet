@@ -296,11 +296,11 @@ func (ds *Datastore) InsertOSVulnerabilities(ctx context.Context, vulnerabilitie
 		stmt := fmt.Sprintf(`
 			INSERT INTO operating_system_vulnerabilities (operating_system_id, cve, source, resolved_in_version)
 			VALUES %s
-			ON DUPLICATE KEY UPDATE
+			`+ds.dialect.OnDuplicateKey("", `
 				source = VALUES(source),
 				resolved_in_version = VALUES(resolved_in_version),
 				updated_at = NOW()
-		`, values)
+		`), values)
 
 		var args []any
 		for _, v := range batch {
@@ -335,12 +335,12 @@ func (ds *Datastore) InsertOSVulnerability(ctx context.Context, v fleet.OSVulner
 			source,
 			resolved_in_version
 		) VALUES (?,?,?,?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("", `
 			operating_system_id = VALUES(operating_system_id),
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			updated_at = NOW()
-	`
+	`)
 
 	args = append(args, v.OSID, v.CVE, s, v.ResolvedInVersion)
 
@@ -605,12 +605,12 @@ func (ds *Datastore) refreshOSVersionVulnerabilities(ctx context.Context) error 
 		JOIN software_cve sc ON sc.software_id = khc.software_id
 		WHERE khc.hosts_count > 0
 		GROUP BY khc.team_id, khc.os_version_id, sc.cve
-		ON DUPLICATE KEY UPDATE
+		`+ds.dialect.OnDuplicateKey("", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			created_at = VALUES(created_at),
 			updated_at = VALUES(updated_at)
-	`, updatedAt)
+	`), updatedAt)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "refresh per-team OS version vulnerabilities")
 	}
@@ -631,12 +631,12 @@ func (ds *Datastore) refreshOSVersionVulnerabilities(ctx context.Context) error 
 		JOIN software_cve sc ON sc.software_id = khc.software_id
 		WHERE khc.hosts_count > 0
 		GROUP BY khc.os_version_id, sc.cve
-		ON DUPLICATE KEY UPDATE
+		`+ds.dialect.OnDuplicateKey("", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			created_at = VALUES(created_at),
 			updated_at = VALUES(updated_at)
-	`, updatedAt)
+	`), updatedAt)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "refresh all-teams OS version vulnerabilities")
 	}
