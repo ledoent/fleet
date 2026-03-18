@@ -6323,12 +6323,12 @@ func (ds *Datastore) ReplaceMDMConfigAssets(ctx context.Context, assets []fleet.
 func (ds *Datastore) ListIOSAndIPadOSToRefetch(ctx context.Context, interval time.Duration) (devices []fleet.AppleDevicesToRefetch,
 	err error,
 ) {
-	hostsStmt := `
-SELECT 
-	h.id as host_id, 
-	h.uuid as uuid, 
+	hostsStmt := fmt.Sprintf(`
+SELECT
+	h.id as host_id,
+	h.uuid as uuid,
 	hmdm.installed_from_dep,
-	JSON_ARRAYAGG(hmc.command_type) as commands_already_sent
+	%s as commands_already_sent`, ds.dialect.JSONAgg("hmc.command_type")) + `
 FROM hosts h
 	INNER JOIN host_mdm hmdm ON hmdm.host_id = h.id
 	INNER JOIN nano_enrollments ne ON ne.id = h.uuid
@@ -7391,7 +7391,7 @@ func (ds *Datastore) GetHostsForRecoveryLockAction(ctx context.Context) ([]strin
 	// - Have no recovery lock password record OR have a password with NULL status (command not yet enqueued)
 	// Note: hosts with status pending, verified, or failed are NOT included
 	// Note: hosts with operation_type='remove' are handled by RestoreRecoveryLockForReenabledHosts
-	const stmt = `
+	stmt := fmt.Sprintf(`
 		SELECT h.uuid
 		FROM hosts h
 		JOIN nano_enrollments ne ON ne.device_id = h.uuid
@@ -7400,20 +7400,21 @@ func (ds *Datastore) GetHostsForRecoveryLockAction(ctx context.Context) ([]strin
 		CROSS JOIN app_config_json ac
 		LEFT JOIN host_recovery_key_passwords rkp ON rkp.host_uuid = h.uuid AND rkp.deleted = 0
 		WHERE h.platform = 'darwin'
-		  AND h.cpu_type LIKE '%arm%'
+		  AND h.cpu_type LIKE '%%arm%%'
 		  AND ne.enabled = 1
 		  AND ne.type IN ('Device', 'User Enrollment (Device)')
 		  AND hm.enrolled = 1
 		  AND (
 		      -- Team hosts: check team config
-		      (h.team_id IS NOT NULL AND JSON_EXTRACT(t.config, '$.mdm.enable_recovery_lock_password') = true)
+		      (h.team_id IS NOT NULL AND %s = true)
 		      OR
 		      -- No-team hosts: check appconfig
-		      (h.team_id IS NULL AND JSON_EXTRACT(ac.json_value, '$.mdm.enable_recovery_lock_password') = true)
+		      (h.team_id IS NULL AND %s = true)
 		  )
 		  AND (rkp.host_uuid IS NULL OR rkp.status IS NULL)
 		LIMIT 500
-	`
+	`, ds.dialect.JSONExtract("t.config", "$.mdm.enable_recovery_lock_password"),
+		ds.dialect.JSONExtract("ac.json_value", "$.mdm.enable_recovery_lock_password"))
 
 	var hostUUIDs []string
 	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &hostUUIDs, stmt); err != nil {
@@ -7452,11 +7453,13 @@ func (ds *Datastore) RestoreRecoveryLockForReenabledHosts(ctx context.Context) (
 		  AND rkp.operation_type = '%s'
 		  AND (rkp.status = '%s' OR rkp.status IS NULL)
 		  AND (
-		      (h.team_id IS NOT NULL AND JSON_EXTRACT(t.config, '$.mdm.enable_recovery_lock_password') = true)
+		      (h.team_id IS NOT NULL AND %s = true)
 		      OR
-		      (h.team_id IS NULL AND JSON_EXTRACT(ac.json_value, '$.mdm.enable_recovery_lock_password') = true)
+		      (h.team_id IS NULL AND %s = true)
 		  )
-	`, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerified, fleet.MDMOperationTypeRemove, fleet.MDMDeliveryPending)
+	`, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerified, fleet.MDMOperationTypeRemove, fleet.MDMDeliveryPending,
+		ds.dialect.JSONExtract("t.config", "$.mdm.enable_recovery_lock_password"),
+		ds.dialect.JSONExtract("ac.json_value", "$.mdm.enable_recovery_lock_password"))
 
 	result, err := ds.writer(ctx).ExecContext(ctx, stmt)
 	if err != nil {
@@ -7553,13 +7556,15 @@ func (ds *Datastore) ClaimHostsForRecoveryLockClear(ctx context.Context) ([]stri
 		      (rkp.operation_type = '%s' AND rkp.status IS NULL)
 		  )
 		  AND (
-		      (h.team_id IS NOT NULL AND JSON_EXTRACT(t.config, '$.mdm.enable_recovery_lock_password') = false)
+		      (h.team_id IS NOT NULL AND %s = false)
 		      OR
-		      (h.team_id IS NULL AND JSON_EXTRACT(ac.json_value, '$.mdm.enable_recovery_lock_password') = false)
+		      (h.team_id IS NULL AND %s = false)
 		  )
 		LIMIT 500
 		FOR UPDATE
-	`, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerified, fleet.MDMOperationTypeRemove)
+	`, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerified, fleet.MDMOperationTypeRemove,
+		ds.dialect.JSONExtract("t.config", "$.mdm.enable_recovery_lock_password"),
+		ds.dialect.JSONExtract("ac.json_value", "$.mdm.enable_recovery_lock_password"))
 
 	// Update all claimed hosts to remove/pending
 	updateStmt := fmt.Sprintf(`
