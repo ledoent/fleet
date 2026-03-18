@@ -58,10 +58,11 @@ type Datastore struct {
 	replica fleet.DBReader // so it cannot be used to perform writes
 	primary *sqlx.DB
 
-	logger *slog.Logger
-	clock  clock.Clock
-	config config.MysqlConfig
-	pusher nano_push.Pusher
+	logger  *slog.Logger
+	clock   clock.Clock
+	config  config.MysqlConfig
+	dialect DialectHelper
+	pusher  nano_push.Pusher
 	android.Datastore
 
 	// nil if no read replica
@@ -285,6 +286,7 @@ func NewDatastore(conns *common_mysql.DBConnections, cfg config.MysqlConfig, c c
 		logger:              conns.Options.Logger,
 		clock:               c,
 		config:              cfg,
+		dialect:             mysqlDialect{},
 		readReplicaConfig:   conns.Options.ReplicaConfig,
 		writeCh:             make(chan itemToWrite),
 		stmtCache:           make(map[string]*sqlx.Stmt),
@@ -436,6 +438,10 @@ func fromCommonMysqlConfig(conf *common_mysql.MysqlConfig) *config.MysqlConfig {
 }
 
 func checkAndModifyConfig(conf *config.MysqlConfig) error {
+	if conf.Driver != "" && conf.Driver != "mysql" {
+		return fmt.Errorf("unsupported database driver %q: only \"mysql\" is supported in this version", conf.Driver)
+	}
+
 	if conf.PasswordPath != "" && conf.Password != "" {
 		return errors.New("A MySQL password and a MySQL password file were provided - please specify only one")
 	}

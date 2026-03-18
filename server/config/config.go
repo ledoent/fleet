@@ -39,6 +39,9 @@ const (
 
 // MysqlConfig defines configs related to MySQL
 type MysqlConfig struct {
+	// Driver selects the database driver. Only "mysql" is valid in Phase 1.
+	// Future values: "postgres" (Phase 4+).
+	Driver           string `yaml:"driver"`
 	Protocol         string `yaml:"protocol"`
 	Address          string `yaml:"address"`
 	Username         string `yaml:"username"`
