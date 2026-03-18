@@ -1742,11 +1742,11 @@ func upsertHostDEPAssignmentsDB(ctx context.Context, tx sqlx.ExtContext, hosts [
 	stmt := `
 		INSERT INTO host_dep_assignments (host_id, abm_token_id, mdm_migration_deadline)
 		VALUES %s
-		` + mysqlDialect{}.OnDuplicateKey("", `
+		ON DUPLICATE KEY UPDATE
 		  added_at = CURRENT_TIMESTAMP,
 		  deleted_at = NULL,
 		  abm_token_id = VALUES(abm_token_id),
-		  mdm_migration_deadline = VALUES(mdm_migration_deadline)`)
+		  mdm_migration_deadline = VALUES(mdm_migration_deadline)`
 
 	args := []interface{}{}
 	values := []string{}
@@ -1777,7 +1777,7 @@ func upsertHostDisplayNames(ctx context.Context, tx sqlx.ExtContext, hosts ...fl
 
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO host_display_names (host_id, display_name) VALUES %s
-			`+mysqlDialect{}.OnDuplicateKey("", `display_name = VALUES(display_name)`), strings.Join(parts, ",")),
+			ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`, strings.Join(parts, ",")),
 		args...)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert host display names")
@@ -1802,7 +1802,7 @@ func upsertMDMAppleHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, appCfg
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO mobile_device_management_solutions (name, server_url) VALUES (?, ?)
-		`+mysqlDialect{}.OnDuplicateKey("", `server_url = VALUES(server_url)`),
+		ON DUPLICATE KEY UPDATE server_url = VALUES(server_url)`,
 		fleet.WellKnownMDMFleet, serverURL)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert mdm solution")
@@ -1827,7 +1827,7 @@ func upsertMDMAppleHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, appCfg
 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO host_mdm (enrolled, server_url, installed_from_dep, mdm_id, is_server, host_id, is_personal_enrollment) VALUES %s
-		`+mysqlDialect{}.OnDuplicateKey("", `enrolled = VALUES(enrolled)`), strings.Join(parts, ",")), args...)
+		ON DUPLICATE KEY UPDATE enrolled = VALUES(enrolled)`, strings.Join(parts, ",")), args...)
 
 	return ctxerr.Wrap(ctx, err, "upsert host mdm info")
 }
@@ -1892,7 +1892,7 @@ func upsertMDMAppleHostLabelMembershipDB(ctx context.Context, tx sqlx.ExtContext
 	}
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO label_membership (host_id, label_id) VALUES %s
-			`+mysqlDialect{}.OnDuplicateKey("", `host_id = host_id`), strings.Join(parts, ",")), args...)
+			ON DUPLICATE KEY UPDATE host_id = host_id`, strings.Join(parts, ",")), args...)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert label membership")
 	}
@@ -5446,11 +5446,11 @@ func batchSetDeclarationLabelAssociationsDB(ctx context.Context, tx sqlx.ExtCont
               (apple_declaration_uuid, label_id, label_name, exclude, require_all)
           VALUES
               %s
-          ` + mysqlDialect{}.OnDuplicateKey("", `
+          ON DUPLICATE KEY UPDATE
               label_id = VALUES(label_id),
               exclude = VALUES(exclude),
 			  require_all = VALUES(require_all)
-	`)
+	`
 
 	selectStmt := `
 		SELECT apple_declaration_uuid as profile_uuid, label_name, label_id, exclude, require_all FROM mdm_declaration_labels
@@ -5739,12 +5739,12 @@ func mdmAppleBatchSetPendingHostDeclarationsDB(
 	    (host_uuid, status, operation_type, token, secrets_updated_at, declaration_uuid, declaration_identifier, declaration_name)
 	  VALUES
 	    %s
-	  ` + mysqlDialect{}.OnDuplicateKey("", `
+	  ON DUPLICATE KEY UPDATE
 	    status = VALUES(status),
 	    operation_type = VALUES(operation_type),
 	    token = VALUES(token),
 	    secrets_updated_at = VALUES(secrets_updated_at)
-	  `)
+	  `
 
 	profilesToInsert := make(map[string]*fleet.MDMAppleHostDeclaration)
 
@@ -7130,8 +7130,8 @@ func associateHostMDMIdPAccountDB(ctx context.Context, tx sqlx.ExtContext, hostU
 	stmt := `
 INSERT INTO host_mdm_idp_accounts (host_uuid, account_uuid)
 VALUES (?, ?)
-` + mysqlDialect{}.OnDuplicateKey("", `
-	account_uuid = VALUES(account_uuid)`)
+ON DUPLICATE KEY UPDATE
+	account_uuid = VALUES(account_uuid)`
 
 	_, err := tx.ExecContext(ctx, stmt, hostUUID, acctUUID)
 	if err != nil {
