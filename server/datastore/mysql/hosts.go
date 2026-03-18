@@ -358,7 +358,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, teamID *uint, hostID 
 
 // loadhostPacksStatsDB will load all the "2017 pack" stats for the given host. The scheduled
 // queries that haven't run yet are returned with zero values.
-func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, hostPlatform string, dh DialectHelper) ([]fleet.PackStats, error) {
+func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, hostPlatform string, dialect DialectHelper) ([]fleet.PackStats, error) {
 	packs, err := listPacksForHost(ctx, db, hid)
 	if err != nil {
 		return nil, ctxerr.Wrapf(ctx, err, "list packs for host: %d", hid)
@@ -372,7 +372,7 @@ func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, 
 		packIDs[i] = packs[i].ID
 		packTypes[packs[i].ID] = packs[i].Type
 	}
-	ds := dh.GoquDialect().From(goqu.I("scheduled_queries").As("sq")).Select(
+	ds := dialect.GoquDialect().From(goqu.I("scheduled_queries").As("sq")).Select(
 		goqu.I("sq.name").As("scheduled_query_name"),
 		goqu.I("sq.id").As("scheduled_query_id"),
 		goqu.I("sq.query_name").As("query_name"),
@@ -389,7 +389,7 @@ func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, 
 		goqu.COALESCE(goqu.I("sqs.user_time"), 0).As("user_time"),
 		goqu.COALESCE(goqu.I("sqs.wall_time"), 0).As("wall_time"),
 	).Join(
-		dh.GoquDialect().From("packs").As("p").Select(
+		dialect.GoquDialect().From("packs").As("p").Select(
 			goqu.I("id"),
 			goqu.I("name"),
 		).Where(goqu.I("id").In(packIDs)),
@@ -422,7 +422,7 @@ func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, 
 			goqu.I("sq.platform").IsNull(),
 			// scheduled_queries.platform can be a comma-separated list of
 			// platforms, e.g. "darwin,windows".
-			goqu.L(dh.FindInSet("?", "sq.platform"), fleet.PlatformFromHost(hostPlatform)).Neq(0),
+			goqu.L(dialect.FindInSet("?", "sq.platform"), fleet.PlatformFromHost(hostPlatform)).Neq(0),
 		),
 	)
 	sql, args, err := ds.ToSQL()
