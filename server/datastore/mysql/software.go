@@ -1002,7 +1002,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				// Insert software titles
 				const numberOfArgsPerSoftwareTitles = 7
 				titlesValues := strings.TrimSuffix(strings.Repeat("(?,?,?,?,?,?,?),", len(uniqueTitlesToInsert)), ",")
-				titlesStmt := fmt.Sprintf("INSERT IGNORE INTO software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES %s", titlesValues)
+				titlesStmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+" software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES %s"+ds.dialect.OnConflictDoNothing(""), titlesValues)
 				titlesArgs := make([]any, 0, len(uniqueTitlesToInsert)*numberOfArgsPerSoftwareTitles)
 
 				for _, title := range uniqueTitlesToInsert {
@@ -1155,7 +1155,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				strings.Repeat("(?,?,?,?,?,?,?,?,?,?,?,?,?),", len(batchKeys)), ",",
 			)
 			stmt := fmt.Sprintf(
-				`INSERT IGNORE INTO software (
+				ds.dialect.InsertIgnoreInto()+` software (
 					name,
 					version,
 					source,
@@ -1169,7 +1169,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 					checksum,
 					application_id,
 					upgrade_code
-				) VALUES %s`,
+				) VALUES %s`+ds.dialect.OnConflictDoNothing(""),
 				values,
 			)
 
@@ -1267,7 +1267,7 @@ func (ds *Datastore) linkSoftwareToHost(
 	// INSERT IGNORE handles duplicate key errors for idempotency.
 	if len(insertsHostSoftware) > 0 {
 		values := strings.TrimSuffix(strings.Repeat("(?,?,?),", len(insertsHostSoftware)/3), ",")
-		stmt := fmt.Sprintf(`INSERT IGNORE INTO host_software (host_id, software_id, last_opened_at) VALUES %s`, values)
+		stmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+` host_software (host_id, software_id, last_opened_at) VALUES %s`+ds.dialect.OnConflictDoNothing(""), values)
 		if _, err := tx.ExecContext(ctx, stmt, insertsHostSoftware...); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "insert host software")
 		}

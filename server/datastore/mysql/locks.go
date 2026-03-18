@@ -37,7 +37,7 @@ func (ds *Datastore) Lock(ctx context.Context, name string, owner string, expira
 
 func (ds *Datastore) createLock(ctx context.Context, name string, owner string, expiration time.Duration) (sql.Result, error) {
 	return ds.writer(ctx).ExecContext(ctx,
-		`INSERT IGNORE INTO locks (name, owner, expires_at) VALUES (?, ?, ?)`,
+		ds.dialect.InsertIgnoreInto()+` locks (name, owner, expires_at) VALUES (?, ?, ?)`+ds.dialect.OnConflictDoNothing(""),
 		name, owner, time.Now().Add(expiration),
 	)
 }

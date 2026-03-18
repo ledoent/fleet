@@ -282,8 +282,8 @@ func (ds *Datastore) AsyncBatchSaveHostsScheduledQueryStats(ctx context.Context,
 	// in SaveHostPackStats (in hosts.go) - that is, the behaviour per host must
 	// be the same.
 
-	stmt := `
-		INSERT IGNORE INTO scheduled_query_stats (
+	stmt := ds.dialect.InsertIgnoreInto() + `
+		 scheduled_query_stats (
 			scheduled_query_id,
 			host_id,
 			average_memory,

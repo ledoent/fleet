@@ -2409,8 +2409,7 @@ WHERE
 	software_category_id NOT IN (?)
 `
 
-	const upsertInstallerCategories = `
-INSERT IGNORE INTO
+	const upsertInstallerCategoriesSuffix = `
 	software_installer_software_categories (
 		software_installer_id,
 		software_category_id
@@ -3022,7 +3021,7 @@ WHERE
 					upsertCategoriesArgs = append(upsertCategoriesArgs, installerID, catID)
 				}
 				upsertCategoriesValues := strings.TrimSuffix(strings.Repeat("(?,?),", len(installer.CategoryIDs)), ",")
-				_, err = tx.ExecContext(ctx, fmt.Sprintf(upsertInstallerCategories, upsertCategoriesValues), upsertCategoriesArgs...)
+				_, err = tx.ExecContext(ctx, ds.dialect.InsertIgnoreInto()+fmt.Sprintf(upsertInstallerCategoriesSuffix, upsertCategoriesValues)+ds.dialect.OnConflictDoNothing(""), upsertCategoriesArgs...)
 				if err != nil {
 					return ctxerr.Wrapf(ctx, err, "insert new/edited categories for installer with name %q", installer.Filename)
 				}
