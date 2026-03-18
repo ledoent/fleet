@@ -1081,7 +1081,7 @@ SELECT
 	s.title_id,
 	s.id, s.version,
 	%s -- placeholder for optional host_counts
-	CONCAT('[', GROUP_CONCAT(JSON_QUOTE(scve.cve) SEPARATOR ','), ']') as vulnerabilities
+	CONCAT('[', `+ds.dialect.GroupConcat("JSON_QUOTE(scve.cve)", ",")+`, ']') as vulnerabilities
 FROM software s
 LEFT JOIN software_host_counts shc ON shc.software_id = s.id AND %s
 LEFT JOIN software_cve scve ON shc.software_id = scve.software_id

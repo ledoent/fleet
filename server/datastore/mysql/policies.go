@@ -2512,7 +2512,7 @@ func (ds *Datastore) GetTeamHostsPolicyMemberships(
 	policyIDs []uint,
 	hostID *uint,
 ) ([]fleet.HostPolicyMembershipData, error) {
-	query := `
+	query := fmt.Sprintf(`
 	SELECT
 		COALESCE(sh.email, '') AS email,
 		COALESCE(pm.passing, 1) AS passing,
@@ -2522,11 +2522,11 @@ func (ds *Datastore) GetTeamHostsPolicyMemberships(
 		h.hardware_serial AS host_hardware_serial
 	FROM hosts h
 	LEFT JOIN (
-		SELECT host_id, 0 AS passing, GROUP_CONCAT(policy_id) AS failing_policy_ids
+		SELECT host_id, 0 AS passing, %s AS failing_policy_ids
 		FROM policy_membership
 		WHERE policy_id IN (?) AND passes = 0
 		GROUP BY host_id
-	) pm ON h.id = pm.host_id
+	) pm ON h.id = pm.host_id`, ds.dialect.GroupConcat("policy_id", ",")) + `
 	LEFT JOIN (
 		SELECT host_id, email
 		FROM (

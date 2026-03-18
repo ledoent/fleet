@@ -57,12 +57,14 @@ func (ds *Datastore) ListVulnsByOsNameAndVersion(ctx context.Context, name, vers
 	}
 
 	// Query with CVSS metadata
-	baseCTE := `
+	gcDistinctResolved := ds.dialect.GroupConcat("DISTINCT v.resolved_in_version", ",")
+	gcDistinctResolvedOsvv := ds.dialect.GroupConcat("DISTINCT osvv.resolved_in_version", ",")
+	baseCTE := fmt.Sprintf(`
 	WITH all_vulns AS (
 		SELECT
 			v.cve,
 			MIN(v.created_at) created_at,
-			GROUP_CONCAT(DISTINCT v.resolved_in_version SEPARATOR ',') resolved_in_version
+			%s resolved_in_version
 		FROM operating_system_vulnerabilities v
 		JOIN operating_systems os ON os.id = v.operating_system_id
 			AND os.name = ? AND os.version = ?
@@ -73,14 +75,14 @@ func (ds *Datastore) ListVulnsByOsNameAndVersion(ctx context.Context, name, vers
 		SELECT DISTINCT
 			osvv.cve,
 			MIN(osvv.created_at) created_at,
-			GROUP_CONCAT(DISTINCT osvv.resolved_in_version SEPARATOR ',') resolved_in_version
+			%s resolved_in_version
 		FROM
 			operating_system_version_vulnerabilities osvv
 			JOIN operating_systems os ON os.os_version_id = osvv.os_version_id
 		WHERE
 			os.name = ?
 			AND os.version = ?
-			` + linuxTeamFilter + `
+			`, gcDistinctResolved, gcDistinctResolvedOsvv) + linuxTeamFilter + `
 		GROUP BY osvv.cve
 	)
 	`

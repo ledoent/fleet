@@ -1278,11 +1278,11 @@ func (ds *Datastore) applyHostFilters(
 	deviceMappingJoin := fmt.Sprintf(`LEFT JOIN (
 		SELECT
 			host_id,
-			CONCAT('[', GROUP_CONCAT(JSON_OBJECT('email', email, 'source', %s)), ']') AS device_mapping
+			CONCAT('[', %s, ']') AS device_mapping
 		FROM
 			host_emails
 		GROUP BY
-			host_id) dm ON dm.host_id = h.id`, deviceMappingTranslateSourceColumn(""))
+			host_id) dm ON dm.host_id = h.id`, ds.dialect.GroupConcat(fmt.Sprintf("JSON_OBJECT('email', email, 'source', %s)", deviceMappingTranslateSourceColumn("")), ","))
 	if !opt.DeviceMapping {
 		deviceMappingJoin = ""
 	}

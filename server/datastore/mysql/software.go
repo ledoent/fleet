@@ -5772,6 +5772,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 		}
 
 		var replacements []any
+		gc := ds.dialect.GroupConcat
 		if len(softwareTitleIDs) > 0 {
 			replacements = append(replacements,
 				// For software installers
@@ -5787,12 +5788,12 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 					software_installers.filename AS package_name,
 					software_installers.version AS package_version,
 					software_installers.platform as package_platform,
-					GROUP_CONCAT(software.id) AS software_id_list,
-					GROUP_CONCAT(software.source) AS software_source_list,
-					GROUP_CONCAT(software.extension_for) AS software_extension_for_list,
-					GROUP_CONCAT(software.upgrade_code) AS software_upgrade_code_list,
-					GROUP_CONCAT(software.version) AS version_list,
-					GROUP_CONCAT(software.bundle_identifier) AS bundle_identifier_list,
+					`+gc("software.id", ",")+` AS software_id_list,
+					`+gc("software.source", ",")+` AS software_source_list,
+					`+gc("software.extension_for", ",")+` AS software_extension_for_list,
+					`+gc("software.upgrade_code", ",")+` AS software_upgrade_code_list,
+					`+gc("software.version", ",")+` AS version_list,
+					`+gc("software.bundle_identifier", ",")+` AS bundle_identifier_list,
 					NULL AS vpp_app_adam_id_list,
 					NULL AS vpp_app_version_list,
 					NULL AS vpp_app_platform_list,
@@ -5838,11 +5839,11 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 					NULL AS software_upgrade_code_list,
 					NULL AS version_list,
 					NULL AS bundle_identifier_list,
-					GROUP_CONCAT(vpp_apps.adam_id) AS vpp_app_adam_id_list,
-					GROUP_CONCAT(vpp_apps.latest_version) AS vpp_app_version_list,
-					GROUP_CONCAT(vpp_apps.platform) as vpp_app_platform_list,
-					GROUP_CONCAT(vpp_apps.icon_url) AS vpp_app_icon_url_list,
-					GROUP_CONCAT(vpp_apps_teams.self_service) AS vpp_app_self_service_list,
+					`+gc("vpp_apps.adam_id", ",")+` AS vpp_app_adam_id_list,
+					`+gc("vpp_apps.latest_version", ",")+` AS vpp_app_version_list,
+					`+gc("vpp_apps.platform", ",")+` as vpp_app_platform_list,
+					`+gc("vpp_apps.icon_url", ",")+` AS vpp_app_icon_url_list,
+					`+gc("vpp_apps_teams.self_service", ",")+` AS vpp_app_self_service_list,
 					NULL AS in_house_app_id_list,
 					NULL AS in_house_app_name_list,
 					NULL AS in_house_app_version_list,
@@ -5884,11 +5885,11 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 					NULL as vpp_app_platform_list,
 					NULL AS vpp_app_icon_url_list,
 					NULL AS vpp_app_self_service_list,
-					GROUP_CONCAT(in_house_apps.id) AS in_house_app_id_list,
-					GROUP_CONCAT(in_house_apps.filename) AS in_house_app_name_list,
-					GROUP_CONCAT(in_house_apps.version) AS in_house_app_version_list,
-					GROUP_CONCAT(in_house_apps.platform) as in_house_app_platform_list,
-					GROUP_CONCAT(in_house_apps.self_service) as in_house_app_self_service_list
+					`+gc("in_house_apps.id", ",")+` AS in_house_app_id_list,
+					`+gc("in_house_apps.filename", ",")+` AS in_house_app_name_list,
+					`+gc("in_house_apps.version", ",")+` AS in_house_app_version_list,
+					`+gc("in_house_apps.platform", ",")+` as in_house_app_platform_list,
+					`+gc("in_house_apps.self_service", ",")+` as in_house_app_self_service_list
 			`, `
 				GROUP BY
 					software_titles.id,
