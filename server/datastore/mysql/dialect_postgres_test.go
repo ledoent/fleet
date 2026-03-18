@@ -40,7 +40,7 @@ func TestPostgresDialectSQL(t *testing.T) {
 	})
 
 	t.Run("JSONExtract_nested", func(t *testing.T) {
-		assert.Equal(t, "t.config->'mdm.enable_recovery_lock_password'", d.JSONExtract("t.config", "$.mdm.enable_recovery_lock_password"))
+		assert.Equal(t, "t.config->'mdm'->'enable_recovery_lock_password'", d.JSONExtract("t.config", "$.mdm.enable_recovery_lock_password"))
 	})
 
 	t.Run("JSONUnquoteExtract", func(t *testing.T) {
@@ -93,20 +93,23 @@ func TestTranslateValuesToExcluded(t *testing.T) {
 	}
 }
 
-func TestStripDollarDotPrefix(t *testing.T) {
+func TestMysqlPathToPGChain(t *testing.T) {
 	tests := []struct {
-		input    string
-		expected string
+		col, path   string
+		extractText bool
+		expected    string
 	}{
-		{"$.path", "path"},
-		{"$.mdm.enable_recovery_lock_password", "mdm.enable_recovery_lock_password"},
-		{"$.\"quoted\"", "quoted"},
-		{"path", "path"},
+		{"col", "$.path", false, "col->'path'"},
+		{"col", "$.path", true, "col->>'path'"},
+		{"t.config", "$.mdm.enable_recovery_lock_password", false, "t.config->'mdm'->'enable_recovery_lock_password'"},
+		{"t.config", "$.mdm.enable_recovery_lock_password", true, "t.config->'mdm'->>'enable_recovery_lock_password'"},
+		{"col", "$.\"quoted\"", false, "col->'quoted'"},
+		{"col", "path", false, "col->'path'"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			assert.Equal(t, tt.expected, stripDollarDotPrefix(tt.input))
+		t.Run(tt.path, func(t *testing.T) {
+			assert.Equal(t, tt.expected, mysqlPathToPGChain(tt.col, tt.path, tt.extractText))
 		})
 	}
 }

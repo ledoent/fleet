@@ -3,16 +3,13 @@
 package mysql
 
 import (
-	"database/sql/driver"
-	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"strings"
-	"syscall"
 
 	"github.com/doug-martin/goqu/v9"
 	_ "github.com/doug-martin/goqu/v9/dialect/postgres" // register postgres dialect
+	pg "github.com/fleetdm/fleet/v4/server/platform/postgres"
 )
 
 // postgresDialect implements DialectHelper for PostgreSQL.
@@ -61,28 +58,53 @@ func (postgresDialect) JSONAgg(expr string) string {
 	return fmt.Sprintf("json_agg(%s)", expr)
 }
 
-// stripDollarDotPrefix converts MySQL JSON path notation to PostgreSQL key names.
+// mysqlPathToPGChain converts a MySQL JSON path ($.key1.key2) to a chain of
+// PostgreSQL -> operators: col->'key1'->'key2'.
+// For a single-level path like $.path, it returns col->'path'.
+// The final operator is determined by the extract parameter:
 //
-//	$.path      → path
-//	$."quoted"  → quoted
-//	path        → path (unchanged)
-func stripDollarDotPrefix(path string) string {
-	if strings.HasPrefix(path, "$.") {
-		path = path[2:]
-	}
-	// Remove surrounding double quotes if present (e.g., $."quoted" → quoted).
+//	extract=false → all segments use -> (returns JSON)
+//	extract=true  → last segment uses ->> (returns text)
+func mysqlPathToPGChain(col, path string, extractText bool) string {
+	// Strip $. prefix
+	path = strings.TrimPrefix(path, "$.")
+	// Remove surrounding double quotes
 	path = strings.Trim(path, `"`)
-	return path
+
+	// Split on . to get path segments
+	segments := strings.Split(path, ".")
+	if len(segments) == 0 {
+		return col
+	}
+
+	var b strings.Builder
+	b.WriteString(col)
+	for i, seg := range segments {
+		if extractText && i == len(segments)-1 {
+			b.WriteString("->>'")
+		} else {
+			b.WriteString("->'")
+		}
+		b.WriteString(seg)
+		b.WriteByte('\'')
+	}
+	return b.String()
 }
 
-// JSONExtract builds: <col>->'<path>'
+// JSONExtract builds a PG JSON traversal returning JSON (uses -> for all levels).
+//
+//	MySQL: JSON_EXTRACT(col, '$.mdm.setting') → PG: col->'mdm'->'setting'
+//	MySQL: JSON_EXTRACT(col, '$.path')        → PG: col->'path'
 func (postgresDialect) JSONExtract(col, path string) string {
-	return fmt.Sprintf("%s->'%s'", col, stripDollarDotPrefix(path))
+	return mysqlPathToPGChain(col, path, false)
 }
 
-// JSONUnquoteExtract builds: <col>->>'<path>'
+// JSONUnquoteExtract builds a PG JSON traversal returning text (last level uses ->>).
+//
+//	MySQL: col->>'$.mdm.setting' → PG: col->'mdm'->>'setting'
+//	MySQL: col->>'$.path'        → PG: col->>'path'
 func (postgresDialect) JSONUnquoteExtract(col, path string) string {
-	return fmt.Sprintf("%s->>'%s'", col, stripDollarDotPrefix(path))
+	return mysqlPathToPGChain(col, path, true)
 }
 
 // JSONBuildObject builds: jsonb_build_object(<k>, <v>, ...)
@@ -113,59 +135,17 @@ func (postgresDialect) GoquDialect() goqu.DialectWrapper {
 
 // --- Error classification ---
 //
-// These methods check for PostgreSQL SQLSTATE codes embedded in the error string.
-// This avoids a hard dependency on pgx while still providing correct classification.
-
-// containsSQLState checks whether the error chain contains a PostgreSQL SQLSTATE code.
-func containsSQLState(err error, code string) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), code)
-}
+// Delegates to server/platform/postgres which uses proper pgx/pq interface
+// matching via SQLSTATE codes.
 
 // IsDuplicate returns true if err is a unique-constraint violation (SQLSTATE 23505).
-func (postgresDialect) IsDuplicate(err error) bool {
-	return containsSQLState(err, "23505")
-}
+func (postgresDialect) IsDuplicate(err error) bool { return pg.IsDuplicate(err) }
 
 // IsForeignKey returns true if err is a foreign-key constraint violation (SQLSTATE 23503).
-func (postgresDialect) IsForeignKey(err error) bool {
-	return containsSQLState(err, "23503")
-}
+func (postgresDialect) IsForeignKey(err error) bool { return pg.IsForeignKey(err) }
 
 // IsReadOnly returns true if err indicates a read-only transaction (SQLSTATE 25006).
-func (postgresDialect) IsReadOnly(err error) bool {
-	return containsSQLState(err, "25006")
-}
+func (postgresDialect) IsReadOnly(err error) bool { return pg.IsReadOnly(err) }
 
-// IsBadConnection returns true if err is a connection-level error that justifies
-// retrying on a new connection. Checks standard Go driver/io/syscall errors.
-func (postgresDialect) IsBadConnection(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	if isStdBadConnection(err) {
-		return true
-	}
-
-	// Check for common PostgreSQL connection-related error messages.
-	msg := err.Error()
-	return strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "broken pipe") ||
-		strings.Contains(msg, "unexpected EOF") ||
-		strings.Contains(msg, "server closed the connection unexpectedly")
-}
-
-// isStdBadConnection checks standard library error types common to any database driver.
-func isStdBadConnection(err error) bool {
-	return errors.Is(err, driver.ErrBadConn) ||
-		errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.Is(err, io.EOF) ||
-		errors.Is(err, syscall.ECONNREFUSED) ||
-		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.ENETUNREACH) ||
-		errors.Is(err, syscall.ETIMEDOUT)
-}
+// IsBadConnection returns true if err is a connection-level error.
+func (postgresDialect) IsBadConnection(err error) bool { return pg.IsBadConnection(err) }
