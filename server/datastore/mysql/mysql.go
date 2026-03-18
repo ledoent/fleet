@@ -286,7 +286,7 @@ func NewDatastore(conns *common_mysql.DBConnections, cfg config.MysqlConfig, c c
 		logger:              conns.Options.Logger,
 		clock:               c,
 		config:              cfg,
-		dialect:             mysqlDialect{},
+		dialect:             dialectForDriver(cfg.Driver),
 		readReplicaConfig:   conns.Options.ReplicaConfig,
 		writeCh:             make(chan itemToWrite),
 		stmtCache:           make(map[string]*sqlx.Stmt),
@@ -437,9 +437,24 @@ func fromCommonMysqlConfig(conf *common_mysql.MysqlConfig) *config.MysqlConfig {
 	}
 }
 
+// dialectForDriver returns the DialectHelper for the given driver name.
+// Empty string defaults to "mysql".
+func dialectForDriver(driver string) DialectHelper {
+	switch driver {
+	case "postgres":
+		return postgresDialect{}
+	case "", "mysql":
+		return mysqlDialect{}
+	default:
+		// checkAndModifyConfig validates the driver before this is called,
+		// so reaching here means a programming error.
+		panic(fmt.Sprintf("unsupported database driver: %q", driver))
+	}
+}
+
 func checkAndModifyConfig(conf *config.MysqlConfig) error {
-	if conf.Driver != "" && conf.Driver != "mysql" {
-		return fmt.Errorf("unsupported database driver %q: only \"mysql\" is supported in this version", conf.Driver)
+	if conf.Driver != "" && conf.Driver != "mysql" && conf.Driver != "postgres" {
+		return fmt.Errorf("unsupported database driver %q: valid values are \"mysql\" and \"postgres\"", conf.Driver)
 	}
 
 	if conf.PasswordPath != "" && conf.Password != "" {
