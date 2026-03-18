@@ -25,13 +25,12 @@ func (ds *Datastore) ConditionalAccessBypassDevice(ctx context.Context, hostID u
 		AND p.critical = 1
 		AND pm.passes = 0
 	`
-	const insertStmt = `
+	insertStmt := `
 	INSERT INTO
 		host_conditional_access (host_id, bypassed_at)
 	VALUES
 		(?, NOW(6))
-	ON DUPLICATE KEY UPDATE
-		bypassed_at = NOW(6)`
+	` + ds.dialect.OnDuplicateKey("", `bypassed_at = NOW(6)`)
 
 	var blockCount uint
 

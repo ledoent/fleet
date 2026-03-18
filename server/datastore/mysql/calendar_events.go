@@ -33,7 +33,7 @@ func (ds *Datastore) CreateOrUpdateCalendarEvent(
 	}
 	var id int64
 	if err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		const calendarEventsQuery = `
+		calendarEventsQuery := `
 			INSERT INTO calendar_events (
 				uuid_bin,
 				email,
@@ -42,14 +42,12 @@ func (ds *Datastore) CreateOrUpdateCalendarEvent(
 				event,
 				timezone
 			) VALUES (?, ?, ?, ?, ?, ?)
-			ON DUPLICATE KEY UPDATE
-				uuid_bin = VALUES(uuid_bin),
+			` + ds.dialect.OnDuplicateKey("", `uuid_bin = VALUES(uuid_bin),
 				start_time = VALUES(start_time),
 				end_time = VALUES(end_time),
 				event = VALUES(event),
 				timezone = VALUES(timezone),
-				updated_at = CURRENT_TIMESTAMP;
-		`
+				updated_at = CURRENT_TIMESTAMP`)
 		result, err := tx.ExecContext(
 			ctx,
 			calendarEventsQuery,
@@ -73,16 +71,14 @@ func (ds *Datastore) CreateOrUpdateCalendarEvent(
 			}
 		}
 
-		const hostCalendarEventsQuery = `
+		hostCalendarEventsQuery := `
 			INSERT INTO host_calendar_events (
 				host_id,
 				calendar_event_id,
 				webhook_status
 			) VALUES (?, ?, ?)
-			ON DUPLICATE KEY UPDATE
-				webhook_status = VALUES(webhook_status),
-				calendar_event_id = VALUES(calendar_event_id);
-		`
+			` + ds.dialect.OnDuplicateKey("", `webhook_status = VALUES(webhook_status),
+				calendar_event_id = VALUES(calendar_event_id)`)
 		_, err = tx.ExecContext(
 			ctx,
 			hostCalendarEventsQuery,

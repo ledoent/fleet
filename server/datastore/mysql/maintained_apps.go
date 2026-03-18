@@ -12,16 +12,14 @@ import (
 )
 
 func (ds *Datastore) UpsertMaintainedApp(ctx context.Context, app *fleet.MaintainedApp) (*fleet.MaintainedApp, error) {
-	const upsertStmt = `
+	upsertStmt := `
 INSERT INTO
 	fleet_maintained_apps (name, slug, platform, unique_identifier)
 VALUES
 	(?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-	name = VALUES(name),
+` + ds.dialect.OnDuplicateKey("", `name = VALUES(name),
 	platform = VALUES(platform),
-	unique_identifier = VALUES(unique_identifier)
-`
+	unique_identifier = VALUES(unique_identifier)`)
 
 	var appID uint
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {

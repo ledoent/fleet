@@ -129,8 +129,7 @@ func (ds *Datastore) CalculateAggregatedPerfStatsPercentiles(ctx context.Context
 		`
 		INSERT INTO aggregated_stats(id, type, global_stats, json_value)
 		VALUES (?, ?, 0, ?)
-		ON DUPLICATE KEY UPDATE json_value=VALUES(json_value)
-		`,
+		`+ds.dialect.OnDuplicateKey("", `json_value=VALUES(json_value)`),
 		queryID, aggregate, statsJson,
 	)
 	if err != nil {

@@ -65,7 +65,7 @@ func (ds *Datastore) applyQueriesInTx(
 		}
 	}
 
-	const upsertQueriesSQL = `
+	upsertQueriesSQL := `
 		INSERT INTO queries (
 			name,
 			description,
@@ -82,8 +82,7 @@ func (ds *Datastore) applyQueriesInTx(
 			logging_type,
 			discard_data
 		) VALUES %s
-		ON DUPLICATE KEY UPDATE
-			name = VALUES(name),
+		` + ds.dialect.OnDuplicateKey("", `name = VALUES(name),
 			description = VALUES(description),
 			query = VALUES(query),
 			author_id = VALUES(author_id),
@@ -96,7 +95,7 @@ func (ds *Datastore) applyQueriesInTx(
 			schedule_interval = VALUES(schedule_interval),
 			automations_enabled = VALUES(automations_enabled),
 			logging_type = VALUES(logging_type),
-			discard_data = VALUES(discard_data)`
+			discard_data = VALUES(discard_data)`)
 
 	// 'queries' are uniquely identified by {name, team_id}
 	unqKeyGen := func(name string, teamID *uint) string {
@@ -1013,7 +1012,7 @@ func (ds *Datastore) UpdateLiveQueryStats(ctx context.Context, queryID uint, sta
 
 	// Bulk insert/update
 	const valueStr = "(?,?,?,?,?,?,?,?,?,?,?,?),"
-	stmt := "REPLACE INTO scheduled_query_stats (scheduled_query_id, host_id, query_type, executions, average_memory, system_time, user_time, wall_time, output_size, denylisted, schedule_interval, last_executed) VALUES " +
+	stmt := ds.dialect.ReplaceInto() + " scheduled_query_stats (scheduled_query_id, host_id, query_type, executions, average_memory, system_time, user_time, wall_time, output_size, denylisted, schedule_interval, last_executed) VALUES " +
 		strings.Repeat(valueStr, len(stats))
 	stmt = strings.TrimSuffix(stmt, ",")
 
