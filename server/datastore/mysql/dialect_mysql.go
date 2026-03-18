@@ -17,62 +17,20 @@ type mysqlDialect struct{}
 // Compile-time assertion that mysqlDialect satisfies DialectHelper.
 var _ DialectHelper = mysqlDialect{}
 
-// quotedColsAndPlaceholders returns backtick-quoted column names and a
-// matching slice of "?" placeholders. Shared by the INSERT helpers below.
-func quotedColsAndPlaceholders(cols []string) (quoted, placeholders []string) {
-	quoted = make([]string, len(cols))
-	placeholders = make([]string, len(cols))
-	for i, c := range cols {
-		quoted[i] = "`" + c + "`"
-		placeholders[i] = "?"
-	}
-	return
+// InsertIgnoreInto returns "INSERT IGNORE INTO".
+func (mysqlDialect) InsertIgnoreInto() string { return "INSERT IGNORE INTO" }
+
+// ReplaceInto returns "REPLACE INTO".
+func (mysqlDialect) ReplaceInto() string { return "REPLACE INTO" }
+
+// OnDuplicateKey returns: ON DUPLICATE KEY UPDATE <updateClause>
+// The updateClause is passed through verbatim (MySQL-native syntax).
+func (mysqlDialect) OnDuplicateKey(_, updateClause string) string {
+	return "ON DUPLICATE KEY UPDATE " + updateClause
 }
 
-// InsertOnDuplicateKeyUpdate builds:
-//
-//	INSERT INTO <table> (<insertCols...>) VALUES (?, ...) ON DUPLICATE KEY UPDATE <col>=VALUES(<col>), ...
-//
-// conflictTarget is ignored by MySQL.
-func (mysqlDialect) InsertOnDuplicateKeyUpdate(table string, insertCols, updateCols []string, _ string) string {
-	quotedInsert, placeholders := quotedColsAndPlaceholders(insertCols)
-
-	setClauses := make([]string, len(updateCols))
-	for i, c := range updateCols {
-		setClauses[i] = fmt.Sprintf("`%s`=VALUES(`%s`)", c, c)
-	}
-
-	return fmt.Sprintf(
-		"INSERT INTO `%s` (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
-		table,
-		strings.Join(quotedInsert, ", "),
-		strings.Join(placeholders, ", "),
-		strings.Join(setClauses, ", "),
-	)
-}
-
-// InsertIgnore builds: INSERT IGNORE INTO <table> (<cols...>) VALUES (?, ...)
-func (mysqlDialect) InsertIgnore(table string, cols []string) string {
-	quotedCols, placeholders := quotedColsAndPlaceholders(cols)
-	return fmt.Sprintf(
-		"INSERT IGNORE INTO `%s` (%s) VALUES (%s)",
-		table,
-		strings.Join(quotedCols, ", "),
-		strings.Join(placeholders, ", "),
-	)
-}
-
-// ReplaceInto builds: REPLACE INTO <table> (<cols...>) VALUES (?, ...)
-// conflictTarget is ignored by MySQL (REPLACE INTO has no conflict-target syntax).
-func (mysqlDialect) ReplaceInto(table string, cols []string, _ string) string {
-	quotedCols, placeholders := quotedColsAndPlaceholders(cols)
-	return fmt.Sprintf(
-		"REPLACE INTO `%s` (%s) VALUES (%s)",
-		table,
-		strings.Join(quotedCols, ", "),
-		strings.Join(placeholders, ", "),
-	)
-}
+// OnConflictDoNothing returns "" — MySQL handles ignore via the INSERT IGNORE prefix.
+func (mysqlDialect) OnConflictDoNothing(_ string) string { return "" }
 
 // GroupConcat builds: GROUP_CONCAT(<expr> SEPARATOR '<separator>')
 func (mysqlDialect) GroupConcat(expr, separator string) string {
@@ -119,27 +77,22 @@ func (mysqlDialect) GoquDialect() goqu.DialectWrapper {
 	return goqu.Dialect("mysql")
 }
 
-// IsDuplicate returns true if err is a MySQL duplicate-entry error (ER_DUP_ENTRY).
-// Delegates to the package-level IsDuplicate function in errors.go.
+// IsDuplicate delegates to the package-level IsDuplicate in errors.go.
 func (mysqlDialect) IsDuplicate(err error) bool {
 	return IsDuplicate(err)
 }
 
-// IsForeignKey returns true if err is a MySQL foreign-key constraint violation.
-// Delegates to the package-level isMySQLForeignKey function in errors.go.
+// IsForeignKey delegates to the package-level isMySQLForeignKey in errors.go.
 func (mysqlDialect) IsForeignKey(err error) bool {
 	return isMySQLForeignKey(err)
 }
 
-// IsReadOnly returns true if err indicates the MySQL server is in read-only mode.
-// Delegates to common_mysql.IsReadOnlyError.
+// IsReadOnly delegates to common_mysql.IsReadOnlyError.
 func (mysqlDialect) IsReadOnly(err error) bool {
 	return common_mysql.IsReadOnlyError(err)
 }
 
-// IsBadConnection returns true if err is a connection-level error that justifies
-// retrying on a new connection.
-// Delegates to the package-level isBadConnection function in errors.go.
+// IsBadConnection delegates to the package-level isBadConnection in errors.go.
 func (mysqlDialect) IsBadConnection(err error) bool {
 	return isBadConnection(err)
 }

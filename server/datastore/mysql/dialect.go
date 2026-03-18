@@ -5,24 +5,38 @@ import "github.com/doug-martin/goqu/v9"
 // DialectHelper abstracts SQL dialect differences between MySQL and PostgreSQL.
 // All runtime SQL that is MySQL-specific must go through this interface so that
 // a PostgreSQL implementation can substitute equivalent syntax.
+//
+// Upsert methods are fragment-based: they return SQL fragments (prefix or suffix)
+// that compose into any query shape — single-row, multi-row batch, INSERT...SELECT.
 type DialectHelper interface {
-	// InsertOnDuplicateKeyUpdate returns an INSERT ... ON DUPLICATE KEY UPDATE
-	// (MySQL) or INSERT ... ON CONFLICT (...) DO UPDATE SET (PostgreSQL) statement.
-	// insertCols are the columns being inserted, updateCols are the columns to
-	// update on conflict, and conflictTarget is the column(s) to use as the
-	// conflict target (used by PostgreSQL; ignored by MySQL).
-	InsertOnDuplicateKeyUpdate(table string, insertCols, updateCols []string, conflictTarget string) string
+	// ---- Upsert fragments ----
 
-	// InsertIgnore returns a complete INSERT IGNORE INTO (MySQL) or
-	// INSERT ... ON CONFLICT DO NOTHING (PostgreSQL) statement for a single row.
-	// The caller is responsible for binding one value per column.
-	InsertIgnore(table string, cols []string) string
+	// InsertIgnoreInto returns the INSERT prefix for ignoring duplicate-key errors.
+	//   MySQL:      "INSERT IGNORE INTO"
+	//   PostgreSQL: "INSERT INTO"
+	// For PostgreSQL, the caller must also append OnConflictDoNothing() to the query.
+	InsertIgnoreInto() string
 
-	// ReplaceInto returns a REPLACE INTO (MySQL) or INSERT ... ON CONFLICT (...) DO UPDATE SET
-	// col = EXCLUDED.col (PostgreSQL) statement. MySQL REPLACE INTO semantics are
-	// DELETE + INSERT; the PostgreSQL equivalent updates every non-key column.
-	// conflictTarget identifies the unique/primary-key column(s) used by PostgreSQL.
-	ReplaceInto(table string, cols []string, conflictTarget string) string
+	// ReplaceInto returns the REPLACE INTO prefix (MySQL) or "INSERT INTO" (PostgreSQL).
+	//   MySQL:      "REPLACE INTO"
+	//   PostgreSQL: "INSERT INTO"
+	// For PostgreSQL, the caller must also append OnDuplicateKey() with all non-key
+	// columns to achieve REPLACE semantics (upsert all columns).
+	ReplaceInto() string
+
+	// OnDuplicateKey returns the upsert conflict-handling suffix.
+	//   MySQL:      "ON DUPLICATE KEY UPDATE " + updateClause
+	//   PostgreSQL: "ON CONFLICT (" + conflictTarget + ") DO UPDATE SET " + translated
+	// The updateClause uses MySQL syntax (e.g., "name=VALUES(name), updated_at=NOW()").
+	// The PostgreSQL implementation translates VALUES(col) → EXCLUDED.col.
+	OnDuplicateKey(conflictTarget, updateClause string) string
+
+	// OnConflictDoNothing returns the suffix for suppressing duplicate-key errors.
+	//   MySQL:      "" (handled by InsertIgnoreInto prefix)
+	//   PostgreSQL: " ON CONFLICT (" + conflictTarget + ") DO NOTHING"
+	OnConflictDoNothing(conflictTarget string) string
+
+	// ---- Aggregate & expression functions ----
 
 	// GroupConcat returns a GROUP_CONCAT (MySQL) or STRING_AGG (PostgreSQL)
 	// expression aggregating expr with the given separator.
@@ -32,7 +46,7 @@ type DialectHelper interface {
 	JSONAgg(expr string) string
 
 	// JSONExtract returns an expression that extracts a value from a JSON column
-	// at the given path. MySQL: JSON_EXTRACT(col, path), PG: col->path.
+	// at the given path. MySQL: JSON_EXTRACT(col, path), PG: col->'path'.
 	JSONExtract(col, path string) string
 
 	// JSONUnquoteExtract returns an expression that extracts a scalar string from
@@ -58,8 +72,12 @@ type DialectHelper interface {
 	// MySQL: col REGEXP pattern, PostgreSQL: col ~ pattern.
 	RegexpMatch(col, pattern string) string
 
+	// ---- Goqu ----
+
 	// GoquDialect returns the goqu dialect wrapper appropriate for this driver.
 	GoquDialect() goqu.DialectWrapper
+
+	// ---- Error classification ----
 
 	// IsDuplicate returns true if err is a unique-constraint violation.
 	IsDuplicate(err error) bool
