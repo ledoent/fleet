@@ -2660,7 +2660,7 @@ func (ds *Datastore) EnrollOsquery(ctx context.Context, opts ...fleet.DatastoreE
 
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO host_seen_times (host_id, seen_time) VALUES (?, ?)
-			ON DUPLICATE KEY UPDATE seen_time = VALUES(seen_time)`,
+			`+ds.dialect.OnDuplicateKey("", "seen_time = VALUES(seen_time)"),
 			hostID, time.Now().UTC())
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "new host seen time")
@@ -3022,15 +3022,14 @@ func (ds *Datastore) SetOrUpdateDeviceAuthToken(ctx context.Context, hostID uint
 	// both the old and new tokens can be used for authentication during the transition
 	// period (see #38351). If the current token is already expired (older than 1 hour,
 	// matching deviceAuthTokenTTL), previous_token is set to NULL to avoid reviving it.
-	const stmt = `
+	stmt := `
 		INSERT INTO
 			host_device_auth ( host_id, token )
 		VALUES
 			(?, ?)
-		ON DUPLICATE KEY UPDATE
-			previous_token = IF(token = VALUES(token), previous_token,
+		` + ds.dialect.OnDuplicateKey("", `previous_token = IF(token = VALUES(token), previous_token,
 				IF(updated_at >= DATE_SUB(NOW(), INTERVAL 3600 SECOND), token, NULL)),
-			token = VALUES(token)
+			token = VALUES(token)`) + `
 `
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, hostID, authToken)
 	if err != nil {
@@ -3076,7 +3075,7 @@ func (ds *Datastore) MarkHostsSeen(ctx context.Context, hostIDs []uint, t time.T
 		insertValues := strings.TrimSuffix(strings.Repeat("(?, ?),", len(hostIDs)), ",")
 		query := fmt.Sprintf(`
 			INSERT INTO host_seen_times (host_id, seen_time) VALUES %s
-			ON DUPLICATE KEY UPDATE seen_time = VALUES(seen_time)`,
+			`+ds.dialect.OnDuplicateKey("", "seen_time = VALUES(seen_time)"),
 			insertValues,
 		)
 		if _, err := tx.ExecContext(ctx, query, insertArgs...); err != nil {
@@ -4279,8 +4278,8 @@ func (ds *Datastore) replaceHostMunkiIssues(ctx context.Context, hostID uint, ms
 
 	if counts.CountNew < len(newIDs) {
 		// must insert missing IDs
-		const (
-			insStmt  = `INSERT INTO host_munki_issues (host_id, munki_issue_id) VALUES %s ON DUPLICATE KEY UPDATE host_id = host_id`
+		var (
+			insStmt  = `INSERT INTO host_munki_issues (host_id, munki_issue_id) VALUES %s ` + ds.dialect.OnDuplicateKey("", "host_id = host_id")
 			stmtPart = `(?, ?),`
 		)
 
@@ -4385,9 +4384,9 @@ func (ds *Datastore) getOrInsertMunkiIssues(ctx context.Context, errors, warning
 
 	// create any missing munki issues (using the primary)
 	if missing := missingIDs(); len(missing) > 0 {
-		const (
+		var (
 			// UPDATE issue_type = issue_type results in a no-op in mysql (https://stackoverflow.com/a/4596409/1094941)
-			insStmt   = `INSERT INTO munki_issues (name, issue_type) VALUES %s ON DUPLICATE KEY UPDATE issue_type = issue_type`
+			insStmt   = `INSERT INTO munki_issues (name, issue_type) VALUES %s ` + ds.dialect.OnDuplicateKey("", "issue_type = issue_type")
 			stmtParts = `(?, ?),`
 		)
 
@@ -5119,14 +5118,11 @@ func (ds *Datastore) generateAggregatedMunkiVersion(ctx context.Context, teamID 
 		return ctxerr.Wrap(ctx, err, "marshaling stats")
 	}
 
-	_, err = ds.writer(ctx).ExecContext(ctx,
-		`
+	_, err = ds.writer(ctx).ExecContext(ctx, `
 INSERT INTO aggregated_stats (id, global_stats, type, json_value)
 VALUES (?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-    json_value = VALUES(json_value),
-    updated_at = CURRENT_TIMESTAMP
-`,
+`+ds.dialect.OnDuplicateKey("", `json_value = VALUES(json_value),
+    updated_at = CURRENT_TIMESTAMP`),
 		id, globalStats, aggregatedStatsTypeMunkiVersions, versionsJson,
 	)
 	if err != nil {
@@ -5180,10 +5176,9 @@ func (ds *Datastore) generateAggregatedMunkiIssues(ctx context.Context, teamID *
 	_, err = ds.writer(ctx).ExecContext(ctx, `
 INSERT INTO aggregated_stats (id, global_stats, type, json_value)
 VALUES (?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-    json_value = VALUES(json_value),
-    updated_at = CURRENT_TIMESTAMP
-`, id, globalStats, aggregatedStatsTypeMunkiIssues, issuesJSON)
+`+ds.dialect.OnDuplicateKey("", `json_value = VALUES(json_value),
+    updated_at = CURRENT_TIMESTAMP`),
+		id, globalStats, aggregatedStatsTypeMunkiIssues, issuesJSON)
 	if err != nil {
 		return ctxerr.Wrapf(ctx, err, "inserting stats for munki_issues id %d", id)
 	}
@@ -5236,14 +5231,11 @@ func (ds *Datastore) generateAggregatedMDMStatus(ctx context.Context, teamID *ui
 		return ctxerr.Wrap(ctx, err, "marshaling stats")
 	}
 
-	_, err = ds.writer(ctx).ExecContext(ctx,
-		`
+	_, err = ds.writer(ctx).ExecContext(ctx, `
 INSERT INTO aggregated_stats (id, global_stats, type, json_value)
 VALUES (?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-    json_value = VALUES(json_value),
-    updated_at = CURRENT_TIMESTAMP
-`,
+`+ds.dialect.OnDuplicateKey("", `json_value = VALUES(json_value),
+    updated_at = CURRENT_TIMESTAMP`),
 		id, globalStats, platformKey(aggregatedStatsTypeMDMStatusPartial, platform), statusJson,
 	)
 	if err != nil {
@@ -5300,14 +5292,11 @@ func (ds *Datastore) generateAggregatedMDMSolutions(ctx context.Context, teamID 
 		return ctxerr.Wrap(ctx, err, "marshaling stats")
 	}
 
-	_, err = ds.writer(ctx).ExecContext(ctx,
-		`
+	_, err = ds.writer(ctx).ExecContext(ctx, `
 INSERT INTO aggregated_stats (id, global_stats, type, json_value)
 VALUES (?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-    json_value = VALUES(json_value),
-    updated_at = CURRENT_TIMESTAMP
-`,
+`+ds.dialect.OnDuplicateKey("", `json_value = VALUES(json_value),
+    updated_at = CURRENT_TIMESTAMP`),
 		id, globalStats, platformKey(aggregatedStatsTypeMDMSolutionsPartial, platform), resultsJSON,
 	)
 	if err != nil {
@@ -5787,7 +5776,7 @@ func (ds *Datastore) UpdateOSVersions(ctx context.Context) error {
 
 	insertStmt := "INSERT INTO aggregated_stats (id, global_stats, type, json_value) VALUES "
 	insertStmt += strings.TrimSuffix(strings.Repeat("(?,?,?,?),", len(statsByTeamID)+1), ",") // +1 due to global stats
-	insertStmt += " ON DUPLICATE KEY UPDATE json_value = VALUES(json_value), updated_at = CURRENT_TIMESTAMP"
+	insertStmt += " " + ds.dialect.OnDuplicateKey("", "json_value = VALUES(json_value), updated_at = CURRENT_TIMESTAMP")
 
 	if _, err := ds.writer(ctx).ExecContext(ctx, insertStmt, args...); err != nil {
 		return ctxerr.Wrapf(ctx, err, "insert os versions into aggregated stats")
@@ -6454,9 +6443,8 @@ func (ds *Datastore) UpdateHostIssuesVulnerabilities(ctx context.Context) error 
 		)
 		stmt := fmt.Sprintf(
 			`INSERT INTO host_issues (host_id, critical_vulnerabilities_count, total_issues_count) VALUES %s
-					ON DUPLICATE KEY UPDATE
-					critical_vulnerabilities_count = VALUES(critical_vulnerabilities_count),
-					total_issues_count = failing_policies_count + VALUES(critical_vulnerabilities_count)`,
+					`+ds.dialect.OnDuplicateKey("", `critical_vulnerabilities_count = VALUES(critical_vulnerabilities_count),
+					total_issues_count = failing_policies_count + VALUES(critical_vulnerabilities_count)`),
 			values,
 		)
 		args := make([]interface{}, 0, totalToProcess*numberOfArgsPerIssue)

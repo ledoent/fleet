@@ -63,7 +63,7 @@ func (ds *Datastore) NewAndroidHost(ctx context.Context, host *fleet.AndroidHost
 			:detail_updated_at,
 			:label_updated_at,
 			:uuid
-		) ON DUPLICATE KEY UPDATE
+		) ` + ds.dialect.OnDuplicateKey("", `
 			hostname = VALUES(hostname),
 			computer_name = VALUES(computer_name),
 			platform = VALUES(platform),
@@ -78,7 +78,7 @@ func (ds *Datastore) NewAndroidHost(ctx context.Context, host *fleet.AndroidHost
 			detail_updated_at = VALUES(detail_updated_at),
 			label_updated_at = VALUES(label_updated_at),
 			uuid = VALUES(uuid)
-		`
+		`)
 		result, err := sqlx.NamedExecContext(ctx, tx, stmt, map[string]interface{}{
 			"node_key":          host.NodeKey,
 			"hostname":          host.Hostname,
@@ -367,7 +367,7 @@ func (ds *Datastore) insertAndroidHostLabelMembershipTx(ctx context.Context, tx 
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO label_membership (host_id, label_id) VALUES (?, ?), (?, ?)
-		ON DUPLICATE KEY UPDATE host_id = host_id`,
+		`+ds.dialect.OnDuplicateKey("", `host_id = host_id`),
 		hostID, allHostsLabelID, hostID, androidLabelID)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "set label membership")
@@ -1139,7 +1139,7 @@ func (ds *Datastore) BulkUpsertMDMAndroidHostProfiles(ctx context.Context, paylo
 				can_reverify
 			)
 			VALUES %s
-			ON DUPLICATE KEY UPDATE
+			`+ds.dialect.OnDuplicateKey("", `
 				status = VALUES(status),
 				operation_type = VALUES(operation_type),
 				detail = VALUES(detail),
@@ -1149,7 +1149,7 @@ func (ds *Datastore) BulkUpsertMDMAndroidHostProfiles(ctx context.Context, paylo
 				request_fail_count = VALUES(request_fail_count),
 				included_in_policy_version = VALUES(included_in_policy_version),
 				can_reverify = VALUES(can_reverify)
-`, strings.TrimSuffix(valuePart, ","),
+`), strings.TrimSuffix(valuePart, ","),
 		)
 
 		// Taken from BulkUpsertMDMAppleHostProfiles: We need to run with retry
@@ -1355,7 +1355,7 @@ WHERE
 	}
 
 	// Insert or update incoming profiles
-	const insertNewOrEditedProfile = `
+	insertNewOrEditedProfile := `
 	INSERT INTO mdm_android_configuration_profiles (
 		profile_uuid,
 		team_id,
@@ -1363,11 +1363,11 @@ WHERE
 		raw_json,
 		uploaded_at
 	) VALUES (CONCAT('` + fleet.MDMAndroidProfileUUIDPrefix + `', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, CURRENT_TIMESTAMP(6))
-	ON DUPLICATE KEY UPDATE
+	` + ds.dialect.OnDuplicateKey("", `
 		raw_json = VALUES(raw_json),
 		name = VALUES(name),
 		uploaded_at = IF(raw_json = VALUES(raw_json) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP(6))
-`
+`)
 	for _, p := range profiles {
 		var res sql.Result
 		if res, err = tx.ExecContext(ctx, insertNewOrEditedProfile, profileTeamID, p.Name, p.RawJSON); err != nil {
@@ -1815,9 +1815,9 @@ func (ds *Datastore) updateAndroidAppConfigurationTx(ctx context.Context, tx sql
 		INSERT INTO
 			android_app_configurations (application_id, team_id, global_or_team_id, configuration)
 		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("", `
 			configuration = VALUES(configuration)
-	`
+	`)
 
 	_, err = tx.ExecContext(ctx, stmt, appID, ptr.UintOrNilIfZero(teamID), teamID, config)
 	if err != nil {

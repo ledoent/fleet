@@ -1216,16 +1216,14 @@ WHERE
 			AND (upcoming_activities.payload->'$.sync_request' = 0 OR upcoming_activities.created_at >= NOW() - INTERVAL ? SECOND)
 			AND sua.script_id IN (SELECT id FROM scripts WHERE global_or_team_id = ? AND name NOT IN (?))`
 
-	const insertNewOrEditedScript = `
+	insertNewOrEditedScript := `
 INSERT INTO
   scripts (
     team_id, global_or_team_id, name, script_content_id
   )
 VALUES
   (?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-  script_content_id = VALUES(script_content_id), id=LAST_INSERT_ID(id)
-`
+` + ds.dialect.OnDuplicateKey("", "script_content_id = VALUES(script_content_id), id=LAST_INSERT_ID(id)")
 
 	const clearPendingExecutionsWithObsoleteScriptHSR = `DELETE FROM host_script_results WHERE
 		exit_code IS NULL AND (sync_request = 0 OR created_at >= NOW() - INTERVAL ? SECOND)
@@ -2095,7 +2093,7 @@ func (ds *Datastore) LockHostViaScript(ctx context.Context, request *fleet.HostS
 		// it is pending execution. The host's state should be updated to "locked"
 		// only when the script execution is successfully completed, and then any
 		// unlock or wipe references should be cleared.
-		const stmt = `
+		stmt := `
 	INSERT INTO host_mdm_actions
 	(
 		host_id,
@@ -2103,9 +2101,7 @@ func (ds *Datastore) LockHostViaScript(ctx context.Context, request *fleet.HostS
 		fleet_platform
 	)
 	VALUES (?,?,?)
-	ON DUPLICATE KEY UPDATE
-		lock_ref = VALUES(lock_ref)
-	`
+	` + ds.dialect.OnDuplicateKey("", `lock_ref = VALUES(lock_ref)`)
 
 		_, err = tx.ExecContext(ctx, stmt,
 			request.HostID,
@@ -2145,7 +2141,7 @@ func (ds *Datastore) UnlockHostViaScript(ctx context.Context, request *fleet.Hos
 		// recorded, it is pending execution. The host's state should be updated to
 		// "unlocked" only when the script execution is successfully completed, and
 		// then any lock or wipe references should be cleared.
-		const stmt = `
+		stmt := `
 	INSERT INTO host_mdm_actions
 	(
 		host_id,
@@ -2153,10 +2149,8 @@ func (ds *Datastore) UnlockHostViaScript(ctx context.Context, request *fleet.Hos
 		fleet_platform
 	)
 	VALUES (?,?,?)
-	ON DUPLICATE KEY UPDATE
-		unlock_ref = VALUES(unlock_ref),
-		unlock_pin = NULL
-	`
+	` + ds.dialect.OnDuplicateKey("", `unlock_ref = VALUES(unlock_ref),
+		unlock_pin = NULL`)
 
 		_, err = tx.ExecContext(ctx, stmt,
 			request.HostID,
@@ -2195,7 +2189,7 @@ func (ds *Datastore) WipeHostViaScript(ctx context.Context, request *fleet.HostS
 		// point in time, this is just a request to wipe the host that is recorded,
 		// it is pending execution, so if it was locked, it is still locked (so the
 		// lock_ref info must still be there).
-		const stmt = `
+		stmt := `
 	INSERT INTO host_mdm_actions
 	(
 		host_id,
@@ -2203,9 +2197,7 @@ func (ds *Datastore) WipeHostViaScript(ctx context.Context, request *fleet.HostS
 		fleet_platform
 	)
 	VALUES (?,?,?)
-	ON DUPLICATE KEY UPDATE
-		wipe_ref = VALUES(wipe_ref)
-	`
+	` + ds.dialect.OnDuplicateKey("", `wipe_ref = VALUES(wipe_ref)`)
 
 		_, err = tx.ExecContext(ctx, stmt,
 			request.HostID,
@@ -2221,7 +2213,7 @@ func (ds *Datastore) WipeHostViaScript(ctx context.Context, request *fleet.HostS
 }
 
 func (ds *Datastore) UnlockHostManually(ctx context.Context, hostID uint, hostFleetPlatform string, ts time.Time) error {
-	const stmt = `
+	stmt := `
 	INSERT INTO host_mdm_actions
 	(
 		host_id,
@@ -2229,10 +2221,8 @@ func (ds *Datastore) UnlockHostManually(ctx context.Context, hostID uint, hostFl
 		fleet_platform
 	)
 	VALUES (?, ?, ?)
-	ON DUPLICATE KEY UPDATE
-		-- do not overwrite if a value is already set
-		unlock_ref = IF(unlock_ref IS NULL, VALUES(unlock_ref), unlock_ref)
-	`
+	` + ds.dialect.OnDuplicateKey("", `-- do not overwrite if a value is already set
+		unlock_ref = IF(unlock_ref IS NULL, VALUES(unlock_ref), unlock_ref)`)
 	// for macOS, the unlock_ref is just the timestamp at which the user first
 	// requested to unlock the host. This then indicates in the host's status
 	// that it's pending an unlock (which requires manual intervention by
@@ -2466,8 +2456,8 @@ func (ds *Datastore) batchExecuteScript(ctx context.Context, userID *uint, scrip
 
 		_, err := tx.ExecContext(
 			ctx,
-			`INSERT INTO batch_activities (execution_id, script_id, status, activity_type, num_targeted, started_at) VALUES (?, ?, ?, ?, ?, NOW())
-				ON DUPLICATE KEY UPDATE status = VALUES(status), started_at = VALUES(started_at)`,
+			`INSERT INTO batch_activities (execution_id, script_id, status, activity_type, num_targeted, started_at) VALUES (?, ?, ?, ?, ?, NOW()) `+
+				ds.dialect.OnDuplicateKey("", "status = VALUES(status), started_at = VALUES(started_at)"),
 			batchExecID,
 			script.ID,
 			fleet.ScheduledBatchExecutionStarted,
@@ -2499,7 +2489,7 @@ func (ds *Datastore) batchExecuteScript(ctx context.Context, userID *uint, scrip
 				:host_id,
 				:host_execution_id,
 				:error
-			) ON DUPLICATE KEY UPDATE host_execution_id = VALUES(host_execution_id), error = VALUES(error)`
+			) ` + ds.dialect.OnDuplicateKey("", "host_execution_id = VALUES(host_execution_id), error = VALUES(error)")
 
 		if _, err := sqlx.NamedExecContext(ctx, tx, insertStmt, args); err != nil {
 			return ctxerr.Wrap(ctx, err, "associating script executions with batch job")

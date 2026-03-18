@@ -128,7 +128,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 			credentials_acknowledged)
 		VALUES
 			(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("", `
 			mdm_device_id         = VALUES(mdm_device_id),
 			device_state          = VALUES(device_state),
 			device_type           = VALUES(device_type),
@@ -141,7 +141,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 			host_uuid             = VALUES(host_uuid),
 			credentials_hash      = VALUES(credentials_hash),
 			credentials_acknowledged = VALUES(credentials_acknowledged)
-	`
+	`)
 	_, err := ds.writer(ctx).ExecContext(
 		ctx,
 		stmt,
@@ -428,14 +428,14 @@ func (ds *Datastore) MDMWindowsSaveResponse(ctx context.Context, deviceID string
 		}
 
 		// store the command results
-		const insertResultsStmt = `
+		insertResultsStmt := `
 INSERT INTO windows_mdm_command_results
     (enrollment_id, command_uuid, raw_result, response_id, status_code)
 VALUES %s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
     raw_result = COALESCE(VALUES(raw_result), raw_result),
     status_code = COALESCE(VALUES(status_code), status_code)
-`
+`)
 		stmt = fmt.Sprintf(insertResultsStmt, strings.TrimSuffix(sb.String(), ","))
 		if _, err = tx.ExecContext(ctx, stmt, args...); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting command results")
@@ -1712,13 +1712,13 @@ func (ds *Datastore) BulkUpsertMDMWindowsHostProfiles(ctx context.Context, paylo
 	      checksum
             )
             VALUES %s
-	    ON DUPLICATE KEY UPDATE
+	    `+ds.dialect.OnDuplicateKey("", `
               status = VALUES(status),
               operation_type = VALUES(operation_type),
               detail = VALUES(detail),
               profile_name = VALUES(profile_name),
               checksum = VALUES(checksum),
-              command_uuid = VALUES(command_uuid)`,
+              command_uuid = VALUES(command_uuid)`),
 			strings.TrimSuffix(valuePart, ","),
 		)
 
@@ -1973,10 +1973,10 @@ INSERT INTO
 		SELECT 1 FROM mdm_android_configuration_profiles WHERE name = ? AND team_id = ?
 	)
 )
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
 	uploaded_at = IF(syncml = VALUES(syncml), uploaded_at, CURRENT_TIMESTAMP()),
 	syncml = VALUES(syncml)
-`
+`)
 
 	var teamID uint
 	if cp.TeamID != nil {
@@ -2064,7 +2064,7 @@ WHERE
 `
 
 	// For Windows profiles, if team_id and name are the same, we do an update. Otherwise, we do an insert.
-	const insertNewOrEditedProfile = `
+	insertNewOrEditedProfile := `
 INSERT INTO
   mdm_windows_configuration_profiles (
     profile_uuid, team_id, name, syncml, uploaded_at
@@ -2072,11 +2072,11 @@ INSERT INTO
 VALUES
   -- see https://stackoverflow.com/a/51393124/1094941
   ( CONCAT('` + fleet.MDMWindowsProfileUUIDPrefix + `', CONVERT(UUID() USING utf8mb4)), ?, ?, ?, CURRENT_TIMESTAMP() )
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
   uploaded_at = IF(syncml = VALUES(syncml) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP()),
   name = VALUES(name),
   syncml = VALUES(syncml)
-`
+`)
 
 	// use a profile team id of 0 if no-team
 	var profTeamID uint
@@ -2298,13 +2298,13 @@ func (ds *Datastore) bulkSetPendingMDMWindowsHostProfilesDB(
 					checksum
 				)
 				VALUES %s
-				ON DUPLICATE KEY UPDATE
+				`+ds.dialect.OnDuplicateKey("", `
 					operation_type = VALUES(operation_type),
 					status = NULL,
 					command_uuid = VALUES(command_uuid),
 					detail = '',
 					checksum = VALUES(checksum)
-			`, strings.TrimSuffix(valuePart, ","))
+			`), strings.TrimSuffix(valuePart, ","))
 
 		_, err := tx.ExecContext(ctx, baseStmt, args...)
 		if err != nil {
@@ -2397,8 +2397,8 @@ func (ds *Datastore) WipeHostViaWindowsMDM(ctx context.Context, host *fleet.Host
 				fleet_platform
 			)
 			VALUES (?, ?, ?)
-			ON DUPLICATE KEY UPDATE
-				wipe_ref   = VALUES(wipe_ref)`
+			` + ds.dialect.OnDuplicateKey("", `
+				wipe_ref   = VALUES(wipe_ref)`)
 
 		if _, err := tx.ExecContext(ctx, stmt, host.ID, cmd.CommandUUID, host.FleetPlatform()); err != nil {
 			return ctxerr.Wrap(ctx, err, "modifying host_mdm_actions for wipe_ref")

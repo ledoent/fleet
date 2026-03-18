@@ -648,9 +648,9 @@ func (ds *Datastore) RecordPolicyQueryExecutions(ctx context.Context, host *flee
 		if len(results) > 0 {
 			query := fmt.Sprintf(
 				`INSERT INTO policy_membership (updated_at, policy_id, host_id, passes)
-			VALUES %s ON DUPLICATE KEY UPDATE updated_at=VALUES(updated_at), passes=VALUES(passes)`,
+			VALUES %s `,
 				strings.Join(bindvars, ","),
-			)
+			) + ds.dialect.OnDuplicateKey("", "updated_at=VALUES(updated_at), passes=VALUES(passes)")
 			if _, err := tx.ExecContext(ctx, query, vals...); err != nil {
 				return ctxerr.Wrapf(ctx, err, "insert policy_membership (%v)", vals)
 			}
@@ -1435,8 +1435,8 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			type,
 			patch_software_title_id
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			query = VALUES(query),
+		`, policiesChecksumComputedColumn(),
+		) + ds.dialect.OnDuplicateKey("", `query = VALUES(query),
 			description = VALUES(description),
 			author_id = VALUES(author_id),
 			resolution = VALUES(resolution),
@@ -1448,9 +1448,7 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			script_id = VALUES(script_id),
 			conditional_access_enabled = VALUES(conditional_access_enabled),
 			type = VALUES(type),
-			patch_software_title_id = VALUES(patch_software_title_id)
-		`, policiesChecksumComputedColumn(),
-		)
+			patch_software_title_id = VALUES(patch_software_title_id)`)
 		for teamID, teamPolicySpecs := range teamIDToPolicies {
 			for _, spec := range teamPolicySpecs {
 				var softwareInstallerID *uint
@@ -1666,7 +1664,7 @@ func (ds *Datastore) AsyncBatchInsertPolicyMembership(ctx context.Context, batch
 	sql := ds.dialect.InsertIgnoreInto() + ` policy_membership (policy_id, host_id, passes) VALUES `
 	sql += strings.Repeat(`(?, ?, ?),`, len(batch))
 	sql = strings.TrimSuffix(sql, ",")
-	sql += ` ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at), passes = VALUES(passes)`
+	sql += ` ` + ds.dialect.OnDuplicateKey("", "updated_at = VALUES(updated_at), passes = VALUES(passes)")
 
 	vals := make([]interface{}, 0, len(batch)*3)
 	hostIDs := make([]uint, 0, len(batch))
@@ -2089,8 +2087,8 @@ func (ds *Datastore) IncreasePolicyAutomationIteration(ctx context.Context, poli
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO policy_automation_iterations (policy_id, iteration) VALUES (?,1)
-			ON DUPLICATE KEY UPDATE iteration = iteration + 1;
-		`, policyID)
+			`+ds.dialect.OnDuplicateKey("", "iteration = iteration + 1"),
+			policyID)
 		return err
 	})
 }
@@ -2397,10 +2395,9 @@ func (ds *Datastore) UpdateHostPolicyCounts(ctx context.Context) error {
 
 			insertStmt := `INSERT INTO policy_stats (policy_id, inherited_team_id, passing_host_count, failing_host_count)
 			VALUES (:policy_id, :inherited_team_id, :passing_host_count, :failing_host_count)
-			ON DUPLICATE KEY UPDATE
-				updated_at = NOW(),
+			` + ds.dialect.OnDuplicateKey("", `updated_at = NOW(),
 				passing_host_count = VALUES(passing_host_count),
-				failing_host_count = VALUES(failing_host_count)`
+				failing_host_count = VALUES(failing_host_count)`)
 			_, err = sqlx.NamedExecContext(ctx, db, insertStmt, policyStats)
 			if err != nil {
 				// INSERT may fail due to rare race conditions. We log and proceed.
@@ -2424,11 +2421,9 @@ func (ds *Datastore) UpdateHostPolicyCounts(ctx context.Context) error {
 		FROM policies p
 		LEFT JOIN policy_membership pm ON p.id = pm.policy_id
 		GROUP BY p.id
-		ON DUPLICATE KEY UPDATE
-			updated_at = NOW(),
+		`+ds.dialect.OnDuplicateKey("", `updated_at = NOW(),
 			passing_host_count = VALUES(passing_host_count),
-			failing_host_count = VALUES(failing_host_count);
-    `)
+			failing_host_count = VALUES(failing_host_count)`))
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "update host policy counts for global and team policies")
 	}

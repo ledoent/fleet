@@ -912,11 +912,11 @@ func (ds *Datastore) NewMDMAppleEnrollmentProfile(
 INSERT INTO
     mdm_apple_enrollment_profiles (token, type, dep_profile)
 VALUES (?, ?, ?)
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
     token = VALUES(token),
     type = VALUES(type),
     dep_profile = VALUES(dep_profile)
-`,
+`),
 		payload.Token, payload.Type, payload.DEPProfile,
 	)
 	if err != nil {
@@ -1742,11 +1742,11 @@ func upsertHostDEPAssignmentsDB(ctx context.Context, tx sqlx.ExtContext, hosts [
 	stmt := `
 		INSERT INTO host_dep_assignments (host_id, abm_token_id, mdm_migration_deadline)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE
+		` + mysqlDialect{}.OnDuplicateKey("", `
 		  added_at = CURRENT_TIMESTAMP,
 		  deleted_at = NULL,
 		  abm_token_id = VALUES(abm_token_id),
-		  mdm_migration_deadline = VALUES(mdm_migration_deadline)`
+		  mdm_migration_deadline = VALUES(mdm_migration_deadline)`)
 
 	args := []interface{}{}
 	values := []string{}
@@ -1777,7 +1777,7 @@ func upsertHostDisplayNames(ctx context.Context, tx sqlx.ExtContext, hosts ...fl
 
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO host_display_names (host_id, display_name) VALUES %s
-			ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`, strings.Join(parts, ",")),
+			`+mysqlDialect{}.OnDuplicateKey("", `display_name = VALUES(display_name)`), strings.Join(parts, ",")),
 		args...)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert host display names")
@@ -1802,7 +1802,7 @@ func upsertMDMAppleHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, appCfg
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO mobile_device_management_solutions (name, server_url) VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE server_url = VALUES(server_url)`,
+		`+mysqlDialect{}.OnDuplicateKey("", `server_url = VALUES(server_url)`),
 		fleet.WellKnownMDMFleet, serverURL)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert mdm solution")
@@ -1827,7 +1827,7 @@ func upsertMDMAppleHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, appCfg
 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO host_mdm (enrolled, server_url, installed_from_dep, mdm_id, is_server, host_id, is_personal_enrollment) VALUES %s
-		ON DUPLICATE KEY UPDATE enrolled = VALUES(enrolled)`, strings.Join(parts, ",")), args...)
+		`+mysqlDialect{}.OnDuplicateKey("", `enrolled = VALUES(enrolled)`), strings.Join(parts, ",")), args...)
 
 	return ctxerr.Wrap(ctx, err, "upsert host mdm info")
 }
@@ -1892,7 +1892,7 @@ func upsertMDMAppleHostLabelMembershipDB(ctx context.Context, tx sqlx.ExtContext
 	}
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO label_membership (host_id, label_id) VALUES %s
-			ON DUPLICATE KEY UPDATE host_id = host_id`, strings.Join(parts, ",")), args...)
+			`+mysqlDialect{}.OnDuplicateKey("", `host_id = host_id`), strings.Join(parts, ",")), args...)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert label membership")
 	}
@@ -2352,7 +2352,7 @@ WHERE
 	identifier NOT IN (?)
 `
 
-	const insertNewOrEditedProfile = `
+	insertNewOrEditedProfile := `
 INSERT INTO
   mdm_apple_configuration_profiles (
     profile_uuid, team_id, identifier, name, scope, mobileconfig, checksum, uploaded_at, secrets_updated_at
@@ -2360,13 +2360,13 @@ INSERT INTO
 VALUES
   -- see https://stackoverflow.com/a/51393124/1094941
   ( CONCAT('` + fleet.MDMAppleProfileUUIDPrefix + `', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, ?, ?, UNHEX(MD5(mobileconfig)), CURRENT_TIMESTAMP(6), ?)
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
   uploaded_at = IF(checksum = VALUES(checksum) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP(6)),
   secrets_updated_at = VALUES(secrets_updated_at),
   checksum = VALUES(checksum),
   name = VALUES(name),
   mobileconfig = VALUES(mobileconfig)
-`
+`)
 
 	// use a profile team id of 0 if no-team
 	var profTeamID uint
@@ -2805,15 +2805,15 @@ func (ds *Datastore) bulkSetPendingMDMAppleHostProfilesDB(
 					scope
 				)
 				VALUES %s
-				ON DUPLICATE KEY UPDATE
+				%s
+			`, strings.TrimSuffix(valuePart, ","), ds.dialect.OnDuplicateKey("", `
 					operation_type = VALUES(operation_type),
 					status = VALUES(status),
 					command_uuid = VALUES(command_uuid),
 					checksum = VALUES(checksum),
 				    secrets_updated_at = VALUES(secrets_updated_at),
 					detail = VALUES(detail),
-					scope = VALUES(scope)
-			`, strings.TrimSuffix(valuePart, ","))
+					scope = VALUES(scope)`))
 
 		_, err := tx.ExecContext(ctx, baseStmt, args...)
 		return ctxerr.Wrap(ctx, err, "bulk set pending profile status execute batch")
@@ -3432,7 +3432,8 @@ func (ds *Datastore) BulkUpsertMDMAppleHostProfiles(ctx context.Context, payload
 			  scope
             )
             VALUES %s
-            ON DUPLICATE KEY UPDATE
+            %s`,
+			strings.TrimSuffix(valuePart, ","), ds.dialect.OnDuplicateKey("", fmt.Sprintf(`
               status = VALUES(status),
               operation_type = VALUES(operation_type),
               detail = VALUES(detail),
@@ -3444,8 +3445,7 @@ func (ds *Datastore) BulkUpsertMDMAppleHostProfiles(ctx context.Context, payload
               profile_name = VALUES(profile_name),
               command_uuid = VALUES(command_uuid),
               variables_updated_at = VALUES(variables_updated_at),
-			  scope = VALUES(scope)`,
-			strings.TrimSuffix(valuePart, ","), fleet.MDMOperationTypeRemove,
+			  scope = VALUES(scope)`, fleet.MDMOperationTypeRemove)),
 		)
 
 		// We need to run with retry due to deadlocks.
@@ -3769,9 +3769,9 @@ func (ds *Datastore) InsertMDMIdPAccount(ctx context.Context, account *fleet.MDM
         (uuid, username, fullname, email)
       VALUES
         (COALESCE(NULLIF(TRIM(?), ''), UUID()), ?, ?, ?)
-      ON DUPLICATE KEY UPDATE
+      ` + ds.dialect.OnDuplicateKey("", `
         username   = VALUES(username),
-        fullname   = VALUES(fullname)`
+        fullname   = VALUES(fullname)`)
 
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, account.UUID, account.Username, account.Fullname, account.Email)
 	return ctxerr.Wrap(ctx, err, "creating new MDM IdP account")
@@ -4001,12 +4001,12 @@ func (ds *Datastore) BulkUpsertMDMAppleConfigProfiles(ctx context.Context, paylo
           INSERT INTO
               mdm_apple_configuration_profiles (profile_uuid, team_id, identifier, name, scope, mobileconfig, checksum, uploaded_at, secrets_updated_at)
           VALUES %s
-          ON DUPLICATE KEY UPDATE
+          %s
+`, strings.TrimSuffix(sb.String(), ","), ds.dialect.OnDuplicateKey("", `
             uploaded_at = IF(checksum = VALUES(checksum) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP()),
             mobileconfig = VALUES(mobileconfig),
             checksum = VALUES(checksum),
-		    secrets_updated_at = VALUES(secrets_updated_at)
-`, strings.TrimSuffix(sb.String(), ","))
+		    secrets_updated_at = VALUES(secrets_updated_at)`))
 
 	if _, err := ds.writer(ctx).ExecContext(ctx, stmt, args...); err != nil {
 		return ctxerr.Wrapf(ctx, err, "upsert mdm config profiles")
@@ -4224,14 +4224,14 @@ func (ds *Datastore) GetMDMAppleBootstrapPackageSummary(ctx context.Context, tea
 
 func (ds *Datastore) RecordSkippedHostBootstrapPackage(ctx context.Context, hostUUID string) error {
 	stmt := `INSERT INTO host_mdm_apple_bootstrap_packages (host_uuid, command_uuid, skipped) VALUES (?, NULL, 1)
-        ON DUPLICATE KEY UPDATE skipped = 1, command_uuid = NULL`
+        ` + ds.dialect.OnDuplicateKey("", `skipped = 1, command_uuid = NULL`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, hostUUID)
 	return ctxerr.Wrap(ctx, err, "record skipped bootstrap package")
 }
 
 func (ds *Datastore) RecordHostBootstrapPackage(ctx context.Context, commandUUID string, hostUUID string) error {
 	stmt := `INSERT INTO host_mdm_apple_bootstrap_packages (command_uuid, host_uuid, skipped) VALUES (?, ?, 0)
-        ON DUPLICATE KEY UPDATE command_uuid = command_uuid, skipped = 0`
+        ` + ds.dialect.OnDuplicateKey("", `command_uuid = command_uuid, skipped = 0`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, commandUUID, hostUUID)
 	return ctxerr.Wrap(ctx, err, "record bootstrap package command")
 }
@@ -4364,16 +4364,16 @@ WHERE
 }
 
 func (ds *Datastore) SetOrUpdateMDMAppleSetupAssistant(ctx context.Context, asst *fleet.MDMAppleSetupAssistant) (*fleet.MDMAppleSetupAssistant, error) {
-	const stmt = `
+	stmt := `
 		INSERT INTO
 			mdm_apple_setup_assistants (team_id, global_or_team_id, name, profile)
 		VALUES
 			(?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("", `
 			updated_at = IF(profile = VALUES(profile) AND name = VALUES(name), updated_at, CURRENT_TIMESTAMP),
 			name = VALUES(name),
 			profile = VALUES(profile)
-`
+`)
 	var globalOrTmID uint
 	if asst.TeamID != nil {
 		globalOrTmID = *asst.TeamID
@@ -4412,7 +4412,7 @@ func (ds *Datastore) SetMDMAppleSetupAssistantProfileUUID(ctx context.Context, t
 					global_or_team_id = ?
 			)`
 
-	const upsertStmt = `
+	upsertStmt := `
 	INSERT INTO mdm_apple_setup_assistant_profiles (
 		setup_assistant_id, abm_token_id, profile_uuid
 	) (
@@ -4427,9 +4427,9 @@ func (ds *Datastore) SetMDMAppleSetupAssistantProfileUUID(ctx context.Context, t
 			mas.id IS NOT NULL AND
 			abt.id IS NOT NULL
 	)
-	ON DUPLICATE KEY UPDATE
+	` + ds.dialect.OnDuplicateKey("", `
 		profile_uuid = VALUES(profile_uuid)
-	`
+	`)
 
 	var globalOrTmID uint
 	if teamID != nil {
@@ -4598,7 +4598,7 @@ func (ds *Datastore) SetMDMAppleDefaultSetupAssistantProfileUUID(ctx context.Con
 		DELETE FROM mdm_apple_default_setup_assistants
 			WHERE global_or_team_id = ?`
 
-	const upsertStmt = `
+	upsertStmt := `
 		INSERT INTO
 			mdm_apple_default_setup_assistants (team_id, global_or_team_id, profile_uuid, abm_token_id)
 		SELECT
@@ -4607,9 +4607,9 @@ func (ds *Datastore) SetMDMAppleDefaultSetupAssistantProfileUUID(ctx context.Con
 			abm_tokens abt
 		WHERE
 			abt.organization_name = ?
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("", `
 			profile_uuid = VALUES(profile_uuid)
-`
+`)
 	var globalOrTmID uint
 	if teamID != nil {
 		globalOrTmID = *teamID
@@ -5175,7 +5175,7 @@ func (ds *Datastore) updateDeclarationsLabelAssociations(ctx context.Context, tx
 func (ds *Datastore) insertOrUpdateDeclarations(ctx context.Context, tx sqlx.ExtContext, incomingDeclarations []*fleet.MDMAppleDeclaration,
 	teamID uint,
 ) (updatedDB bool, err error) {
-	const insertStmt = `
+	insertStmt := `
 INSERT INTO mdm_apple_declarations (
 	declaration_uuid,
 	identifier,
@@ -5188,13 +5188,13 @@ INSERT INTO mdm_apple_declarations (
 VALUES (
 	?,?,?,?,?,NOW(6),?
 )
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
   uploaded_at = IF(raw_json = VALUES(raw_json) AND name = VALUES(name) AND IFNULL(secrets_updated_at = VALUES(secrets_updated_at), TRUE), uploaded_at, NOW(6)),
   secrets_updated_at = VALUES(secrets_updated_at),
   name = VALUES(name),
   identifier = VALUES(identifier),
   raw_json = VALUES(raw_json)
-`
+`)
 
 	for _, d := range incomingDeclarations {
 		declUUID := fleet.MDMAppleDeclarationUUIDPrefix + uuid.NewString()
@@ -5317,7 +5317,7 @@ INSERT INTO mdm_apple_declarations (
 }
 
 func (ds *Datastore) SetOrUpdateMDMAppleDeclaration(ctx context.Context, declaration *fleet.MDMAppleDeclaration) (*fleet.MDMAppleDeclaration, error) {
-	const stmt = `
+	stmt := `
 INSERT INTO mdm_apple_declarations (
 	declaration_uuid,
 	team_id,
@@ -5335,10 +5335,10 @@ INSERT INTO mdm_apple_declarations (
 		SELECT 1 FROM mdm_android_configuration_profiles WHERE name = ? AND team_id = ?
 	)
 )
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
 	identifier = VALUES(identifier),
 	uploaded_at = IF(raw_json = VALUES(raw_json) AND name = VALUES(name) AND IFNULL(secrets_updated_at = VALUES(secrets_updated_at), TRUE), uploaded_at, NOW(6)),
-	raw_json = VALUES(raw_json)`
+	raw_json = VALUES(raw_json)`)
 
 	return ds.insertOrUpsertMDMAppleDeclaration(ctx, stmt, declaration)
 }
@@ -5446,11 +5446,11 @@ func batchSetDeclarationLabelAssociationsDB(ctx context.Context, tx sqlx.ExtCont
               (apple_declaration_uuid, label_id, label_name, exclude, require_all)
           VALUES
               %s
-          ON DUPLICATE KEY UPDATE
+          ` + mysqlDialect{}.OnDuplicateKey("", `
               label_id = VALUES(label_id),
               exclude = VALUES(exclude),
 			  require_all = VALUES(require_all)
-	`
+	`)
 
 	selectStmt := `
 		SELECT apple_declaration_uuid as profile_uuid, label_name, label_id, exclude, require_all FROM mdm_declaration_labels
@@ -5739,12 +5739,12 @@ func mdmAppleBatchSetPendingHostDeclarationsDB(
 	    (host_uuid, status, operation_type, token, secrets_updated_at, declaration_uuid, declaration_identifier, declaration_name)
 	  VALUES
 	    %s
-	  ON DUPLICATE KEY UPDATE
+	  ` + mysqlDialect{}.OnDuplicateKey("", `
 	    status = VALUES(status),
 	    operation_type = VALUES(operation_type),
 	    token = VALUES(token),
 	    secrets_updated_at = VALUES(secrets_updated_at)
-	  `
+	  `)
 
 	profilesToInsert := make(map[string]*fleet.MDMAppleHostDeclaration)
 
@@ -5969,11 +5969,11 @@ INSERT INTO host_mdm_apple_declarations
     (host_uuid, declaration_uuid, status, operation_type, detail, declaration_name, declaration_identifier, token, secrets_updated_at)
 VALUES
   %s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("", `
   status = VALUES(status),
   operation_type = VALUES(operation_type),
   detail = VALUES(detail)
-  `
+  `)
 
 	deletePendingRemovesStmt := `
   DELETE FROM host_mdm_apple_declarations
@@ -6747,11 +6747,11 @@ WHERE
 }
 
 func (ds *Datastore) AddHostMDMCommands(ctx context.Context, commands []fleet.HostMDMCommand) error {
-	const baseStmt = `
+	baseStmt := `
 		INSERT INTO host_mdm_commands (host_id, command_type)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE
-		command_type = VALUES(command_type)`
+		` + ds.dialect.OnDuplicateKey("", `
+		command_type = VALUES(command_type)`)
 
 	for i := 0; i < len(commands); i += addHostMDMCommandsBatchSize {
 		start := i
@@ -7127,11 +7127,11 @@ func (ds *Datastore) AssociateHostMDMIdPAccountDB(ctx context.Context, hostUUID 
 }
 
 func associateHostMDMIdPAccountDB(ctx context.Context, tx sqlx.ExtContext, hostUUID string, acctUUID string) error {
-	const stmt = `
+	stmt := `
 INSERT INTO host_mdm_idp_accounts (host_uuid, account_uuid)
 VALUES (?, ?)
-ON DUPLICATE KEY UPDATE
-	account_uuid = VALUES(account_uuid)`
+` + mysqlDialect{}.OnDuplicateKey("", `
+	account_uuid = VALUES(account_uuid)`)
 
 	_, err := tx.ExecContext(ctx, stmt, hostUUID, acctUUID)
 	if err != nil {
@@ -7244,14 +7244,14 @@ func (ds *Datastore) SetLockCommandForLostModeCheckin(ctx context.Context, hostI
 }
 
 func (ds *Datastore) InsertHostLocationData(ctx context.Context, locData fleet.HostLocationData) error {
-	const stmt = `
+	stmt := `
 		INSERT INTO host_last_known_locations
 			(host_id, latitude, longitude)
 		VALUES (?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("", `
 			latitude = VALUES(latitude),
 			longitude = VALUES(longitude)
-	`
+	`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, locData.HostID, locData.Latitude, locData.Longitude)
 	return ctxerr.Wrap(ctx, err, "insert host location data")
 }
@@ -7302,13 +7302,13 @@ func (ds *Datastore) SetHostsRecoveryLockPasswords(ctx context.Context, password
 	stmt := `
 		INSERT INTO host_recovery_key_passwords (host_uuid, encrypted_password, status, operation_type)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("", `
 			encrypted_password = VALUES(encrypted_password),
 			status = VALUES(status),
 			operation_type = VALUES(operation_type),
 			error_message = NULL,
 			deleted = 0
-	`
+	`)
 
 	placeholders := strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?),", len(passwords)), ",")
 	stmt = fmt.Sprintf(stmt, placeholders)
