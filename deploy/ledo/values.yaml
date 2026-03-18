@@ -1,0 +1,110 @@
+# Fleet Helm values for fleet.hx.ledoweb.com (Ledo personal cluster)
+# Deploy: helm upgrade --install fleet charts/fleet -f deploy/ledo/values.yaml -n fleet --create-namespace
+
+hostName: fleet.hx.ledoweb.com
+replicas: 1
+imageRepository: ghcr.io/ledoent/fleet
+imageTag: latest   # override with specific tag e.g. v4.82.0-ledo
+
+resources:
+  limits:
+    cpu: "1"
+    memory: 1Gi
+  requests:
+    cpu: "0.1"
+    memory: 128Mi
+
+# Disable anti-affinity on single-node clusters
+affinity: {}
+
+ingress:
+  enabled: true
+  className: nginx   # adjust if using traefik or another ingress controller
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"  # needed for software installers
+  hosts:
+    - host: fleet.hx.ledoweb.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: fleet-hx-tls
+      hosts:
+        - fleet.hx.ledoweb.com
+
+fleet:
+  listenPort: 8080
+  secretName: fleet
+  autoApplySQLMigrations: true
+
+  # Let cert-manager/ingress handle TLS termination
+  tls:
+    enabled: false
+
+  auth:
+    bcryptCost: 12
+    saltKeySize: 24
+  app:
+    tokenKeySize: 24
+    inviteTokenValidityPeriod: 120h
+  session:
+    keySize: 64
+    duration: 2160h  # 90 days
+
+  logging:
+    debug: false
+    json: true
+    disableBanner: false
+
+  # MDM: Apple APNs cert loaded via secret (see below)
+  # After deploy, configure APNs via Fleet UI: Settings > Integrations > MDM
+  mdm:
+    windows:
+      wstepIdentityCertKey: ""
+      wstepIdentityKeyKey: ""
+
+  # S3 for software installers — point at your MinIO or S3-compatible store
+  # Leave blank to disable software installers
+  softwareInstallers:
+    s3:
+      bucketName: ""
+      prefix: ""
+      accessKeyID: ""
+      secretKey: software-installers
+      region: ""
+      endpointURL: ""
+      forceS3PathStyle: false
+
+  carving:
+    s3:
+      bucketName: ""
+      prefix: ""
+      accessKeyID: ""
+      secretKey: s3-bucket
+      region: ""
+      endpointURL: ""
+      forceS3PathStyle: false
+
+## Section: Database
+database:
+  # Use an external MySQL — set connection details in the fleet Secret
+  # kubectl create secret generic fleet -n fleet \
+  #   --from-literal=FLEET_MYSQL_ADDRESS=mysql:3306 \
+  #   --from-literal=FLEET_MYSQL_DATABASE=fleet \
+  #   --from-literal=FLEET_MYSQL_USERNAME=fleet \
+  #   --from-literal=FLEET_MYSQL_PASSWORD=<password> \
+  #   --from-literal=FLEET_REDIS_ADDRESS=redis:6379 \
+  #   --from-literal=FLEET_SERVER_PRIVATE_KEY=<32-byte-random-hex>
+  address: mysql:3306
+  database: fleet
+  username: fleet
+  passwordPath: ""  # loaded via secret env FLEET_MYSQL_PASSWORD
+
+## Section: Cache
+cache:
+  address: redis:6379
+
+## Section: Prometheus
+prometheus:
+  enabled: false
