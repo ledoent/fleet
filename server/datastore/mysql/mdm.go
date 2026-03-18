@@ -1674,7 +1674,7 @@ func (ds *Datastore) MDMInsertEULA(ctx context.Context, eula *fleet.MDMEULA) err
 
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, eula.Name, eula.Bytes, eula.Token, eula.Sha256)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return ctxerr.Wrap(ctx, alreadyExists("MDMEULA", eula.Token))
 		}
 		return ctxerr.Wrap(ctx, err, "create EULA")

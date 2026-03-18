@@ -675,7 +675,7 @@ func (ds *Datastore) DeleteLabel(ctx context.Context, name string, filter fleet.
 			return ctxerr.Wrap(ctx, err, "getting label id to delete")
 		}
 		if err := deleteLabelsInTx(ctx, tx, []uint{labelID}); err != nil {
-			if isMySQLForeignKey(err) {
+			if ds.dialect.IsForeignKey(err) {
 				return ctxerr.Wrap(ctx, foreignKey("labels", name), "delete label")
 			}
 			return ctxerr.Wrap(ctx, err, "delete labels in tx")

@@ -159,7 +159,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 		device.CredentialsHash,
 		device.CredentialsAcknowledged)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return ctxerr.Wrap(ctx, alreadyExists("MDMWindowsEnrolledDevice", device.MDMHardwareID))
 		}
 		return ctxerr.Wrap(ctx, err, "inserting MDMWindowsEnrolledDevice")
@@ -246,7 +246,7 @@ func (ds *Datastore) mdmWindowsInsertCommandForHostsDB(ctx context.Context, tx s
 		VALUES (?, ?, ?)
   `
 	if _, err := tx.ExecContext(ctx, stmt, cmd.CommandUUID, cmd.RawCommand, cmd.TargetLocURI); err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return ctxerr.Wrap(ctx, alreadyExists("MDMWindowsCommand", cmd.CommandUUID))
 		}
 		return ctxerr.Wrap(ctx, err, "inserting MDMWindowsCommand")
@@ -268,7 +268,7 @@ VALUES ((SELECT id FROM mdm_windows_enrollments WHERE host_uuid = ? OR mdm_devic
 `
 
 	if _, err := tx.ExecContext(ctx, stmt, hostUUIDOrDeviceID, hostUUIDOrDeviceID, commandUUID); err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return ctxerr.Wrap(ctx, alreadyExists("MDMWindowsCommandQueue", commandUUID))
 		}
 		return ctxerr.Wrap(ctx, err, "inserting MDMWindowsCommandQueue", "host_uuid_or_device_id", hostUUIDOrDeviceID, "command_uuid", commandUUID)
@@ -1885,7 +1885,7 @@ INSERT INTO
 		res, err := tx.ExecContext(ctx, insertProfileStmt, profileUUID, teamID, cp.Name, cp.SyncML, cp.Name, teamID, cp.Name, teamID, cp.Name, teamID)
 		if err != nil {
 			switch {
-			case IsDuplicate(err):
+			case ds.dialect.IsDuplicate(err):
 				return &existsError{
 					ResourceType: "MDMWindowsConfigProfile.Name",
 					Identifier:   cp.Name,
@@ -1986,7 +1986,7 @@ ON DUPLICATE KEY UPDATE
 	res, err := ds.writer(ctx).ExecContext(ctx, stmt, profileUUID, teamID, cp.Name, cp.SyncML, cp.Name, teamID, cp.Name, teamID, cp.Name, teamID)
 	if err != nil {
 		switch {
-		case IsDuplicate(err):
+		case ds.dialect.IsDuplicate(err):
 			return &existsError{
 				ResourceType: "MDMWindowsConfigProfile.Name",
 				Identifier:   cp.Name,

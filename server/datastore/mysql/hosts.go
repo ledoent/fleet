@@ -2752,7 +2752,7 @@ func (ds *Datastore) getContextTryStmt(ctx context.Context, dest interface{}, qu
 	// nolint the statements are closed in Datastore.Close.
 	if stmt := ds.loadOrPrepareStmt(ctx, query); stmt != nil {
 		err := stmt.GetContext(ctx, dest, args...)
-		if err == nil || !isBadConnection(err) {
+		if err == nil || !ds.dialect.IsBadConnection(err) {
 			return err
 		}
 
@@ -3034,7 +3034,7 @@ func (ds *Datastore) SetOrUpdateDeviceAuthToken(ctx context.Context, hostID uint
 `
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, hostID, authToken)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return fleet.ConflictError{Message: "auth token conflicts with another host"}
 		}
 		return ctxerr.Wrap(ctx, err, "upsert host's device auth token")

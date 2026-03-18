@@ -111,7 +111,7 @@ func (ds *Datastore) insertInHouseAppDB(ctx context.Context, tx sqlx.ExtContext,
 
 	res, err := tx.ExecContext(ctx, stmt, args...)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			teamName, err := ds.getTeamName(ctx, payload.TeamID)
 			if err != nil {
 				return 0, ctxerr.Wrap(ctx, err)
@@ -286,7 +286,7 @@ func (ds *Datastore) SaveInHouseAppUpdates(ctx context.Context, payload *fleet.U
 		}
 
 		if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
-			if IsDuplicate(err) {
+			if ds.dialect.IsDuplicate(err) {
 				teamName, err := ds.getTeamName(ctx, payload.TeamID)
 				if err != nil {
 					return ctxerr.Wrap(ctx, err)

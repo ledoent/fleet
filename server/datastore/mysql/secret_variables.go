@@ -108,7 +108,7 @@ func (ds *Datastore) CreateSecretVariable(ctx context.Context, name string, valu
 		name, valueEncrypted,
 	)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return 0, ctxerr.Wrap(ctx, alreadyExists("name", name), "found duplicate")
 		}
 		return 0, ctxerr.Wrap(ctx, err, "insert secret variable")

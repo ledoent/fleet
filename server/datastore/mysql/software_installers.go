@@ -352,7 +352,7 @@ INSERT INTO software_installers (
 
 		res, err := tx.ExecContext(ctx, stmt, args...)
 		if err != nil {
-			if IsDuplicate(err) {
+			if ds.dialect.IsDuplicate(err) {
 				// already exists for this team/no team
 				teamName, err := ds.getTeamName(ctx, payload.TeamID)
 				if err != nil {
@@ -1161,7 +1161,7 @@ func (ds *Datastore) DeleteSoftwareInstaller(ctx context.Context, id uint) error
 		// allow delete only if install_during_setup is false
 		res, err := tx.ExecContext(ctx, `DELETE FROM software_installers WHERE id = ? AND install_during_setup = 0`, id)
 		if err != nil {
-			if isMySQLForeignKey(err) {
+			if ds.dialect.IsForeignKey(err) {
 				// Check if the software installer is referenced by a policy automation.
 				var count int
 				if err := sqlx.GetContext(ctx, tx, &count, `SELECT COUNT(*) FROM policies WHERE software_installer_id = ?`, id); err != nil {

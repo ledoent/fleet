@@ -1325,7 +1325,7 @@ func (ds *Datastore) optimisticGetOrInsertWithWriter(ctx context.Context, writer
 			// this does not exist yet, try to insert it
 			res, err := writer.ExecContext(ctx, insertStmt.Statement, insertStmt.Args...)
 			if err != nil {
-				if IsDuplicate(err) {
+				if ds.dialect.IsDuplicate(err) {
 					// it might've been created between the select and the insert, read
 					// again this time from the primary database connection.
 					id, err := readID(writer)

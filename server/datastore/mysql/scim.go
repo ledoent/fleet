@@ -43,7 +43,7 @@ func (ds *Datastore) CreateScimUser(ctx context.Context, user *fleet.ScimUser) (
 			user.Active,
 		)
 		if err != nil {
-			if IsDuplicate(err) {
+			if ds.dialect.IsDuplicate(err) {
 				return ctxerr.Wrap(ctx, alreadyExists("ScimUser", user.UserName), "insert scim user")
 			}
 			return ctxerr.Wrap(ctx, err, "insert scim user")
@@ -309,7 +309,7 @@ func (ds *Datastore) ReplaceScimUser(ctx context.Context, user *fleet.ScimUser) 
 			user.ID,
 		)
 		if err != nil {
-			if IsDuplicate(err) {
+			if ds.dialect.IsDuplicate(err) {
 				return ctxerr.Wrap(ctx, alreadyExists("ScimUser", user.UserName), "update scim user")
 			}
 			return ctxerr.Wrap(ctx, err, "update scim user")

@@ -836,7 +836,7 @@ func (ds *Datastore) DeleteScript(ctx context.Context, id uint) error {
 
 		_, err = tx.ExecContext(ctx, `DELETE FROM scripts WHERE id = ?`, id)
 		if err != nil {
-			if isMySQLForeignKey(err) {
+			if ds.dialect.IsForeignKey(err) {
 				// Check if the script is referenced by a policy automation.
 				var count int
 				if err := sqlx.GetContext(ctx, tx, &count, `SELECT COUNT(*) FROM policies WHERE script_id = ?`, id); err != nil {

@@ -300,7 +300,7 @@ func (ds *Datastore) NewQuery(
 		query.UpdatedAt,
 	)
 
-	if err != nil && IsDuplicate(err) {
+	if err != nil && ds.dialect.IsDuplicate(err) {
 		return nil, ctxerr.Wrap(ctx, alreadyExists("Query", query.Name))
 	} else if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "creating new Query")
@@ -523,7 +523,7 @@ func (ds *Datastore) DeleteQuery(ctx context.Context, teamID *uint, name string)
 	deleteStmt := "DELETE FROM queries WHERE id = ?"
 	result, err := ds.writer(ctx).ExecContext(ctx, deleteStmt, queryID)
 	if err != nil {
-		if isMySQLForeignKey(err) {
+		if ds.dialect.IsForeignKey(err) {
 			return ctxerr.Wrap(ctx, foreignKey("queries", name))
 		}
 		return ctxerr.Wrap(ctx, err, "delete queries")

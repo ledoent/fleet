@@ -484,7 +484,7 @@ INSERT INTO
 		res, err := tx.ExecContext(ctx, insertProfileStmt, profileUUID, teamID, cp.Name, cp.RawJSON, cp.Name, teamID, cp.Name, teamID, cp.Name, teamID)
 		if err != nil {
 			switch {
-			case IsDuplicate(err):
+			case ds.dialect.IsDuplicate(err):
 				return &existsError{
 					ResourceType: "MDMAndroidConfigProfile.Name",
 					Identifier:   cp.Name,

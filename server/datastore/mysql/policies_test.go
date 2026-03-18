@@ -3789,7 +3789,7 @@ func testPoliciesNameUnicode(t *testing.T, ds *Datastore) {
 	err = ds.SavePolicy(
 		context.Background(), &fleet.Policy{PolicyData: fleet.PolicyData{ID: policyEmoji.ID, Name: equivalentNames[1]}}, false, false,
 	)
-	assert.True(t, IsDuplicate(err), err)
+	assert.True(t, ds.dialect.IsDuplicate(err), err)
 
 	// Try to find policy with equivalent name
 	policies, err := ds.ListGlobalPolicies(context.Background(), fleet.ListOptions{MatchQuery: equivalentNames[1]})
