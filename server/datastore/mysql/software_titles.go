@@ -1278,7 +1278,7 @@ func (ds *Datastore) UpdateSoftwareTitleAutoUpdateConfig(ctx context.Context, ti
 INSERT INTO software_update_schedules
 	(title_id, team_id, enabled, start_time, end_time)
 VALUES (?, ?, ?, ?, ?)
-` + ds.dialect.OnDuplicateKey("", `enabled = VALUES(enabled),
+` + ds.dialect.OnDuplicateKey("id", `enabled = VALUES(enabled),
 	start_time = IF(VALUES(start_time) = '', start_time, VALUES(start_time)),
 	end_time = IF(VALUES(end_time) = '', end_time, VALUES(end_time))`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, titleID, teamID, config.AutoUpdateEnabled, startTime, endTime)

@@ -141,7 +141,7 @@ func (ds *Datastore) CreateHostConditionalAccessStatus(ctx context.Context, host
 		`INSERT INTO microsoft_compliance_partner_host_statuses
 		(host_id, device_id, user_principal_name)
 		VALUES (?, ?, ?)
-		`+ds.dialect.OnDuplicateKey("", `device_id = VALUES(device_id),
+		`+ds.dialect.OnDuplicateKey("host_id", `device_id = VALUES(device_id),
 		user_principal_name = VALUES(user_principal_name),
 		managed = NULL,
 		compliant = NULL`),

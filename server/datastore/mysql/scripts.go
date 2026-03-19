@@ -1223,7 +1223,7 @@ INSERT INTO
   )
 VALUES
   (?, ?, ?, ?)
-` + ds.dialect.OnDuplicateKey("", "script_content_id = VALUES(script_content_id), id=LAST_INSERT_ID(id)")
+` + ds.dialect.OnDuplicateKey("id", "script_content_id = VALUES(script_content_id), id=LAST_INSERT_ID(id)")
 
 	const clearPendingExecutionsWithObsoleteScriptHSR = `DELETE FROM host_script_results WHERE
 		exit_code IS NULL AND (sync_request = 0 OR created_at >= NOW() - INTERVAL ? SECOND)
@@ -2101,7 +2101,7 @@ func (ds *Datastore) LockHostViaScript(ctx context.Context, request *fleet.HostS
 		fleet_platform
 	)
 	VALUES (?,?,?)
-	` + ds.dialect.OnDuplicateKey("", `lock_ref = VALUES(lock_ref)`)
+	` + ds.dialect.OnDuplicateKey("host_id", `lock_ref = VALUES(lock_ref)`)
 
 		_, err = tx.ExecContext(ctx, stmt,
 			request.HostID,
@@ -2149,7 +2149,7 @@ func (ds *Datastore) UnlockHostViaScript(ctx context.Context, request *fleet.Hos
 		fleet_platform
 	)
 	VALUES (?,?,?)
-	` + ds.dialect.OnDuplicateKey("", `unlock_ref = VALUES(unlock_ref),
+	` + ds.dialect.OnDuplicateKey("host_id", `unlock_ref = VALUES(unlock_ref),
 		unlock_pin = NULL`)
 
 		_, err = tx.ExecContext(ctx, stmt,
@@ -2197,7 +2197,7 @@ func (ds *Datastore) WipeHostViaScript(ctx context.Context, request *fleet.HostS
 		fleet_platform
 	)
 	VALUES (?,?,?)
-	` + ds.dialect.OnDuplicateKey("", `wipe_ref = VALUES(wipe_ref)`)
+	` + ds.dialect.OnDuplicateKey("host_id", `wipe_ref = VALUES(wipe_ref)`)
 
 		_, err = tx.ExecContext(ctx, stmt,
 			request.HostID,
@@ -2221,7 +2221,7 @@ func (ds *Datastore) UnlockHostManually(ctx context.Context, hostID uint, hostFl
 		fleet_platform
 	)
 	VALUES (?, ?, ?)
-	` + ds.dialect.OnDuplicateKey("", `-- do not overwrite if a value is already set
+	` + ds.dialect.OnDuplicateKey("host_id", `-- do not overwrite if a value is already set
 		unlock_ref = IF(unlock_ref IS NULL, VALUES(unlock_ref), unlock_ref)`)
 	// for macOS, the unlock_ref is just the timestamp at which the user first
 	// requested to unlock the host. This then indicates in the host's status
@@ -2457,7 +2457,7 @@ func (ds *Datastore) batchExecuteScript(ctx context.Context, userID *uint, scrip
 		_, err := tx.ExecContext(
 			ctx,
 			`INSERT INTO batch_activities (execution_id, script_id, status, activity_type, num_targeted, started_at) VALUES (?, ?, ?, ?, ?, NOW()) `+
-				ds.dialect.OnDuplicateKey("", "status = VALUES(status), started_at = VALUES(started_at)"),
+				ds.dialect.OnDuplicateKey("id", "status = VALUES(status), started_at = VALUES(started_at)"),
 			batchExecID,
 			script.ID,
 			fleet.ScheduledBatchExecutionStarted,
@@ -2489,7 +2489,7 @@ func (ds *Datastore) batchExecuteScript(ctx context.Context, userID *uint, scrip
 				:host_id,
 				:host_execution_id,
 				:error
-			) ` + ds.dialect.OnDuplicateKey("", "host_execution_id = VALUES(host_execution_id), error = VALUES(error)")
+			) ` + ds.dialect.OnDuplicateKey("id", "host_execution_id = VALUES(host_execution_id), error = VALUES(error)")
 
 		if _, err := sqlx.NamedExecContext(ctx, tx, insertStmt, args); err != nil {
 			return ctxerr.Wrap(ctx, err, "associating script executions with batch job")

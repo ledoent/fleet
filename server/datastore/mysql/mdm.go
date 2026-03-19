@@ -1779,7 +1779,7 @@ func (ds *Datastore) SetCommandForPendingSCEPRenewal(ctx context.Context, assocs
 
 	stmt := fmt.Sprintf(`
 		INSERT INTO nano_cert_auth_associations (id, sha256, renew_command_uuid) VALUES %s
-		`+ds.dialect.OnDuplicateKey("", `
+		`+ds.dialect.OnDuplicateKey("id,sha256", `
 			renew_command_uuid = VALUES(renew_command_uuid)
 	`), strings.TrimSuffix(sb.String(), ","))
 
@@ -2738,7 +2738,7 @@ func (ds *Datastore) BulkUpsertMDMManagedCertificates(ctx context.Context, paylo
 			  serial
             )
             VALUES %s
-            `+ds.dialect.OnDuplicateKey("", `
+            `+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid,ca_name", `
               challenge_retrieved_at = VALUES(challenge_retrieved_at),
 			  not_valid_before = VALUES(not_valid_before),
 			  not_valid_after = VALUES(not_valid_after),

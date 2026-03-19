@@ -202,7 +202,7 @@ func (ds *Datastore) ApplyLabelSpecsWithAuthor(ctx context.Context, specs []*fle
 			author_id,
 			team_id
 		) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ? )
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("id", `
 			name = VALUES(name),
 			description = VALUES(description),
 			query = VALUES(query),
@@ -476,7 +476,7 @@ func (ds *Datastore) UpdateLabelMembershipByHostCriteria(ctx context.Context, hv
 
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		// Insert new label membership based on the label query.
-		sql := fmt.Sprintf(`INSERT INTO label_membership (label_id, host_id) SELECT candidate.label_id, candidate.host_id FROM (%s) as candidate `+ds.dialect.OnDuplicateKey("", `host_id = label_membership.host_id`), labelQuery)
+		sql := fmt.Sprintf(`INSERT INTO label_membership (label_id, host_id) SELECT candidate.label_id, candidate.host_id FROM (%s) as candidate `+ds.dialect.OnDuplicateKey("host_id,label_id", `host_id = label_membership.host_id`), labelQuery)
 		_, err := tx.ExecContext(ctx, sql, queryVals...)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "execute membership INSERT")
@@ -927,7 +927,7 @@ func (ds *Datastore) RecordLabelQueryExecutions(ctx context.Context, host *fleet
 		// Complete inserts if necessary
 		if len(vals) > 0 {
 			sql := `INSERT INTO label_membership (updated_at, label_id, host_id) VALUES `
-			sql += strings.Join(bindvars, ",") + ` ` + ds.dialect.OnDuplicateKey("", `updated_at = VALUES(updated_at)`)
+			sql += strings.Join(bindvars, ",") + ` ` + ds.dialect.OnDuplicateKey("host_id,label_id", `updated_at = VALUES(updated_at)`)
 
 			_, err := tx.ExecContext(ctx, sql, vals...)
 			if err != nil {
@@ -1488,7 +1488,7 @@ func (ds *Datastore) AsyncBatchInsertLabelMembership(ctx context.Context, batch 
 	sql := `INSERT INTO label_membership (label_id, host_id) VALUES `
 	sql += strings.Repeat(`(?, ?),`, len(batch))
 	sql = strings.TrimSuffix(sql, ",")
-	sql += ` ` + ds.dialect.OnDuplicateKey("", `updated_at = VALUES(updated_at)`)
+	sql += ` ` + ds.dialect.OnDuplicateKey("host_id,label_id", `updated_at = VALUES(updated_at)`)
 
 	vals := make([]interface{}, 0, len(batch)*2)
 	for _, tup := range batch {
@@ -1608,7 +1608,7 @@ func (ds *Datastore) AddLabelsToHost(ctx context.Context, hostID uint, labelIDs 
 	sql := `INSERT INTO label_membership (host_id, label_id) VALUES `
 	sql += strings.Repeat(`(?, ?),`, len(labelIDs))
 	sql = strings.TrimSuffix(sql, ",")
-	sql += ` ` + ds.dialect.OnDuplicateKey("", `updated_at = NOW()`)
+	sql += ` ` + ds.dialect.OnDuplicateKey("host_id,label_id", `updated_at = NOW()`)
 	args := make([]interface{}, 0, len(labelIDs)*2)
 	for _, labelID := range labelIDs {
 		args = append(args, hostID, labelID)

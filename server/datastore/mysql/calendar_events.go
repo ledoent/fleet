@@ -42,7 +42,7 @@ func (ds *Datastore) CreateOrUpdateCalendarEvent(
 				event,
 				timezone
 			) VALUES (?, ?, ?, ?, ?, ?)
-			` + ds.dialect.OnDuplicateKey("", `uuid_bin = VALUES(uuid_bin),
+			` + ds.dialect.OnDuplicateKey("id", `uuid_bin = VALUES(uuid_bin),
 				start_time = VALUES(start_time),
 				end_time = VALUES(end_time),
 				event = VALUES(event),
@@ -77,7 +77,7 @@ func (ds *Datastore) CreateOrUpdateCalendarEvent(
 				calendar_event_id,
 				webhook_status
 			) VALUES (?, ?, ?)
-			` + ds.dialect.OnDuplicateKey("", `webhook_status = VALUES(webhook_status),
+			` + ds.dialect.OnDuplicateKey("id", `webhook_status = VALUES(webhook_status),
 				calendar_event_id = VALUES(calendar_event_id)`)
 		_, err = tx.ExecContext(
 			ctx,

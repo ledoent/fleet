@@ -912,7 +912,7 @@ func (ds *Datastore) NewMDMAppleEnrollmentProfile(
 INSERT INTO
     mdm_apple_enrollment_profiles (token, type, dep_profile)
 VALUES (?, ?, ?)
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("id", `
     token = VALUES(token),
     type = VALUES(type),
     dep_profile = VALUES(dep_profile)
@@ -2360,7 +2360,7 @@ INSERT INTO
 VALUES
   -- see https://stackoverflow.com/a/51393124/1094941
   ( CONCAT('` + fleet.MDMAppleProfileUUIDPrefix + `', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, ?, ?, UNHEX(MD5(mobileconfig)), CURRENT_TIMESTAMP(6), ?)
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("profile_uuid", `
   uploaded_at = IF(checksum = VALUES(checksum) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP(6)),
   secrets_updated_at = VALUES(secrets_updated_at),
   checksum = VALUES(checksum),
@@ -3769,7 +3769,7 @@ func (ds *Datastore) InsertMDMIdPAccount(ctx context.Context, account *fleet.MDM
         (uuid, username, fullname, email)
       VALUES
         (COALESCE(NULLIF(TRIM(?), ''), UUID()), ?, ?, ?)
-      ` + ds.dialect.OnDuplicateKey("", `
+      ` + ds.dialect.OnDuplicateKey("uuid", `
         username   = VALUES(username),
         fullname   = VALUES(fullname)`)
 
@@ -4002,7 +4002,7 @@ func (ds *Datastore) BulkUpsertMDMAppleConfigProfiles(ctx context.Context, paylo
               mdm_apple_configuration_profiles (profile_uuid, team_id, identifier, name, scope, mobileconfig, checksum, uploaded_at, secrets_updated_at)
           VALUES %s
           %s
-`, strings.TrimSuffix(sb.String(), ","), ds.dialect.OnDuplicateKey("", `
+`, strings.TrimSuffix(sb.String(), ","), ds.dialect.OnDuplicateKey("profile_uuid", `
             uploaded_at = IF(checksum = VALUES(checksum) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP()),
             mobileconfig = VALUES(mobileconfig),
             checksum = VALUES(checksum),
@@ -4224,14 +4224,14 @@ func (ds *Datastore) GetMDMAppleBootstrapPackageSummary(ctx context.Context, tea
 
 func (ds *Datastore) RecordSkippedHostBootstrapPackage(ctx context.Context, hostUUID string) error {
 	stmt := `INSERT INTO host_mdm_apple_bootstrap_packages (host_uuid, command_uuid, skipped) VALUES (?, NULL, 1)
-        ` + ds.dialect.OnDuplicateKey("", `skipped = 1, command_uuid = NULL`)
+        ` + ds.dialect.OnDuplicateKey("host_uuid", `skipped = 1, command_uuid = NULL`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, hostUUID)
 	return ctxerr.Wrap(ctx, err, "record skipped bootstrap package")
 }
 
 func (ds *Datastore) RecordHostBootstrapPackage(ctx context.Context, commandUUID string, hostUUID string) error {
 	stmt := `INSERT INTO host_mdm_apple_bootstrap_packages (command_uuid, host_uuid, skipped) VALUES (?, ?, 0)
-        ` + ds.dialect.OnDuplicateKey("", `command_uuid = command_uuid, skipped = 0`)
+        ` + ds.dialect.OnDuplicateKey("host_uuid", `command_uuid = command_uuid, skipped = 0`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, commandUUID, hostUUID)
 	return ctxerr.Wrap(ctx, err, "record bootstrap package command")
 }
@@ -4369,7 +4369,7 @@ func (ds *Datastore) SetOrUpdateMDMAppleSetupAssistant(ctx context.Context, asst
 			mdm_apple_setup_assistants (team_id, global_or_team_id, name, profile)
 		VALUES
 			(?, ?, ?, ?)
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("id", `
 			updated_at = IF(profile = VALUES(profile) AND name = VALUES(name), updated_at, CURRENT_TIMESTAMP),
 			name = VALUES(name),
 			profile = VALUES(profile)
@@ -4427,7 +4427,7 @@ func (ds *Datastore) SetMDMAppleSetupAssistantProfileUUID(ctx context.Context, t
 			mas.id IS NOT NULL AND
 			abt.id IS NOT NULL
 	)
-	` + ds.dialect.OnDuplicateKey("", `
+	` + ds.dialect.OnDuplicateKey("id", `
 		profile_uuid = VALUES(profile_uuid)
 	`)
 
@@ -4607,7 +4607,7 @@ func (ds *Datastore) SetMDMAppleDefaultSetupAssistantProfileUUID(ctx context.Con
 			abm_tokens abt
 		WHERE
 			abt.organization_name = ?
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("id", `
 			profile_uuid = VALUES(profile_uuid)
 `)
 	var globalOrTmID uint
@@ -5188,7 +5188,7 @@ INSERT INTO mdm_apple_declarations (
 VALUES (
 	?,?,?,?,?,NOW(6),?
 )
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("declaration_uuid", `
   uploaded_at = IF(raw_json = VALUES(raw_json) AND name = VALUES(name) AND IFNULL(secrets_updated_at = VALUES(secrets_updated_at), TRUE), uploaded_at, NOW(6)),
   secrets_updated_at = VALUES(secrets_updated_at),
   name = VALUES(name),
@@ -5969,7 +5969,7 @@ INSERT INTO host_mdm_apple_declarations
     (host_uuid, declaration_uuid, status, operation_type, detail, declaration_name, declaration_identifier, token, secrets_updated_at)
 VALUES
   %s
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("host_uuid,declaration_uuid", `
   status = VALUES(status),
   operation_type = VALUES(operation_type),
   detail = VALUES(detail)
@@ -6750,7 +6750,7 @@ func (ds *Datastore) AddHostMDMCommands(ctx context.Context, commands []fleet.Ho
 	baseStmt := `
 		INSERT INTO host_mdm_commands (host_id, command_type)
 		VALUES %s
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("host_id,command_type", `
 		command_type = VALUES(command_type)`)
 
 	for i := 0; i < len(commands); i += addHostMDMCommandsBatchSize {
@@ -7248,7 +7248,7 @@ func (ds *Datastore) InsertHostLocationData(ctx context.Context, locData fleet.H
 		INSERT INTO host_last_known_locations
 			(host_id, latitude, longitude)
 		VALUES (?, ?, ?)
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("host_id", `
 			latitude = VALUES(latitude),
 			longitude = VALUES(longitude)
 	`)
@@ -7302,7 +7302,7 @@ func (ds *Datastore) SetHostsRecoveryLockPasswords(ctx context.Context, password
 	stmt := `
 		INSERT INTO host_recovery_key_passwords (host_uuid, encrypted_password, status, operation_type)
 		VALUES %s
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("host_uuid", `
 			encrypted_password = VALUES(encrypted_password),
 			status = VALUES(status),
 			operation_type = VALUES(operation_type),

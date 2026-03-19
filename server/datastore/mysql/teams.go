@@ -618,7 +618,7 @@ func (ds *Datastore) SaveDefaultTeamConfig(ctx context.Context, config *fleet.Te
 
 	_, err = ds.writer(ctx).ExecContext(ctx,
 		`INSERT INTO default_team_config_json(id, json_value) VALUES(1, ?)
-		 `+ds.dialect.OnDuplicateKey("", `json_value = VALUES(json_value)`),
+		 `+ds.dialect.OnDuplicateKey("id", `json_value = VALUES(json_value)`),
 		configBytes,
 	)
 	return ctxerr.Wrap(ctx, err, "save default team config")

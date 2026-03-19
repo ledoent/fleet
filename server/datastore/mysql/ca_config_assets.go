@@ -56,7 +56,7 @@ func (ds *Datastore) saveCAConfigAssets(ctx context.Context, tx sqlx.ExtContext,
 	stmt := fmt.Sprintf(`
 	INSERT INTO ca_config_assets (name, type, value)
 	VALUES %s
-	`+ds.dialect.OnDuplicateKey("", `value = VALUES(value),
+	`+ds.dialect.OnDuplicateKey("id", `value = VALUES(value),
 		type = VALUES(type)`),
 		strings.TrimSuffix(strings.Repeat("(?,?,?),", len(assets)), ","))
 

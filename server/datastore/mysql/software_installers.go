@@ -2068,7 +2068,7 @@ INSERT INTO software_titles
   (name, source, extension_for, bundle_identifier, upgrade_code)
 VALUES
   %s
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("id", `
   name = VALUES(name),
   source = VALUES(source),
   extension_for = VALUES(extension_for),

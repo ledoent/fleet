@@ -17,7 +17,7 @@ INSERT INTO
 	fleet_maintained_apps (name, slug, platform, unique_identifier)
 VALUES
 	(?, ?, ?, ?)
-` + ds.dialect.OnDuplicateKey("", `name = VALUES(name),
+` + ds.dialect.OnDuplicateKey("id", `name = VALUES(name),
 	platform = VALUES(platform),
 	unique_identifier = VALUES(unique_identifier)`)
 

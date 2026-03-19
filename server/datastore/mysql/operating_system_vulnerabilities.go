@@ -296,7 +296,7 @@ func (ds *Datastore) InsertOSVulnerabilities(ctx context.Context, vulnerabilitie
 		stmt := fmt.Sprintf(`
 			INSERT INTO operating_system_vulnerabilities (operating_system_id, cve, source, resolved_in_version)
 			VALUES %s
-			`+ds.dialect.OnDuplicateKey("", `
+			`+ds.dialect.OnDuplicateKey("id", `
 				source = VALUES(source),
 				resolved_in_version = VALUES(resolved_in_version),
 				updated_at = NOW()
@@ -335,7 +335,7 @@ func (ds *Datastore) InsertOSVulnerability(ctx context.Context, v fleet.OSVulner
 			source,
 			resolved_in_version
 		) VALUES (?,?,?,?)
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("id", `
 			operating_system_id = VALUES(operating_system_id),
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
@@ -605,7 +605,7 @@ func (ds *Datastore) refreshOSVersionVulnerabilities(ctx context.Context) error 
 		JOIN software_cve sc ON sc.software_id = khc.software_id
 		WHERE khc.hosts_count > 0
 		GROUP BY khc.team_id, khc.os_version_id, sc.cve
-		`+ds.dialect.OnDuplicateKey("", `
+		`+ds.dialect.OnDuplicateKey("id", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			created_at = VALUES(created_at),
@@ -631,7 +631,7 @@ func (ds *Datastore) refreshOSVersionVulnerabilities(ctx context.Context) error 
 		JOIN software_cve sc ON sc.software_id = khc.software_id
 		WHERE khc.hosts_count > 0
 		GROUP BY khc.os_version_id, sc.cve
-		`+ds.dialect.OnDuplicateKey("", `
+		`+ds.dialect.OnDuplicateKey("id", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			created_at = VALUES(created_at),

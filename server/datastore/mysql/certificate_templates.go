@@ -243,7 +243,7 @@ func (ds *Datastore) BatchUpsertCertificateTemplates(ctx context.Context, certif
 			certificate_authority_id,
 			subject_name
 		) VALUES (?, ?, ?, ?)
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("id", `
 			name = VALUES(name),
 			team_id = VALUES(team_id)
 	`)

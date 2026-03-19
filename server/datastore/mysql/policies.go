@@ -650,7 +650,7 @@ func (ds *Datastore) RecordPolicyQueryExecutions(ctx context.Context, host *flee
 				`INSERT INTO policy_membership (updated_at, policy_id, host_id, passes)
 			VALUES %s `,
 				strings.Join(bindvars, ","),
-			) + ds.dialect.OnDuplicateKey("", "updated_at=VALUES(updated_at), passes=VALUES(passes)")
+			) + ds.dialect.OnDuplicateKey("policy_id,host_id", "updated_at=VALUES(updated_at), passes=VALUES(passes)")
 			if _, err := tx.ExecContext(ctx, query, vals...); err != nil {
 				return ctxerr.Wrapf(ctx, err, "insert policy_membership (%v)", vals)
 			}
@@ -2087,7 +2087,7 @@ func (ds *Datastore) IncreasePolicyAutomationIteration(ctx context.Context, poli
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO policy_automation_iterations (policy_id, iteration) VALUES (?,1)
-			`+ds.dialect.OnDuplicateKey("", "iteration = iteration + 1"),
+			`+ds.dialect.OnDuplicateKey("policy_id", "iteration = iteration + 1"),
 			policyID)
 		return err
 	})
@@ -2395,7 +2395,7 @@ func (ds *Datastore) UpdateHostPolicyCounts(ctx context.Context) error {
 
 			insertStmt := `INSERT INTO policy_stats (policy_id, inherited_team_id, passing_host_count, failing_host_count)
 			VALUES (:policy_id, :inherited_team_id, :passing_host_count, :failing_host_count)
-			` + ds.dialect.OnDuplicateKey("", `updated_at = NOW(),
+			` + ds.dialect.OnDuplicateKey("id", `updated_at = NOW(),
 				passing_host_count = VALUES(passing_host_count),
 				failing_host_count = VALUES(failing_host_count)`)
 			_, err = sqlx.NamedExecContext(ctx, db, insertStmt, policyStats)
@@ -2421,7 +2421,7 @@ func (ds *Datastore) UpdateHostPolicyCounts(ctx context.Context) error {
 		FROM policies p
 		LEFT JOIN policy_membership pm ON p.id = pm.policy_id
 		GROUP BY p.id
-		`+ds.dialect.OnDuplicateKey("", `updated_at = NOW(),
+		`+ds.dialect.OnDuplicateKey("id", `updated_at = NOW(),
 			passing_host_count = VALUES(passing_host_count),
 			failing_host_count = VALUES(failing_host_count)`))
 	if err != nil {

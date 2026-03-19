@@ -385,7 +385,7 @@ func (ds *Datastore) DeleteUser(ctx context.Context, id uint) error {
 		SELECT u.id, u.name, u.email
 		FROM users AS u
 		WHERE u.id = ?
-		` + ds.dialect.OnDuplicateKey("", `name       = u.name,
+		` + ds.dialect.OnDuplicateKey("id", `name       = u.name,
 			email      = u.email`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, id)
 	if err != nil {

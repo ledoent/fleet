@@ -2332,7 +2332,7 @@ func (ds *Datastore) UpsertSoftwareCPEs(ctx context.Context, cpes []fleet.Softwa
 
 	values := strings.TrimSuffix(strings.Repeat("(?,?),", len(cpes)), ",")
 	sql := fmt.Sprintf(
-		`INSERT INTO software_cpe (software_id, cpe) VALUES %s `+ds.dialect.OnDuplicateKey("", `cpe = VALUES(cpe)`),
+		`INSERT INTO software_cpe (software_id, cpe) VALUES %s `+ds.dialect.OnDuplicateKey("id", `cpe = VALUES(cpe)`),
 		values,
 	)
 
@@ -2984,7 +2984,7 @@ func (ds *Datastore) InsertCVEMeta(ctx context.Context, cveMeta []fleet.CVEMeta)
 	query := `
 INSERT INTO cve_meta (cve, cvss_score, epss_probability, cisa_known_exploit, published, description)
 VALUES %s
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("cve", `
     cvss_score = VALUES(cvss_score),
     epss_probability = VALUES(epss_probability),
     cisa_known_exploit = VALUES(cisa_known_exploit),
@@ -3032,7 +3032,7 @@ func (ds *Datastore) InsertSoftwareVulnerability(
 	stmt := `
 		INSERT INTO software_cve (cve, source, software_id, resolved_in_version)
 		VALUES (?,?,?,?)
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("id", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			updated_at=?
@@ -3109,7 +3109,7 @@ func (ds *Datastore) InsertSoftwareVulnerabilities(
 		stmt := fmt.Sprintf(`
 			INSERT INTO software_cve (cve, source, software_id, resolved_in_version)
 			VALUES %s
-			`+ds.dialect.OnDuplicateKey("", `
+			`+ds.dialect.OnDuplicateKey("id", `
 				source = VALUES(source),
 				resolved_in_version = VALUES(resolved_in_version),
 				updated_at = ?

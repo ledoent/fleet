@@ -367,7 +367,7 @@ func (ds *Datastore) insertAndroidHostLabelMembershipTx(ctx context.Context, tx 
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO label_membership (host_id, label_id) VALUES (?, ?), (?, ?)
-		`+ds.dialect.OnDuplicateKey("", `host_id = host_id`),
+		`+ds.dialect.OnDuplicateKey("host_id,label_id", `host_id = host_id`),
 		hostID, allHostsLabelID, hostID, androidLabelID)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "set label membership")
@@ -1139,7 +1139,7 @@ func (ds *Datastore) BulkUpsertMDMAndroidHostProfiles(ctx context.Context, paylo
 				can_reverify
 			)
 			VALUES %s
-			`+ds.dialect.OnDuplicateKey("", `
+			`+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 				status = VALUES(status),
 				operation_type = VALUES(operation_type),
 				detail = VALUES(detail),
@@ -1363,7 +1363,7 @@ WHERE
 		raw_json,
 		uploaded_at
 	) VALUES (CONCAT('` + fleet.MDMAndroidProfileUUIDPrefix + `', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, CURRENT_TIMESTAMP(6))
-	` + ds.dialect.OnDuplicateKey("", `
+	` + ds.dialect.OnDuplicateKey("profile_uuid", `
 		raw_json = VALUES(raw_json),
 		name = VALUES(name),
 		uploaded_at = IF(raw_json = VALUES(raw_json) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP(6))
@@ -1815,7 +1815,7 @@ func (ds *Datastore) updateAndroidAppConfigurationTx(ctx context.Context, tx sql
 		INSERT INTO
 			android_app_configurations (application_id, team_id, global_or_team_id, configuration)
 		VALUES (?, ?, ?, ?)
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("id", `
 			configuration = VALUES(configuration)
 	`)
 

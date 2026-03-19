@@ -30,7 +30,7 @@ func (ds *Datastore) ConditionalAccessBypassDevice(ctx context.Context, hostID u
 		host_conditional_access (host_id, bypassed_at)
 	VALUES
 		(?, NOW(6))
-	` + ds.dialect.OnDuplicateKey("", `bypassed_at = NOW(6)`)
+	` + ds.dialect.OnDuplicateKey("id", `bypassed_at = NOW(6)`)
 
 	var blockCount uint
 

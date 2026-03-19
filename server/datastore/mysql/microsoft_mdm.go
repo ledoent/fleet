@@ -432,7 +432,7 @@ func (ds *Datastore) MDMWindowsSaveResponse(ctx context.Context, deviceID string
 INSERT INTO windows_mdm_command_results
     (enrollment_id, command_uuid, raw_result, response_id, status_code)
 VALUES %s
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("enrollment_id,command_uuid", `
     raw_result = COALESCE(VALUES(raw_result), raw_result),
     status_code = COALESCE(VALUES(status_code), status_code)
 `)
@@ -1712,7 +1712,7 @@ func (ds *Datastore) BulkUpsertMDMWindowsHostProfiles(ctx context.Context, paylo
 	      checksum
             )
             VALUES %s
-	    `+ds.dialect.OnDuplicateKey("", `
+	    `+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
               status = VALUES(status),
               operation_type = VALUES(operation_type),
               detail = VALUES(detail),
@@ -1973,7 +1973,7 @@ INSERT INTO
 		SELECT 1 FROM mdm_android_configuration_profiles WHERE name = ? AND team_id = ?
 	)
 )
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("profile_uuid", `
 	uploaded_at = IF(syncml = VALUES(syncml), uploaded_at, CURRENT_TIMESTAMP()),
 	syncml = VALUES(syncml)
 `)
@@ -2072,7 +2072,7 @@ INSERT INTO
 VALUES
   -- see https://stackoverflow.com/a/51393124/1094941
   ( CONCAT('` + fleet.MDMWindowsProfileUUIDPrefix + `', CONVERT(UUID() USING utf8mb4)), ?, ?, ?, CURRENT_TIMESTAMP() )
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("profile_uuid", `
   uploaded_at = IF(syncml = VALUES(syncml) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP()),
   name = VALUES(name),
   syncml = VALUES(syncml)
@@ -2298,7 +2298,7 @@ func (ds *Datastore) bulkSetPendingMDMWindowsHostProfilesDB(
 					checksum
 				)
 				VALUES %s
-				`+ds.dialect.OnDuplicateKey("", `
+				`+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 					operation_type = VALUES(operation_type),
 					status = NULL,
 					command_uuid = VALUES(command_uuid),
@@ -2397,7 +2397,7 @@ func (ds *Datastore) WipeHostViaWindowsMDM(ctx context.Context, host *fleet.Host
 				fleet_platform
 			)
 			VALUES (?, ?, ?)
-			` + ds.dialect.OnDuplicateKey("", `
+			` + ds.dialect.OnDuplicateKey("host_id", `
 				wipe_ref   = VALUES(wipe_ref)`)
 
 		if _, err := tx.ExecContext(ctx, stmt, host.ID, cmd.CommandUUID, host.FleetPlatform()); err != nil {

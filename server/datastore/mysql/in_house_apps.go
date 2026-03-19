@@ -739,7 +739,7 @@ INSERT INTO software_titles
   (name, source, extension_for, bundle_identifier)
 VALUES
   %s
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("id", `
   name = VALUES(name),
   source = VALUES(source),
   extension_for = VALUES(extension_for),
@@ -931,7 +931,7 @@ INSERT INTO in_house_apps (
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("id", `
   filename = VALUES(filename),
   version = VALUES(version),
   storage_id = VALUES(storage_id),
