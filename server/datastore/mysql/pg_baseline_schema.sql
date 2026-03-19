@@ -638,7 +638,7 @@ CREATE TABLE IF NOT EXISTS "host_mdm_apple_bootstrap_packages" (
   "host_uuid" varchar(127) NOT NULL,
   "command_uuid" varchar(127) DEFAULT NULL,
   "skipped" boolean NOT NULL DEFAULT FALSE,
-  CONSTRAINT "ck_skipped_or_commanduuid" CHECK ((("skipped" = 0) = ("command_uuid" is not null))),
+  CONSTRAINT "ck_skipped_or_commanduuid" CHECK ((("skipped" = false) = ("command_uuid" is not null))),
   PRIMARY KEY ("host_uuid")
 );
 
@@ -718,7 +718,7 @@ CREATE TABLE IF NOT EXISTS "host_mdm_windows_profiles" (
   "profile_name" varchar(255) NOT NULL DEFAULT '',
   "retries" smallint  NOT NULL DEFAULT '0',
   "profile_uuid" varchar(37) NOT NULL DEFAULT '',
-  "checksum" bytea NOT NULL DEFAULT '0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0',
+  "checksum" bytea NOT NULL DEFAULT ''::bytea,
   "secrets_updated_at" timestamp DEFAULT NULL,
   "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ,
@@ -1090,7 +1090,7 @@ CREATE TABLE IF NOT EXISTS "locks" (
   "owner" varchar(255) DEFAULT NULL,
   "expires_at" timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY ("id"),
-  CONSTRAINT "idx_name" UNIQUE ("name")
+  CONSTRAINT "locks_idx_name" UNIQUE ("name")
 );
 
 CREATE TABLE IF NOT EXISTS "mdm_android_configuration_profiles" (
@@ -1190,7 +1190,7 @@ CREATE TABLE IF NOT EXISTS "mdm_apple_enrollment_profiles" (
   "updated_at" timestamp NULL DEFAULT CURRENT_TIMESTAMP ,
   PRIMARY KEY ("id"),
   CONSTRAINT "idx_type" UNIQUE ("type"),
-  CONSTRAINT "idx_token" UNIQUE ("token")
+  CONSTRAINT "mdm_apple_enrollment_profiles_idx_token" UNIQUE ("token")
 );
 
 CREATE TABLE IF NOT EXISTS "mdm_apple_installers" (
@@ -1335,7 +1335,7 @@ CREATE TABLE IF NOT EXISTS "mdm_windows_enrollments" (
   "credentials_hash" bytea DEFAULT NULL,
   "credentials_acknowledged" boolean NOT NULL DEFAULT FALSE,
   PRIMARY KEY ("id"),
-  CONSTRAINT "idx_type" UNIQUE ("mdm_hardware_id")
+  CONSTRAINT "mdm_windows_enrollments_idx_type" UNIQUE ("mdm_hardware_id")
 );
 
 CREATE TABLE IF NOT EXISTS "microsoft_compliance_partner_host_statuses" (
@@ -1574,7 +1574,7 @@ CREATE TABLE IF NOT EXISTS "operating_system_version_vulnerabilities" (
   "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ,
   PRIMARY KEY ("id"),
-  CONSTRAINT "idx_os_version_vulnerabilities_unq_os_version_team_cve" UNIQUE ((ifnull(cast("team_id" as signed),-(1))),"os_version_id","cve")
+  CONSTRAINT "idx_os_version_vulnerabilities_unq_os_version_team_cve" UNIQUE ((COALESCE(cast("team_id" as signed),-(1))),"os_version_id","cve")
 );
 
 CREATE TABLE IF NOT EXISTS "operating_system_vulnerabilities" (
@@ -3135,7 +3135,7 @@ CREATE TABLE "abm_tokens" (
   "macos_default_team_id" integer, "ios_default_team_id" integer, "ipados_default_team_id" integer,
   "terms_expired" boolean NOT NULL DEFAULT FALSE,
   "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT "idx_abm_tokens_organization_name" UNIQUE ("organization_name"));
+  CONSTRAINT "abm_tokens_idx_abm_tokens_organization_name" UNIQUE ("organization_name"));
 
 DROP TABLE IF EXISTS "carve_metadata" CASCADE;
 CREATE TABLE "carve_metadata" ("id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

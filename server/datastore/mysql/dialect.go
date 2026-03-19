@@ -91,4 +91,8 @@ type DialectHelper interface {
 	// IsBadConnection returns true if err is a connection-level error that
 	// justifies retrying on a new connection.
 	IsBadConnection(err error) bool
+
+	// ReturningID returns " RETURNING id" for PostgreSQL (to be appended to
+	// INSERT statements) or "" for MySQL (which uses LastInsertId instead).
+	ReturningID() string
 }

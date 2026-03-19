@@ -96,3 +96,6 @@ func (mysqlDialect) IsReadOnly(err error) bool {
 func (mysqlDialect) IsBadConnection(err error) bool {
 	return isBadConnection(err)
 }
+
+func (mysqlDialect) ReturningID() string { return "" }
+

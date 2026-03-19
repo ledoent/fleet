@@ -149,3 +149,6 @@ func (postgresDialect) IsReadOnly(err error) bool { return pg.IsReadOnly(err) }
 
 // IsBadConnection returns true if err is a connection-level error.
 func (postgresDialect) IsBadConnection(err error) bool { return pg.IsBadConnection(err) }
+
+func (postgresDialect) ReturningID() string { return " RETURNING id" }
+
