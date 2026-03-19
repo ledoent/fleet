@@ -33,7 +33,7 @@ import (
 )
 
 func TestSoftware(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
@@ -3781,7 +3781,7 @@ func testInsertHostSoftwareInstalledPaths(t *testing.T, ds *Datastore) {
 }
 
 func TestCleanupSoftwareTitles(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	ctx := context.Background()
 
 	host1 := test.NewHost(t, ds, "host1", "", "host1key", "host1uuid", time.Now())

@@ -14,7 +14,7 @@ import (
 )
 
 func TestUnicode(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	defer ds.Close()
 
 	l1 := fleet.LabelSpec{

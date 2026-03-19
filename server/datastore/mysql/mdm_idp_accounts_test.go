@@ -12,7 +12,7 @@ import (
 )
 
 func TestMDMIdPAccountsReconciliation(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string

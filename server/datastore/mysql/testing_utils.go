@@ -17,6 +17,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"regexp"
 	"strconv"
 	"strings"
@@ -414,6 +416,22 @@ func CreateMySQLDS(t testing.TB) *Datastore {
 	return createMySQLDSWithOptions(t, nil)
 }
 
+// CreateDS creates a test Datastore for the active test database backend.
+// When MYSQL_TEST=1 is set, returns a MySQL-backed datastore.
+// When POSTGRES_TEST=1 is set, returns a PostgreSQL-backed datastore.
+// Skips the test if neither is set.
+func CreateDS(t *testing.T) *Datastore {
+	_, hasMysql := os.LookupEnv("MYSQL_TEST")
+	_, hasPG := os.LookupEnv("POSTGRES_TEST")
+	if !hasMysql && !hasPG {
+		t.Skip("Neither MYSQL_TEST nor POSTGRES_TEST is set")
+	}
+	if hasPG {
+		return CreatePostgresDS(t)
+	}
+	return createMySQLDSWithOptions(t, nil)
+}
+
 func CreateNamedMySQLDS(t *testing.T, name string) *Datastore {
 	ds, _ := CreateNamedMySQLDSWithConns(t, name)
 	return ds
@@ -433,9 +451,39 @@ func CreateNamedMySQLDSWithConns(t *testing.T, name string) (*Datastore, *common
 	return ds, TestDBConnections(t, ds)
 }
 
+// pgBaselineSchema is loaded once from pg_baseline_schema.sql
+var pgBaselineSchema string
+var pgBaselineOnce sync.Once
+
+func loadPGBaselineSchema() string {
+	pgBaselineOnce.Do(func() {
+		// Try multiple paths since tests run from different working directories
+		paths := []string{
+			"pg_baseline_schema.sql",
+			"server/datastore/mysql/pg_baseline_schema.sql",
+			"../../../server/datastore/mysql/pg_baseline_schema.sql",
+		}
+		// Also try relative to the test binary via runtime.Caller
+		_, thisFile, _, _ := runtime.Caller(0)
+		if thisFile != "" {
+			dir := filepath.Dir(thisFile)
+			paths = append(paths, filepath.Join(dir, "pg_baseline_schema.sql"))
+		}
+		for _, p := range paths {
+			data, err := os.ReadFile(p)
+			if err == nil {
+				pgBaselineSchema = string(data)
+				return
+			}
+		}
+		panic("cannot load pg_baseline_schema.sql from any known path")
+	})
+	return pgBaselineSchema
+}
+
 // CreatePostgresDS creates a test Datastore backed by PostgreSQL.
 // Requires POSTGRES_TEST=1 and a running postgres_test container (default port 5434).
-// The database is created fresh for each test to ensure isolation.
+// The database is created fresh for each test with the full Fleet schema applied.
 func CreatePostgresDS(t *testing.T) *Datastore {
 	if _, ok := os.LookupEnv("POSTGRES_TEST"); !ok {
 		t.Skip("PostgreSQL tests are disabled")
@@ -478,6 +526,23 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 	testDSN := fmt.Sprintf("host=localhost port=%s user=fleet password=insecure dbname=%s sslmode=disable", port, dbName)
 	testDB, err := sqlx.Open("pgx", testDSN)
 	require.NoError(t, err)
+
+	// Apply the baseline schema (all 194 tables + migration versions)
+	schema := loadPGBaselineSchema()
+	_, err = testDB.Exec(schema)
+	if err != nil {
+		// Schema has some known non-fatal errors (already exists, etc) — apply with individual statements
+		for _, stmt := range strings.Split(schema, ";\n") {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" || strings.HasPrefix(stmt, "--") {
+				continue
+			}
+			_, _ = testDB.Exec(stmt)
+		}
+	}
+
+	// Insert required seed data (app_config_json needs at least one row)
+	_, _ = testDB.Exec(`INSERT INTO app_config_json (id, json_value) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING`)
 
 	ds := &Datastore{
 		primary:   testDB,

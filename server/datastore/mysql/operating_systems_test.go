@@ -17,7 +17,7 @@ import (
 
 func TestListOperatingSystems(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	// no os records
 	list, err := ds.ListOperatingSystems(ctx)
@@ -41,7 +41,7 @@ func TestListOperatingSystems(t *testing.T) {
 
 func TestListOperatingSystemsForPlatform(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	// no os records
 	list, err := ds.ListOperatingSystemsForPlatform(ctx, "windows")
@@ -63,7 +63,7 @@ func TestListOperatingSystemsForPlatform(t *testing.T) {
 
 func TestUpdateHostOperatingSystem(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	testHostID := uint(42)
 	testOS := fleet.OperatingSystem{
@@ -145,7 +145,7 @@ func TestUpdateHostOperatingSystem(t *testing.T) {
 
 func TestUniqueOS(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	testHostIDs := make([]uint, 50)
 	testOS := fleet.OperatingSystem{
@@ -174,7 +174,7 @@ func TestUniqueOS(t *testing.T) {
 
 func TestMaybeNewOperatingSystem(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	seedOperatingSystems(t, ds)
 	list, err := ds.ListOperatingSystems(ctx)
@@ -248,7 +248,7 @@ func TestMaybeNewOperatingSystem(t *testing.T) {
 
 func TestMaybeUpdateHostOperatingSystem(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	seedOperatingSystems(t, ds)
 	osList, err := ds.ListOperatingSystems(ctx)
@@ -284,7 +284,7 @@ func TestMaybeUpdateHostOperatingSystem(t *testing.T) {
 
 func TestGetHostOperatingSystem(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	seedOperatingSystems(t, ds)
 	osList, err := ds.ListOperatingSystems(ctx)
@@ -335,7 +335,7 @@ func TestGetHostOperatingSystem(t *testing.T) {
 
 func TestCleanupHostOperatingSystems(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	seedOperatingSystems(t, ds)
 	testOSs, err := ds.ListOperatingSystems(ctx)

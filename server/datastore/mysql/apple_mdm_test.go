@@ -39,7 +39,7 @@ import (
 )
 
 func TestMDMApple(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
@@ -782,7 +782,7 @@ func testHostDetailsMDMProfiles(t *testing.T, ds *Datastore) {
 }
 
 func TestIngestMDMAppleDevicesFromDEPSync(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	ctx := t.Context()
 	createBuiltinLabels(t, ds)
 
@@ -842,7 +842,7 @@ func TestIngestMDMAppleDevicesFromDEPSync(t *testing.T) {
 }
 
 func TestDEPSyncTeamAssignment(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	ctx := t.Context()
 	createBuiltinLabels(t, ds)
 
@@ -912,7 +912,7 @@ func TestDEPSyncTeamAssignment(t *testing.T) {
 }
 
 func TestMDMEnrollment(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
@@ -3112,7 +3112,7 @@ func createDiskEncryptionRecord(ctx context.Context, ds *Datastore, t *testing.T
 }
 
 func TestMDMAppleFileVaultSummary(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	ctx := t.Context()
 
 	// 10 new hosts
@@ -4690,7 +4690,7 @@ func testSetVerifiedMacOSProfiles(t *testing.T, ds *Datastore) {
 }
 
 func TestCopyDefaultMDMAppleBootstrapPackage(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	defer ds.Close()
 
 	ctx := t.Context()
@@ -4863,7 +4863,7 @@ func TestCopyDefaultMDMAppleBootstrapPackage(t *testing.T) {
 }
 
 func TestHostDEPAssignments(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	defer ds.Close()
 
 	ctx := t.Context()
@@ -6192,7 +6192,7 @@ func testDeleteMDMAppleDeclarationWithPendingInstalls(t *testing.T, ds *Datastor
 }
 
 func TestMDMAppleProfileVerification(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	ctx := t.Context()
 
 	now := time.Now()
@@ -6587,7 +6587,7 @@ func profilesByIdentifier(profiles []*fleet.HostMacOSProfile) map[string]*fleet.
 }
 
 func TestRestorePendingDEPHost(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	defer ds.Close()
 
 	ctx := t.Context()
@@ -8179,7 +8179,7 @@ func testIngestMDMAppleDeviceFromOTAEnrollment(t *testing.T, ds *Datastore) {
 }
 
 func TestGetMDMAppleOSUpdatesSettingsByHostSerial(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	defer ds.Close()
 
 	keys := []string{"ios", "ipados", "macos"}

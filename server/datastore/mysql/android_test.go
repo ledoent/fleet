@@ -20,7 +20,7 @@ import (
 )
 
 func TestAndroid(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	TruncateTables(t, ds)
 
 	cases := []struct {

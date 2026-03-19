@@ -12,7 +12,7 @@ import (
 )
 
 func TestLinuxDiskEncryptionSummary(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	ctx := context.Background()
 
 	// 5 new ubuntu hosts

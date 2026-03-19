@@ -17,7 +17,7 @@ import (
 )
 
 func TestNanoMDMStorage(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	cases := []struct {
 		name string
 		fn   func(t *testing.T, ds *Datastore)

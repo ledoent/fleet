@@ -15,7 +15,7 @@ import (
 )
 
 func TestQueryResults(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
