@@ -49,7 +49,7 @@ type PostgresDialect struct{}
 func (PostgresDialect) DriverName() string { return "postgres" }
 
 func (pg PostgresDialect) createVersionTableSql(name string) string {
-	return `CREATE TABLE ` + name + ` (
+	return `CREATE TABLE IF NOT EXISTS ` + name + ` (
             	id serial NOT NULL,
                 version_id bigint NOT NULL,
                 is_applied boolean NOT NULL,
@@ -81,7 +81,7 @@ type MySqlDialect struct{}
 func (MySqlDialect) DriverName() string { return "mysql" }
 
 func (m MySqlDialect) createVersionTableSql(name string) string {
-	return `CREATE TABLE ` + name + ` (
+	return `CREATE TABLE IF NOT EXISTS ` + name + ` (
                 id serial NOT NULL,
                 version_id bigint NOT NULL,
                 is_applied boolean NOT NULL,
