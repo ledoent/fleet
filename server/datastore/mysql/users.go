@@ -53,7 +53,7 @@ func (ds *Datastore) NewUser(ctx context.Context, user *fleet.User) (*fleet.User
 		invite_id
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
       `
-		result, err := tx.ExecContext(ctx, sqlStatement,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlStatement,
 			user.Password,
 			user.Salt,
 			user.Name,
@@ -76,7 +76,6 @@ func (ds *Datastore) NewUser(ctx context.Context, user *fleet.User) (*fleet.User
 			return ctxerr.Wrap(ctx, err, "create new user")
 		}
 
-		id, _ := result.LastInsertId()
 		user.ID = uint(id) //nolint:gosec // dismiss G115
 
 		if err := saveTeamsForUserDB(ctx, tx, user); err != nil {

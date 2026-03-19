@@ -114,10 +114,56 @@ func (ds *Datastore) reader(ctx context.Context) fleet.DBReader {
 	return ds.replica
 }
 
+// currentDatabaseFn returns the SQL function to get the current database name.
+// MySQL: DATABASE(), PostgreSQL: current_database()
+func (ds *Datastore) currentDatabaseFn() string {
+	if ds.dialect.ReturningID() != "" {
+		return "current_database()"
+	}
+	return "(SELECT DATABASE())"
+}
+
 // writer returns the DB instance to use for write statements, which is always
 // the primary.
 func (ds *Datastore) writer(ctx context.Context) *sqlx.DB {
 	return ds.primary
+}
+
+// Querier is any type that can execute SQL (sqlx.DB, sqlx.Tx, sqlx.ExtContext).
+type Querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// insertAndGetID executes an INSERT and returns the auto-generated ID.
+// For MySQL, uses LastInsertId(). For PostgreSQL, appends RETURNING id.
+func (ds *Datastore) insertAndGetID(ctx context.Context, q Querier, query string, args ...any) (int64, error) {
+	if ds.dialect.ReturningID() != "" {
+		// PostgreSQL: use RETURNING id
+		var id int64
+		err := q.QueryRowContext(ctx, query+ds.dialect.ReturningID(), args...).Scan(&id)
+		return id, err
+	}
+	// MySQL: use LastInsertId
+	res, err := q.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// insertAndGetIDTx is like insertAndGetID but for sqlx.ExtContext (transactions).
+func insertAndGetIDTx(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, query string, args ...any) (int64, error) {
+	if dialect.ReturningID() != "" {
+		var id int64
+		err := tx.QueryRowxContext(ctx, query+dialect.ReturningID(), args...).Scan(&id)
+		return id, err
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 // loadOrPrepareStmt will load a statement from the statement cache.
@@ -1380,7 +1426,7 @@ func (ds *Datastore) optimisticGetOrInsertWithWriter(ctx context.Context, writer
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// this does not exist yet, try to insert it
-			res, err := writer.ExecContext(ctx, insertStmt.Statement, insertStmt.Args...)
+			insertedID, err := insertAndGetIDTx(ctx, writer, ds.dialect, insertStmt.Statement, insertStmt.Args...)
 			if err != nil {
 				if ds.dialect.IsDuplicate(err) {
 					// it might've been created between the select and the insert, read
@@ -1393,8 +1439,7 @@ func (ds *Datastore) optimisticGetOrInsertWithWriter(ctx context.Context, writer
 				}
 				return 0, ctxerr.Wrap(ctx, err, "insert")
 			}
-			id, _ := res.LastInsertId()
-			return uint(id), nil //nolint:gosec // dismiss G115
+			return uint(insertedID), nil //nolint:gosec // dismiss G115
 		}
 		return 0, ctxerr.Wrap(ctx, err, "get id from reader")
 	}
