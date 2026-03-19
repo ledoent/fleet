@@ -557,7 +557,7 @@ func (svc *Service) CreateEnrollmentToken(ctx context.Context, enrollSecret, idp
 	if enrollSecretObj.TeamID != nil {
 		team, teamErr := svc.fleetDS.TeamLite(ctx, *enrollSecretObj.TeamID)
 		if teamErr != nil {
-			level.Warn(svc.logger).Log("msg", "failed to get team for enrollment mode, defaulting to work_profile", "team_id", *enrollSecretObj.TeamID, "err", teamErr)
+			svc.logger.Warn("failed to get team for enrollment mode, defaulting to work_profile", "team_id", *enrollSecretObj.TeamID, "err", teamErr)
 		} else if team.Config.MDM.AndroidSettings.EnrollmentMode != "" {
 			enrollmentMode = team.Config.MDM.AndroidSettings.EnrollmentMode
 		}
