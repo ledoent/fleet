@@ -242,6 +242,13 @@ func NewDBConnections(cfg config.MysqlConfig, opts ...DBOption) (*common_mysql.D
 	if err := checkAndModifyConfig(&cfg); err != nil {
 		return nil, err
 	}
+
+	// Set migration client dialects to match the configured driver.
+	if cfg.Driver == "postgres" {
+		tables.SetDialect("postgres")
+		data.SetDialect("postgres")
+	}
+
 	// Convert replica config once so that checkAndModifyConfig mutations are preserved for the later NewDB call.
 	var replicaConf *config.MysqlConfig
 	if options.ReplicaConfig != nil {

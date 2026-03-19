@@ -18,6 +18,14 @@ import (
 
 var MigrationClient = goose.New("migration_status_tables", goose.MySqlDialect{})
 
+// SetDialect updates the migration client's SQL dialect.
+// Call before running migrations when using a non-MySQL database.
+func SetDialect(driver string) {
+	if err := MigrationClient.SetDialect(driver); err != nil {
+		panic(fmt.Sprintf("migrations/tables: unsupported dialect %q: %v", driver, err))
+	}
+}
+
 // can override in tests
 var (
 	outputTo         io.Writer = os.Stderr
