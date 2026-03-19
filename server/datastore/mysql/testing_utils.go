@@ -510,7 +510,7 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 
 	// Connect to default db to create test database
 	adminDSN := fmt.Sprintf("host=localhost port=%s user=fleet password=insecure dbname=fleet sslmode=disable", port)
-	adminDB, err := sqlx.Open("pgx", adminDSN)
+	adminDB, err := sqlx.Open("pgx-rebind", adminDSN)
 	require.NoError(t, err)
 	defer adminDB.Close()
 
@@ -524,20 +524,40 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 
 	// Connect to the test database
 	testDSN := fmt.Sprintf("host=localhost port=%s user=fleet password=insecure dbname=%s sslmode=disable", port, dbName)
-	testDB, err := sqlx.Open("pgx", testDSN)
+	testDB, err := sqlx.Open("pgx-rebind", testDSN)
 	require.NoError(t, err)
 
-	// Apply the baseline schema (all 194 tables + migration versions)
+	// Apply the baseline schema statement-by-statement.
+	// Split on ");\n" for CREATE TABLE and ";\n" for INSERTs.
 	schema := loadPGBaselineSchema()
-	_, err = testDB.Exec(schema)
-	if err != nil {
-		// Schema has some known non-fatal errors (already exists, etc) — apply with individual statements
-		for _, stmt := range strings.Split(schema, ";\n") {
-			stmt = strings.TrimSpace(stmt)
-			if stmt == "" || strings.HasPrefix(stmt, "--") {
-				continue
+	// Use a regex to split on statement boundaries: "); followed by newline or
+	// ";" at end of a single-line statement (INSERT/DROP)
+	re := regexp.MustCompile(`;\s*\n`)
+	stmts := re.Split(schema, -1)
+	errCount := 0
+	for _, stmt := range stmts {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" || strings.HasPrefix(stmt, "--") {
+			continue
+		}
+		if _, err := testDB.DB.Exec(stmt + ";"); err != nil {
+			errCount++
+			if errCount <= 3 {
+				first := stmt
+				if len(first) > 100 { first = first[:100] }
+				t.Logf("PG schema warning (%d): %v [%s]", errCount, err, first)
 			}
-			_, _ = testDB.Exec(stmt)
+		}
+	}
+	if errCount > 0 {
+		t.Logf("PG schema: %d/%d stmts had errors (non-fatal)", errCount, len(stmts))
+	}
+
+	// Verify minimum table count
+	var tableCount int
+	if err := testDB.Get(&tableCount, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public'"); err == nil {
+		if tableCount < 180 {
+			t.Fatalf("PG schema incomplete: only %d tables (expected 190+)", tableCount)
 		}
 	}
 
@@ -586,9 +606,25 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 		"mdm_delivery_status":              true,
 		"mdm_operation_types":              true,
 		"migration_status_tables":          true,
+		"migration_status_data":            true,
 		"osquery_options":                  true,
 		"software_categories":              true,
 	}
+
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		// PostgreSQL: use TRUNCATE ... CASCADE (no FK check toggle needed)
+		db := ds.writer(context.Background())
+		for _, tbl := range tables {
+			if nonEmptyTables[tbl] {
+				continue
+			}
+			if _, err := db.ExecContext(context.Background(), `TRUNCATE TABLE "`+tbl+`" CASCADE`); err != nil {
+				t.Logf("truncate %s: %v", tbl, err)
+			}
+		}
+		return
+	}
+
 	testing_utils.TruncateTables(t, ds.writer(context.Background()), ds.logger, nonEmptyTables, tables...)
 }
 

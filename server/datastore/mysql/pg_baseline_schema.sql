@@ -1,5 +1,5 @@
-Generated 192 tables
-est Baseline Schema
+-- Fleet PostgreSQL Test Baseline Schema
+-- Auto-generated from MySQL test schema
 -- Auto-generated from MySQL test schema
 
 CREATE TABLE IF NOT EXISTS "abm_tokens" (

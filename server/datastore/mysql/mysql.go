@@ -33,7 +33,7 @@ import (
 	scep_depot "github.com/fleetdm/fleet/v4/server/mdm/scep/depot"
 	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
 	"github.com/go-sql-driver/mysql"
-	_ "github.com/jackc/pgx/v5/stdlib" // register pgx driver for PostgreSQL
+	_ "github.com/fleetdm/fleet/v4/server/platform/postgres" // register pgx-rebind driver for PostgreSQL
 	"github.com/hashicorp/go-multierror"
 	"github.com/jmoiron/sqlx"
 	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
@@ -410,7 +410,9 @@ func newPostgresDB(conf *config.MysqlConfig) (*sqlx.DB, error) {
 		)
 	}
 
-	db, err := sqlx.Open("pgx", dsn)
+	// Use "pgx-rebind" driver which wraps pgx/stdlib and auto-converts
+	// MySQL-style ? placeholders to PostgreSQL $N placeholders.
+	db, err := sqlx.Open("pgx-rebind", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
