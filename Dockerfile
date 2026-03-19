@@ -1,5 +1,5 @@
-# Multi-stage Dockerfile for Fleet with Kencove premium license
-# Based on fleet-v4.80.2 with modified LoadLicense()
+# Multi-stage Dockerfile for Fleet with PostgreSQL dialect support
+# Built from ledoent/fleet fork with DialectHelper abstraction
 
 # Stage 1: Build frontend assets
 FROM node:24-bookworm AS frontend
@@ -20,8 +20,8 @@ RUN go run github.com/kevinburke/go-bindata/go-bindata -pkg=bindata -tags full \
 ARG FLEET_VERSION=dev
 RUN CGO_ENABLED=1 go build -tags full,fts5,netgo -trimpath \
     -ldflags "-extldflags '-static' \
-    -X github.com/fleetdm/fleet/v4/server/version.version=${FLEET_VERSION}-kencove \
-    -X github.com/fleetdm/fleet/v4/server/version.branch=kencove" \
+    -X github.com/fleetdm/fleet/v4/server/version.version=${FLEET_VERSION}-ledoent \
+    -X github.com/fleetdm/fleet/v4/server/version.branch=ledoent" \
     -o fleet ./cmd/fleet
 
 # Stage 3: Runtime image
