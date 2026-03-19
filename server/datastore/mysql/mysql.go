@@ -33,6 +33,7 @@ import (
 	scep_depot "github.com/fleetdm/fleet/v4/server/mdm/scep/depot"
 	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
 	"github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib" // register pgx driver for PostgreSQL
 	"github.com/hashicorp/go-multierror"
 	"github.com/jmoiron/sqlx"
 	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
@@ -376,7 +377,39 @@ func init() {
 }
 
 func NewDB(conf *config.MysqlConfig, opts *common_mysql.DBOptions) (*sqlx.DB, error) {
+	if conf.Driver == "postgres" {
+		return newPostgresDB(conf)
+	}
 	return common_mysql.NewDB(toCommonMysqlConfig(conf), opts, otelTracedDriverName)
+}
+
+// newPostgresDB opens a PostgreSQL connection using pgx/stdlib.
+func newPostgresDB(conf *config.MysqlConfig) (*sqlx.DB, error) {
+	// Build PostgreSQL DSN from the MySQL-style config fields.
+	// Address is expected as "host:port".
+	host, port, err := net.SplitHostPort(conf.Address)
+	if err != nil {
+		host = conf.Address
+		port = "5432"
+	}
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		host, port, conf.Username, conf.Password, conf.Database,
+	)
+	if conf.TLSCA != "" {
+		dsn = fmt.Sprintf(
+			"host=%s port=%s user=%s password=%s dbname=%s sslmode=verify-ca sslrootcert=%s",
+			host, port, conf.Username, conf.Password, conf.Database, conf.TLSCA,
+		)
+	}
+
+	db, err := sqlx.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	db.SetMaxOpenConns(conf.MaxOpenConns)
+	db.SetMaxIdleConns(conf.MaxIdleConns)
+	return db, nil
 }
 
 // toCommonMysqlConfig converts a config.MysqlConfig to common_mysql.MysqlConfig.
