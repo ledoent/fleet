@@ -1166,7 +1166,7 @@ func (ds *Datastore) SyncHostsSoftwareTitles(ctx context.Context, updatedAt time
                 (software_title_id, hosts_count, team_id, global_stats, updated_at)
             VALUES
                 %s
-            ` + ds.dialect.OnDuplicateKey("", `hosts_count = VALUES(hosts_count),
+            ` + ds.dialect.OnDuplicateKey("software_id,team_id", `hosts_count = VALUES(hosts_count),
                 updated_at = VALUES(updated_at)`)
 
 	// Create a fresh swap table to populate with new counts. If a previous run left a partial swap table, drop it first.

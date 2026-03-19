@@ -63,7 +63,7 @@ func (ds *Datastore) NewAndroidHost(ctx context.Context, host *fleet.AndroidHost
 			:detail_updated_at,
 			:label_updated_at,
 			:uuid
-		) ` + ds.dialect.OnDuplicateKey("", `
+		) ` + ds.dialect.OnDuplicateKey("id", `
 			hostname = VALUES(hostname),
 			computer_name = VALUES(computer_name),
 			platform = VALUES(platform),

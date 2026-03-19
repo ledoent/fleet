@@ -1002,7 +1002,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				// Insert software titles
 				const numberOfArgsPerSoftwareTitles = 7
 				titlesValues := strings.TrimSuffix(strings.Repeat("(?,?,?,?,?,?,?),", len(uniqueTitlesToInsert)), ",")
-				titlesStmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+" software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES %s"+ds.dialect.OnConflictDoNothing(""), titlesValues)
+				titlesStmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+" software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES %s"+ds.dialect.OnConflictDoNothing("name,source,extension_for"), titlesValues)
 				titlesArgs := make([]any, 0, len(uniqueTitlesToInsert)*numberOfArgsPerSoftwareTitles)
 
 				for _, title := range uniqueTitlesToInsert {
@@ -1169,7 +1169,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 					checksum,
 					application_id,
 					upgrade_code
-				) VALUES %s`+ds.dialect.OnConflictDoNothing(""),
+				) VALUES %s`+ds.dialect.OnConflictDoNothing("name,version,source,extension_for,bundle_identifier"),
 				values,
 			)
 
@@ -1267,7 +1267,7 @@ func (ds *Datastore) linkSoftwareToHost(
 	// INSERT IGNORE handles duplicate key errors for idempotency.
 	if len(insertsHostSoftware) > 0 {
 		values := strings.TrimSuffix(strings.Repeat("(?,?,?),", len(insertsHostSoftware)/3), ",")
-		stmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+` host_software (host_id, software_id, last_opened_at) VALUES %s`+ds.dialect.OnConflictDoNothing(""), values)
+		stmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+` host_software (host_id, software_id, last_opened_at) VALUES %s`+ds.dialect.OnConflictDoNothing("host_id,software_id"), values)
 		if _, err := tx.ExecContext(ctx, stmt, insertsHostSoftware...); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "insert host software")
 		}
@@ -2661,7 +2661,7 @@ func (ds *Datastore) SyncHostsSoftware(ctx context.Context, updatedAt time.Time)
         (software_id, hosts_count, team_id, global_stats, updated_at)
       VALUES
         %s
-      ` + ds.dialect.OnDuplicateKey("", `
+      ` + ds.dialect.OnDuplicateKey("host_id,software_id", `
         hosts_count = VALUES(hosts_count),
         updated_at = VALUES(updated_at)`)
 
@@ -6438,7 +6438,7 @@ func (ds *Datastore) CreateIntermediateInstallFailureRecord(ctx context.Context,
 			post_install_script_exit_code,
 			post_install_script_output
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		` + ds.dialect.OnDuplicateKey("", `
+		` + ds.dialect.OnDuplicateKey("id", `
 			install_script_exit_code = VALUES(install_script_exit_code),
 			install_script_output = VALUES(install_script_output),
 			pre_install_query_output = VALUES(pre_install_query_output),

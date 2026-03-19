@@ -60,7 +60,7 @@ func (ds *Datastore) InsertWindowsUpdates(ctx context.Context, hostID uint, upda
 
 	if len(args) > 0 {
 		smt := fmt.Sprintf(
-			ds.dialect.InsertIgnoreInto()+` windows_updates (host_id, date_epoch, kb_id) VALUES %s`+ds.dialect.OnConflictDoNothing(""),
+			ds.dialect.InsertIgnoreInto()+` windows_updates (host_id, date_epoch, kb_id) VALUES %s`+ds.dialect.OnConflictDoNothing("host_id,date_epoch,kb_id"),
 			strings.Join(placeholders, ","),
 		)
 

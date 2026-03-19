@@ -1395,7 +1395,7 @@ WHERE
 					upsertCategoriesArgs = append(upsertCategoriesArgs, installerID, catID)
 				}
 				upsertCategoriesValues := strings.TrimSuffix(strings.Repeat("(?,?),", len(installer.CategoryIDs)), ",")
-				_, err = tx.ExecContext(ctx, ds.dialect.InsertIgnoreInto()+fmt.Sprintf(upsertInHouseCategoriesSuffix, upsertCategoriesValues)+ds.dialect.OnConflictDoNothing(""), upsertCategoriesArgs...)
+				_, err = tx.ExecContext(ctx, ds.dialect.InsertIgnoreInto()+fmt.Sprintf(upsertInHouseCategoriesSuffix, upsertCategoriesValues)+ds.dialect.OnConflictDoNothing("in_house_app_id,software_category_id"), upsertCategoriesArgs...)
 				if err != nil {
 					return ctxerr.Wrapf(ctx, err, "insert new/edited categories for in-house with name %q", installer.Filename)
 				}

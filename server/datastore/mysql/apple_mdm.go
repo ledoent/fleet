@@ -2806,7 +2806,7 @@ func (ds *Datastore) bulkSetPendingMDMAppleHostProfilesDB(
 				)
 				VALUES %s
 				%s
-			`, strings.TrimSuffix(valuePart, ","), ds.dialect.OnDuplicateKey("", `
+			`, strings.TrimSuffix(valuePart, ","), ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 					operation_type = VALUES(operation_type),
 					status = VALUES(status),
 					command_uuid = VALUES(command_uuid),
@@ -3433,7 +3433,7 @@ func (ds *Datastore) BulkUpsertMDMAppleHostProfiles(ctx context.Context, payload
             )
             VALUES %s
             %s`,
-			strings.TrimSuffix(valuePart, ","), ds.dialect.OnDuplicateKey("", fmt.Sprintf(`
+			strings.TrimSuffix(valuePart, ","), ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", fmt.Sprintf(`
               status = VALUES(status),
               operation_type = VALUES(operation_type),
               detail = VALUES(detail),
@@ -5335,7 +5335,7 @@ INSERT INTO mdm_apple_declarations (
 		SELECT 1 FROM mdm_android_configuration_profiles WHERE name = ? AND team_id = ?
 	)
 )
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("declaration_uuid", `
 	identifier = VALUES(identifier),
 	uploaded_at = IF(raw_json = VALUES(raw_json) AND name = VALUES(name) AND IFNULL(secrets_updated_at = VALUES(secrets_updated_at), TRUE), uploaded_at, NOW(6)),
 	raw_json = VALUES(raw_json)`)

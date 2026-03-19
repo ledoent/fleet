@@ -1436,7 +1436,7 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			patch_software_title_id
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, ?)
 		`, policiesChecksumComputedColumn(),
-		) + ds.dialect.OnDuplicateKey("", `query = VALUES(query),
+		) + ds.dialect.OnDuplicateKey("id", `query = VALUES(query),
 			description = VALUES(description),
 			author_id = VALUES(author_id),
 			resolution = VALUES(resolution),
@@ -1664,7 +1664,7 @@ func (ds *Datastore) AsyncBatchInsertPolicyMembership(ctx context.Context, batch
 	sql := ds.dialect.InsertIgnoreInto() + ` policy_membership (policy_id, host_id, passes) VALUES `
 	sql += strings.Repeat(`(?, ?, ?),`, len(batch))
 	sql = strings.TrimSuffix(sql, ",")
-	sql += ` ` + ds.dialect.OnDuplicateKey("", "updated_at = VALUES(updated_at), passes = VALUES(passes)")
+	sql += ` ` + ds.dialect.OnDuplicateKey("policy_id,host_id", "updated_at = VALUES(updated_at), passes = VALUES(passes)")
 
 	vals := make([]interface{}, 0, len(batch)*3)
 	hostIDs := make([]uint, 0, len(batch))

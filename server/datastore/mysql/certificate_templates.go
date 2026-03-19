@@ -350,7 +350,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForExistingHosts(
 			(hosts.team_id = ? OR (? = 0 AND hosts.team_id IS NULL)) AND
 			hosts.platform = '%s' AND
 			host_mdm.enrolled = 1
-		`+ds.dialect.OnDuplicateKey("", `host_uuid = host_uuid`)+`
+		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `host_uuid = host_uuid`)+`
 	`, fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall, fleet.AndroidPlatform)
 	result, err := ds.writer(ctx).ExecContext(ctx, stmt, certificateTemplateID, teamID, teamID)
 	if err != nil {
@@ -385,7 +385,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForNewHost(
 			UUID_TO_BIN(UUID(), true)
 		FROM certificate_templates
 		WHERE team_id = ?
-		`+ds.dialect.OnDuplicateKey("", `
+		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `
 		    -- allow 'remove' to transition to 'pending install', generating new uuid
 			uuid = IF(operation_type = '%s', UUID_TO_BIN(UUID(), true), uuid),
 			status = IF(operation_type = '%s', '%s', status),

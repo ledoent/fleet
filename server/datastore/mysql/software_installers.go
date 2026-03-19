@@ -2308,7 +2308,7 @@ INSERT INTO software_installers (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
   (SELECT name FROM users WHERE id = ?), (SELECT email FROM users WHERE id = ?), ?, ?, COALESCE(?, false), ?, ?
 )
-` + ds.dialect.OnDuplicateKey("", `
+` + ds.dialect.OnDuplicateKey("id", `
   install_script_content_id = VALUES(install_script_content_id),
   uninstall_script_content_id = VALUES(uninstall_script_content_id),
   post_install_script_content_id = VALUES(post_install_script_content_id),
@@ -3021,7 +3021,7 @@ WHERE
 					upsertCategoriesArgs = append(upsertCategoriesArgs, installerID, catID)
 				}
 				upsertCategoriesValues := strings.TrimSuffix(strings.Repeat("(?,?),", len(installer.CategoryIDs)), ",")
-				_, err = tx.ExecContext(ctx, ds.dialect.InsertIgnoreInto()+fmt.Sprintf(upsertInstallerCategoriesSuffix, upsertCategoriesValues)+ds.dialect.OnConflictDoNothing(""), upsertCategoriesArgs...)
+				_, err = tx.ExecContext(ctx, ds.dialect.InsertIgnoreInto()+fmt.Sprintf(upsertInstallerCategoriesSuffix, upsertCategoriesValues)+ds.dialect.OnConflictDoNothing("software_installer_id,software_category_id"), upsertCategoriesArgs...)
 				if err != nil {
 					return ctxerr.Wrapf(ctx, err, "insert new/edited categories for installer with name %q", installer.Filename)
 				}

@@ -319,7 +319,7 @@ DELETE FROM label_membership WHERE label_id = ?
 				// Use ignore because duplicate hostnames could appear in
 				// different batches and would result in duplicate key errors.
 				sql = fmt.Sprintf(
-					ds.dialect.InsertIgnoreInto()+` label_membership (label_id, host_id) (SELECT DISTINCT ?, id FROM hosts WHERE %s)`+ds.dialect.OnConflictDoNothing(""),
+					ds.dialect.InsertIgnoreInto()+` label_membership (label_id, host_id) (SELECT DISTINCT ?, id FROM hosts WHERE %s)`+ds.dialect.OnConflictDoNothing("host_id,label_id"),
 					hostsFilterClause,
 				)
 				sql, args, err := sqlx.In(sql, labelID, stringIdents, stringIdents, stringIdents, intIdents)
@@ -425,7 +425,7 @@ func (ds *Datastore) UpdateLabelMembershipByHostIDs(ctx context.Context, label f
 
 			// Build the final SQL query with the dynamically generated placeholders
 			sql := ds.dialect.InsertIgnoreInto() + ` label_membership (label_id, host_id)
-VALUES ` + strings.Join(placeholders, ", ") + ds.dialect.OnConflictDoNothing("")
+VALUES ` + strings.Join(placeholders, ", ") + ds.dialect.OnConflictDoNothing("host_id,label_id")
 			sql, args, err := sqlx.In(sql, values...)
 			if err != nil {
 				return ctxerr.Wrap(ctx, err, "build membership IN statement")
