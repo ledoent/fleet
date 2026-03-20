@@ -4254,7 +4254,7 @@ func (ds *Datastore) RecordSkippedHostBootstrapPackage(ctx context.Context, host
 
 func (ds *Datastore) RecordHostBootstrapPackage(ctx context.Context, commandUUID string, hostUUID string) error {
 	stmt := `INSERT INTO host_mdm_apple_bootstrap_packages (command_uuid, host_uuid, skipped) VALUES (?, ?, 0)
-        ` + ds.dialect.OnDuplicateKey("host_uuid", `command_uuid = command_uuid, skipped = 0`)
+        ` + ds.dialect.OnDuplicateKey("host_uuid", `command_uuid = VALUES(command_uuid), skipped = 0`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, commandUUID, hostUUID)
 	return ctxerr.Wrap(ctx, err, "record bootstrap package command")
 }

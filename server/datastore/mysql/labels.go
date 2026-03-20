@@ -460,14 +460,14 @@ func (ds *Datastore) UpdateLabelMembershipByHostCriteria(ctx context.Context, hv
 
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		// Insert new label membership based on the label query.
-		sql := fmt.Sprintf(`INSERT INTO label_membership (label_id, host_id) SELECT candidate.label_id, candidate.host_id FROM (%s) as candidate `+ds.dialect.OnDuplicateKey("host_id,label_id", `host_id = label_membership.host_id`), labelQuery)
+		sql := fmt.Sprintf(`INSERT INTO label_membership (label_id, host_id) SELECT candidate.label_id, candidate.host_id FROM (%s) as candidate `+ds.dialect.OnDuplicateKey("host_id,label_id", `host_id = VALUES(host_id)`), labelQuery)
 		_, err := tx.ExecContext(ctx, sql, queryVals...)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "execute membership INSERT")
 		}
 
 		// Remove any existing label membership for the label that is not in the new query.
-		sql = fmt.Sprintf(`DELETE FROM label_membership WHERE label_id = %d AND NOT EXISTS (SELECT 1 FROM (%s) as candidate WHERE candidate.host_id = label_membership.host_id)`, label.ID, labelQuery)
+		sql = fmt.Sprintf(`DELETE FROM label_membership WHERE label_id = %d AND NOT EXISTS (SELECT 1 FROM (%s) as candidate WHERE candidate.host_id = VALUES(host_id))`, label.ID, labelQuery)
 		_, err = tx.ExecContext(ctx, sql, queryVals...)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "execute membership DELETE")

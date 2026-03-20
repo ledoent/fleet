@@ -384,8 +384,8 @@ func (ds *Datastore) DeleteUser(ctx context.Context, id uint) error {
 		SELECT u.id, u.name, u.email
 		FROM users AS u
 		WHERE u.id = ?
-		` + ds.dialect.OnDuplicateKey("id", `name       = u.name,
-			email      = u.email`)
+		` + ds.dialect.OnDuplicateKey("id", `name       = VALUES(name),
+			email      = VALUES(email)`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, id)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "populate users_deleted entry")

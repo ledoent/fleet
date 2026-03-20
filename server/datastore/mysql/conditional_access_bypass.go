@@ -29,8 +29,8 @@ func (ds *Datastore) ConditionalAccessBypassDevice(ctx context.Context, hostID u
 	INSERT INTO
 		host_conditional_access (host_id, bypassed_at)
 	VALUES
-		(?, NOW(6))
-	` + ds.dialect.OnDuplicateKey("id", `bypassed_at = NOW(6)`)
+		(?, NOW())
+	` + ds.dialect.OnDuplicateKey("id", `bypassed_at = NOW()`)
 
 	var blockCount uint
 
