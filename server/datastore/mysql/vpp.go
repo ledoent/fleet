@@ -817,8 +817,9 @@ VALUES
 
 	var id int64
 	if insertOnDuplicateDidInsertOrUpdate(res) {
-		id, _ = res.LastInsertId()
-	} else {
+		id, _ = res.LastInsertId() // PG: returns 0, fallback below
+	}
+	if id == 0 {
 		stmt := `SELECT id FROM vpp_apps_teams WHERE adam_id = ? AND platform = ? AND global_or_team_id = ?`
 		if err := sqlx.GetContext(ctx, tx, &id, stmt, appID.AdamID, appID.Platform, globalOrTmID); err != nil {
 			return 0, ctxerr.Wrap(ctx, err, "vpp app teams id")

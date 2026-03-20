@@ -364,7 +364,11 @@ func (ds *Datastore) InsertOSVulnerability(ctx context.Context, v fleet.OSVulner
 	// inserts affect one row, updates affect 0 or 2; we don't care which because timestamp may not change if we
 	// recently inserted the vuln and changed nothing else; see insertOnDuplicateDidInsertOrUpdate for context
 	affected, _ := res.RowsAffected()
-	lastID, _ := res.LastInsertId()
+	lastID, err := res.LastInsertId()
+	if err != nil {
+		// PG: no LastInsertId, use RowsAffected == 1 as insert indicator
+		return affected == 1, nil
+	}
 	return lastID != 0 && affected == 1, nil
 }
 

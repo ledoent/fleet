@@ -1360,6 +1360,10 @@ func (ds *Datastore) ProcessList(ctx context.Context) ([]fleet.MySQLProcess, err
 	return processList, nil
 }
 
+// insertOnDuplicateDidInsertOrUpdate returns true if an INSERT ON DUPLICATE KEY
+// UPDATE actually inserted or updated a row (vs no-op).
+// MySQL: checks LastInsertId (non-zero on insert) AND RowsAffected (> 0).
+// PostgreSQL: LastInsertId is not available, so just checks RowsAffected > 0.
 func insertOnDuplicateDidInsertOrUpdate(res sql.Result) bool {
 	// From mysql's documentation:
 	//
@@ -1386,9 +1390,13 @@ func insertOnDuplicateDidInsertOrUpdate(res sql.Result) bool {
 	// already holds:
 	// https://github.com/go-sql-driver/mysql/blob/bcc459a906419e2890a50fc2c99ea6dd927a88f2/result.go
 
-	lastID, _ := res.LastInsertId()
 	aff, _ := res.RowsAffected()
-	// something was updated (lastID != 0) AND row was found (aff == 1 or higher if more rows were found)
+	lastID, err := res.LastInsertId()
+	if err != nil {
+		// PostgreSQL doesn't support LastInsertId — fall back to RowsAffected only
+		return aff > 0
+	}
+	// MySQL: something was inserted (lastID != 0) AND row was found (aff > 0)
 	return lastID != 0 && aff > 0
 }
 

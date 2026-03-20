@@ -255,7 +255,11 @@ INSERT INTO
 
 			// record the ID as we want to return a fleet.Profile instance with it
 			// filled in.
-			profileID, _ = res.LastInsertId()
+			profileID, _ = res.LastInsertId() // PG: returns 0
+			if profileID == 0 {
+				// Fallback for PG: get the ID by profile_uuid
+				_ = sqlx.GetContext(ctx, tx, &profileID, `SELECT profile_id FROM mdm_apple_configuration_profiles WHERE profile_uuid = ?`, profUUID)
+			}
 		}
 
 		labels := make([]fleet.ConfigurationProfileLabel, 0, len(cp.LabelsIncludeAll)+len(cp.LabelsIncludeAny)+len(cp.LabelsExcludeAny))
