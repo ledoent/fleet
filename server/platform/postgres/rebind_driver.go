@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5/stdlib"
@@ -58,10 +59,28 @@ type rebindConn struct {
 	driver.Conn
 }
 
-// rebindQuery converts ? placeholders to $1, $2, $3, etc.
+// rebindQuery converts MySQL-specific SQL to PostgreSQL.
+// It handles: ? → $N placeholders, JSON_OBJECT → jsonb_build_object,
+// DATE_ADD → PG interval arithmetic, INTERVAL N SECOND/MINUTE/etc.
 func rebindQuery(query string) string {
 	// Replace MySQL JSON_OBJECT with PG jsonb_build_object
 	query = strings.ReplaceAll(query, "JSON_OBJECT(", "jsonb_build_object(")
+
+	// Replace MySQL DATE_ADD(x, INTERVAL expr UNIT) → (x + (expr) * INTERVAL '1 UNIT')
+	// This handles: DATE_ADD(col, INTERVAL 30 DAY), DATE_ADD(col, INTERVAL expr SECOND), etc.
+	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
+		pattern := "DATE_ADD("
+		if strings.Contains(query, pattern) {
+			query = rewriteDateAdd(query, unit)
+		}
+	}
+
+	// Replace INTERVAL N SECOND (without DATE_ADD) → INTERVAL 'N seconds'
+	// e.g., "INTERVAL 5 MINUTE" → "INTERVAL '5 minutes'"
+	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
+		re := regexp.MustCompile(`INTERVAL\s+(\d+)\s+` + unit)
+		query = re.ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
+	}
 	if !strings.Contains(query, "?") {
 		return query
 	}
@@ -109,4 +128,13 @@ func (c *rebindConn) PrepareContext(ctx context.Context, query string) (driver.S
 
 func (c *rebindConn) Prepare(query string) (driver.Stmt, error) {
 	return c.Conn.Prepare(rebindQuery(query))
+}
+
+// rewriteDateAdd converts MySQL DATE_ADD(expr, INTERVAL value UNIT) to PG (expr + (value) * INTERVAL '1 unit')
+func rewriteDateAdd(query string, unit string) string {
+	pgUnit := strings.ToLower(unit) + "s"
+	// Pattern: DATE_ADD(expr, INTERVAL value UNIT)
+	// We need to handle nested expressions in expr and value
+	re := regexp.MustCompile(`DATE_ADD\(([^,]+),\s*INTERVAL\s+(.+?)\s+` + unit + `\)`)
+	return re.ReplaceAllString(query, "(${1} + (${2}) * INTERVAL '1 "+pgUnit+"')")
 }

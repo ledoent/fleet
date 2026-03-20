@@ -17,9 +17,10 @@ func (ds *Datastore) NewPasswordResetRequest(ctx context.Context, req *fleet.Pas
 	sqlStatement := `
 		INSERT INTO password_reset_requests
 		( user_id, token, expires_at)
-		VALUES (?,?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? MINUTE))
+		VALUES (?,?, ?)
 	`
-	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), sqlStatement, req.UserID, req.Token, PasswordResetRequestDuration.Minutes())
+	expiresAt := time.Now().Add(PasswordResetRequestDuration)
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), sqlStatement, req.UserID, req.Token, expiresAt)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "inserting password reset requests")
 	}

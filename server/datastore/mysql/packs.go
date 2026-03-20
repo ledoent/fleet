@@ -479,13 +479,8 @@ func listPacksForHost(ctx context.Context, db sqlx.QueryerContext, hid uint) ([]
 	SELECT DISTINCT packs.* FROM (
 	(
 		SELECT p.* FROM packs p
-		JOIN pack_targets pt
-		JOIN label_membership lm
-		ON (
-			p.id = pt.pack_id
-			AND pt.target_id = lm.label_id
-			AND pt.type = ?
-		)
+		JOIN pack_targets pt ON p.id = pt.pack_id AND pt.type = ?
+		JOIN label_membership lm ON pt.target_id = lm.label_id
 		WHERE lm.host_id = ? AND NOT p.disabled AND p.pack_type IS NULL
 	)
 	UNION ALL
