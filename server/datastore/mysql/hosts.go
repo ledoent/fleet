@@ -26,7 +26,7 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-const hostHasIdentityCertSQL = `EXISTS(SELECT 1 FROM host_identity_scep_certificates hisc WHERE hisc.host_id = h.id AND hisc.revoked = 0)`
+const hostHasIdentityCertSQL = `EXISTS(SELECT 1 FROM host_identity_scep_certificates hisc WHERE hisc.host_id = h.id AND hisc.revoked = false)`
 
 // Since many hosts may have issues, we need to batch the inserts of host issues.
 // This is a variable, so it can be adjusted during unit testing.
@@ -494,7 +494,7 @@ func loadHostScheduledQueryStatsDB(ctx context.Context, db sqlx.QueryerContext, 
 	filter1 := fmt.Sprintf(`
 		WHERE
 			(q.platform = '' OR q.platform IS NULL OR %s != 0)`, dialect.FindInSet("?", "q.platform")) + `
-			AND q.is_scheduled = 1
+			AND q.is_scheduled = true
 			AND (q.automations_enabled IS TRUE OR (q.discard_data IS FALSE AND q.logging_type = ?))
 			AND (q.team_id IS NULL OR q.team_id = ?)
 		GROUP BY q.id
@@ -958,12 +958,12 @@ const hostMDMSelect = `,
 		'enrollment_status', hmdm.enrollment_status,
 		'dep_profile_error',
 		CASE
-			WHEN hdep.assign_profile_response IN ('` + string(fleet.DEPAssignProfileResponseFailed) + `', '` + string(fleet.DEPAssignProfileResponseThrottled) + `') THEN CAST(TRUE AS JSON)
-			ELSE CAST(FALSE AS JSON)
+			WHEN hdep.assign_profile_response IN ('` + string(fleet.DEPAssignProfileResponseFailed) + `', '` + string(fleet.DEPAssignProfileResponseThrottled) + `') THEN 'true'
+			ELSE 'false'
 		END,
 		'server_url',
 		CASE
-			WHEN hmdm.is_server = 1 THEN NULL
+			WHEN hmdm.is_server = true THEN NULL
 			ELSE hmdm.server_url
 		END,
 		'encryption_key_available',
@@ -973,13 +973,13 @@ const hostMDMSelect = `,
 			* unmarshaller was having problems converting int values to
 			* booleans.
 			*/
-			WHEN hdek.decryptable IS NULL OR hdek.decryptable = 0 THEN CAST(FALSE AS JSON)
-			ELSE CAST(TRUE AS JSON)
+			WHEN hdek.decryptable IS NULL OR hdek.decryptable = false THEN 'false'
+			ELSE 'true'
 		END,
 		'raw_decryptable',
 		CASE
 			WHEN hdek.host_id IS NULL THEN -1
-			ELSE hdek.decryptable
+			ELSE CAST(hdek.decryptable AS integer)
 		END,
 		'connected_to_fleet',
 		CASE
@@ -992,14 +992,14 @@ const hostMDMSelect = `,
 				    FROM mdm_windows_enrollments mwe
 				    WHERE mwe.host_uuid = h.uuid
 				    AND mwe.device_state = '` + microsoft_mdm.MDMDeviceStateEnrolled + `'
-				    AND hmdm.enrolled = 1
+				    AND hmdm.enrolled = true
 				)
-				THEN CAST(TRUE AS JSON)
-				ELSE CAST(FALSE AS JSON)
+				THEN 'true'
+				ELSE 'false'
 				END
 			)
 			WHEN h.platform = 'android' THEN
-				CASE WHEN hmdm.enrolled = 1 THEN CAST(TRUE AS JSON) ELSE CAST(FALSE AS JSON) END
+				CASE WHEN hmdm.enrolled = true THEN 'true' ELSE 'false' END
 			WHEN h.platform IN ('ios', 'ipados', 'darwin') THEN (` +
 	// NOTE: if you change any of the conditions in this
 	// query, please update the AreHostsConnectedToFleetMDM
@@ -1007,15 +1007,15 @@ const hostMDMSelect = `,
 	`SELECT CASE WHEN EXISTS (
 				    SELECT ne.id FROM nano_enrollments ne
 				    WHERE ne.id = h.uuid
-				    AND ne.enabled = 1
+				    AND ne.enabled = true
 				    AND ne.type IN ('Device', 'User Enrollment (Device)')
-				    AND hmdm.enrolled = 1
+				    AND hmdm.enrolled = true
 				)
-				THEN CAST(TRUE AS JSON)
-				ELSE CAST(FALSE AS JSON)
+				THEN 'true'
+				ELSE 'false'
 				END
 			)
-			ELSE CAST(FALSE AS JSON)
+			ELSE 'false'
 		END,
 		'name', hmdm.name
 	) mdm_host_data
@@ -1387,7 +1387,7 @@ func (ds *Datastore) applyHostFilters(
 		opt.MacOSSettingsDiskEncryptionFilter.IsValid() ||
 		opt.OSSettingsDiskEncryptionFilter.IsValid() {
 		connectedToFleetJoin = `
-				LEFT JOIN nano_enrollments ne ON ne.id = h.uuid AND ne.enabled = 1 AND ne.type IN ('Device', 'User Enrollment (Device)')
+				LEFT JOIN nano_enrollments ne ON ne.id = h.uuid AND ne.enabled = true AND ne.type IN ('Device', 'User Enrollment (Device)')
 				LEFT JOIN mdm_windows_enrollments mwe ON mwe.host_uuid = h.uuid AND mwe.device_state = ?
 				LEFT JOIN android_devices ad ON ad.host_id = h.id`
 		whereParams = append(whereParams, microsoft_mdm.MDMDeviceStateEnrolled)
@@ -1571,20 +1571,20 @@ func filterHostsByMDM(sql string, opt fleet.HostListOptions, params []interface{
 		params = append(params, *opt.MDMNameFilter)
 	}
 	if opt.MDMEnrollmentStatusFilter != "" {
-		// NOTE: ds.UpdateHostTablesOnMDMUnenroll sets installed_from_dep = 0 so DEP hosts are not counted as pending after unenrollment
+		// NOTE: ds.UpdateHostTablesOnMDMUnenroll sets installed_from_dep = false so DEP hosts are not counted as pending after unenrollment
 		switch opt.MDMEnrollmentStatusFilter {
 		case fleet.MDMEnrollStatusAutomatic:
-			sql += ` AND hmdm.enrolled = 1 AND hmdm.installed_from_dep = 1`
+			sql += ` AND hmdm.enrolled = true AND hmdm.installed_from_dep = true`
 		case fleet.MDMEnrollStatusManual:
-			sql += ` AND hmdm.enrolled = 1 AND hmdm.installed_from_dep = 0 AND hmdm.is_personal_enrollment = 0`
+			sql += ` AND hmdm.enrolled = true AND hmdm.installed_from_dep = false AND hmdm.is_personal_enrollment = false`
 		case fleet.MDMEnrollStatusPersonal:
-			sql += ` AND hmdm.enrolled = 1 AND hmdm.installed_from_dep = 0 AND hmdm.is_personal_enrollment = 1`
+			sql += ` AND hmdm.enrolled = true AND hmdm.installed_from_dep = false AND hmdm.is_personal_enrollment = true`
 		case fleet.MDMEnrollStatusEnrolled:
-			sql += ` AND hmdm.enrolled = 1`
+			sql += ` AND hmdm.enrolled = true`
 		case fleet.MDMEnrollStatusPending:
-			sql += ` AND hmdm.enrolled = 0 AND hmdm.installed_from_dep = 1`
+			sql += ` AND hmdm.enrolled = false AND hmdm.installed_from_dep = true`
 		case fleet.MDMEnrollStatusUnenrolled:
-			sql += ` AND hmdm.enrolled = 0 AND hmdm.installed_from_dep = 0`
+			sql += ` AND hmdm.enrolled = false AND hmdm.installed_from_dep = false`
 		}
 	}
 	if opt.MDMNameFilter != nil || opt.MDMIDFilter != nil || opt.MDMEnrollmentStatusFilter != "" {
@@ -1649,7 +1649,7 @@ func filterHostsByMacOSSettingsStatus(sql string, opt fleet.HostListOptions, par
 	}
 
 	// ensure the host has MDM turned on
-	whereStatus := " AND ne.id IS NOT NULL AND hmdm.enrolled = 1"
+	whereStatus := " AND ne.id IS NOT NULL AND hmdm.enrolled = true"
 	// macOS settings filter is not compatible with the "all teams" option so append the "no
 	// team" filter here (note that filterHostsByTeam applies the "no team" filter if TeamFilter == 0)
 	if opt.TeamFilter == nil {
@@ -1683,7 +1683,7 @@ func filterHostsByMacOSDiskEncryptionStatus(sql string, opt fleet.HostListOption
 		subquery, subqueryParams = subqueryFileVaultRemovingEnforcement()
 	}
 
-	return sql + fmt.Sprintf(` AND EXISTS (%s) AND ne.id IS NOT NULL AND hmdm.enrolled = 1`, subquery), append(params, subqueryParams...)
+	return sql + fmt.Sprintf(` AND EXISTS (%s) AND ne.id IS NOT NULL AND hmdm.enrolled = true`, subquery), append(params, subqueryParams...)
 }
 
 func (ds *Datastore) filterHostsByOSSettingsStatus(ctx context.Context, sql string, opt fleet.HostListOptions, params []any, diskEncryptionConfig fleet.DiskEncryptionConfig) (string, []any, error) {
@@ -1707,9 +1707,9 @@ func (ds *Datastore) filterHostsByOSSettingsStatus(ctx context.Context, sql stri
 	}
 
 	sqlFmt := ` AND (
-		(h.platform = 'windows' AND mwe.host_uuid IS NOT NULL AND hmdm.enrolled = 1) -- windows
-		OR (h.platform IN ('darwin', 'ios', 'ipados') AND ne.id IS NOT NULL AND hmdm.enrolled = 1) -- apple
-		OR (h.platform = 'android' AND hmdm.enrolled = 1 AND ad.host_id IS NOT NULL) -- android
+		(h.platform = 'windows' AND mwe.host_uuid IS NOT NULL AND hmdm.enrolled = true) -- windows
+		OR (h.platform IN ('darwin', 'ios', 'ipados') AND ne.id IS NOT NULL AND hmdm.enrolled = true) -- apple
+		OR (h.platform = 'android' AND hmdm.enrolled = true AND ad.host_id IS NOT NULL) -- android
 		OR ` + includeLinuxCond + `
 	)`
 
@@ -1740,7 +1740,7 @@ AND (
 	paramsAndroid := []any{opt.OSSettingsFilter}
 
 	// construct the WHERE for windows
-	whereWindows = `hmdm.is_server = 0`
+	whereWindows = `hmdm.is_server = false`
 	paramsWindows := []any{}
 	subqueryFailed, paramsFailed, err := subqueryHostsMDMWindowsOSSettingsStatusFailed()
 	if err != nil {
@@ -1866,8 +1866,8 @@ func (ds *Datastore) filterHostsByOSSettingsDiskEncryptionStatus(ctx context.Con
 		sqlFmt += ` AND h.team_id IS NULL`
 	}
 	sqlFmt += ` AND (
-		(h.platform = 'windows' AND mwe.host_uuid IS NOT NULL AND hmdm.enrolled = 1 AND hmdm.is_server = 0 AND %s) -- windows
-		OR (h.platform = 'darwin' AND ne.id IS NOT NULL AND hmdm.enrolled = 1 AND %s) -- apple
+		(h.platform = 'windows' AND mwe.host_uuid IS NOT NULL AND hmdm.enrolled = true AND hmdm.is_server = false AND %s) -- windows
+		OR (h.platform = 'darwin' AND ne.id IS NOT NULL AND hmdm.enrolled = true AND %s) -- apple
 		OR ((h.platform = 'ubuntu' OR h.os_version LIKE 'Fedora%%') AND %s) -- linux
 	)`
 
@@ -1944,7 +1944,7 @@ func filterHostsByMDMBootstrapPackageStatus(sql string, opt fleet.HostListOption
         LEFT JOIN
             host_dep_assignments hda ON hda.host_id = hh.id
         WHERE
-	      hh.id = h.id AND hmdm.installed_from_dep = 1`
+	      hh.id = h.id AND hmdm.installed_from_dep = true`
 
 	// NOTE: The approach below assumes that there is only one bootstrap package per host. If this
 	// is not the case, then the query will need to be updated to use a GROUP BY and HAVING
@@ -1954,7 +1954,7 @@ func filterHostsByMDMBootstrapPackageStatus(sql string, opt fleet.HostListOption
 		subquery += ` AND ncr.status = 'Error'`
 	case fleet.MDMBootstrapPackagePending:
 		// Pending hosts exclude those that were skipped due to migration or will be skipped due to migration
-		subquery += ` AND (hmabp.skipped = 0 OR hmabp.skipped IS NULL) AND (hda.mdm_migration_deadline IS NULL OR (hda.mdm_migration_deadline = hda.mdm_migration_completed)) AND (ncr.status IS NULL OR (ncr.status != 'Acknowledged' AND ncr.status != 'Error'))`
+		subquery += ` AND (hmabp.skipped = false OR hmabp.skipped IS NULL) AND (hda.mdm_migration_deadline IS NULL OR (hda.mdm_migration_deadline = hda.mdm_migration_completed)) AND (ncr.status IS NULL OR (ncr.status != 'Acknowledged' AND ncr.status != 'Error'))`
 	case fleet.MDMBootstrapPackageInstalled:
 		subquery += ` AND ncr.status = 'Acknowledged'`
 	}
@@ -2463,7 +2463,7 @@ func (ds *Datastore) EnrollOrbit(ctx context.Context, opts ...fleet.DatastoreEnr
 					hardware_model,
 					platform,
 					platform_like
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, true, ?, ?, ?, ?, ?, ?, ?)
 			`
 			hostID, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlInsert,
 				zeroTime,
@@ -2564,7 +2564,7 @@ func (ds *Datastore) EnrollOsquery(ctx context.Context, opts ...fleet.DatastoreE
 					refetch_requested,
 					uuid,
 					hardware_serial
-				) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+				) VALUES (?, ?, ?, ?, ?, ?, true, ?, ?)
 			`
 			lastInsertID, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlInsert, zeroTime, zeroTime, zeroTime, osqueryHostID, nodeKey, teamID, hardwareUUID, hardwareSerial)
 			if err != nil {
@@ -3617,8 +3617,8 @@ func (ds *Datastore) ListPoliciesForHost(ctx context.Context, host *fleet.Host) 
 		COALESCE(u.name, '<deleted>') AS author_name,
 		COALESCE(u.email, '') AS author_email,
 		CASE
-			WHEN pm.passes = 1 THEN 'pass'
-			WHEN pm.passes = 0 THEN 'fail'
+			WHEN pm.passes = true THEN 'pass'
+			WHEN pm.passes = false THEN 'fail'
 			ELSE ''
 		END AS response,
 		coalesce(p.resolution, '') as resolution
@@ -3633,7 +3633,7 @@ func (ds *Datastore) ListPoliciesForHost(ctx context.Context, host *fleet.Host) 
 			SELECT 1
 			FROM policy_labels pl
 			WHERE pl.policy_id = p.id
-			AND pl.exclude = 0
+			AND pl.exclude = false
 		)
 		-- Policy is included in the include_any list
 		OR EXISTS (
@@ -3641,7 +3641,7 @@ func (ds *Datastore) ListPoliciesForHost(ctx context.Context, host *fleet.Host) 
 			FROM policy_labels pl
 			INNER JOIN label_membership lm ON (lm.host_id = ? AND lm.label_id = pl.label_id)
 			WHERE pl.policy_id = p.id
-			AND pl.exclude = 0
+			AND pl.exclude = false
 		)
 	)
 	-- Policy is not included in the exclude_any list
@@ -3650,7 +3650,7 @@ func (ds *Datastore) ListPoliciesForHost(ctx context.Context, host *fleet.Host) 
 		FROM policy_labels pl
 		INNER JOIN label_membership lm ON (lm.host_id = ? AND lm.label_id = pl.label_id)
 		WHERE pl.policy_id = p.id
-		AND pl.exclude = 1
+		AND pl.exclude = true
 	)
 	ORDER BY FIELD(response, 'fail', '', 'pass'), p.name`
 
@@ -5186,7 +5186,7 @@ func (ds *Datastore) generateAggregatedMDMStatus(ctx context.Context, teamID *ui
 		globalStats = true
 		status      fleet.AggregatedMDMStatus
 	)
-	// NOTE: ds.UpdateHostTablesOnMDMUnenroll sets installed_from_dep = 0 so DEP hosts are not counted as pending after unenrollment
+	// NOTE: ds.UpdateHostTablesOnMDMUnenroll sets installed_from_dep = false so DEP hosts are not counted as pending after unenrollment
 	query := `SELECT
 				COUNT(DISTINCT host_id) as hosts_count,
 				COALESCE(SUM(CASE WHEN NOT enrolled AND NOT installed_from_dep THEN 1 ELSE 0 END), 0) as unenrolled_hosts_count,
@@ -5638,7 +5638,7 @@ func (ds *Datastore) executeOSVersionQuery(ctx context.Context, teamFilter *flee
 		args = append(args, *teamFilter.TeamID, false)
 	case teamFilter != nil:
 		query += " AND " + ds.whereFilterGlobalOrTeamIDByTeamsWithSqlFilter(
-			*teamFilter, "global_stats = 1 AND id = 0", "global_stats = 0 AND id",
+			*teamFilter, "global_stats = true AND id = 0", "global_stats = false AND id",
 		)
 	default:
 		query += " AND id = ? AND global_stats = ?"

@@ -568,6 +568,7 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 		primary:   testDB,
 		replica:   testDB,
 		logger:    slog.New(slog.DiscardHandler),
+		clock:     clock.C,
 		dialect:   postgresDialect{},
 		writeCh:   make(chan itemToWrite),
 		stmtCache: make(map[string]*sqlx.Stmt),

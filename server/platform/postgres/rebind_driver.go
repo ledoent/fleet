@@ -60,6 +60,8 @@ type rebindConn struct {
 
 // rebindQuery converts ? placeholders to $1, $2, $3, etc.
 func rebindQuery(query string) string {
+	// Replace MySQL JSON_OBJECT with PG jsonb_build_object
+	query = strings.ReplaceAll(query, "JSON_OBJECT(", "jsonb_build_object(")
 	if !strings.Contains(query, "?") {
 		return query
 	}

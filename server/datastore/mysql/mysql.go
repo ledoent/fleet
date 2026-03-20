@@ -1507,3 +1507,18 @@ func batchProcessDB[T any](
 	}
 	return nil
 }
+
+// jsonObjectFunc returns the SQL function name for building JSON objects.
+// MySQL: JSON_OBJECT, PostgreSQL: jsonb_build_object
+func (ds *Datastore) jsonObjectFunc() string {
+	if ds.dialect.ReturningID() != "" {
+		return "jsonb_build_object"
+	}
+	return "JSON_OBJECT"
+}
+
+// resolveJSONFunc replaces %JSON_OBJECT% placeholder with the dialect-specific
+// JSON object builder function name.
+func (ds *Datastore) resolveJSONFunc(sql string) string {
+	return strings.ReplaceAll(sql, "%JSON_OBJECT%", ds.jsonObjectFunc())
+}
