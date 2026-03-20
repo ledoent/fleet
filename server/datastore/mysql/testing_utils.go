@@ -612,14 +612,32 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 	}
 
 	if _, ok := ds.dialect.(postgresDialect); ok {
-		// PostgreSQL: use TRUNCATE ... CASCADE (no FK check toggle needed)
 		db := ds.writer(context.Background())
+		ctx := context.Background()
+
+		// If no specific tables given, query all tables from PG catalog
+		if len(tables) == 0 {
+			rows, err := db.QueryContext(ctx,
+				"SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
+			if err != nil {
+				t.Logf("PG truncate: list tables: %v", err)
+				return
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var tbl string
+				if err := rows.Scan(&tbl); err == nil {
+					tables = append(tables, tbl)
+				}
+			}
+		}
+
 		for _, tbl := range tables {
 			if nonEmptyTables[tbl] {
 				continue
 			}
-			if _, err := db.ExecContext(context.Background(), `TRUNCATE TABLE "`+tbl+`" CASCADE`); err != nil {
-				t.Logf("truncate %s: %v", tbl, err)
+			if _, err := db.ExecContext(ctx, `TRUNCATE TABLE "`+tbl+`" CASCADE`); err != nil {
+				// Ignore errors for tables that don't exist
 			}
 		}
 		return
