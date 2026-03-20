@@ -3506,7 +3506,7 @@ func saveHostUsersDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHel
 	insertSql := fmt.Sprintf(
 		`INSERT INTO host_users (host_id, uid, username, user_type, groupname, shell)
 				VALUES %s
-				`+dialect.OnDuplicateKey("host_id,uid", `
+				`+dialect.OnDuplicateKey("host_id,uid,username", `
 				user_type = VALUES(user_type),
 				groupname = VALUES(groupname),
 				shell = VALUES(shell),

@@ -23,7 +23,11 @@ func (d *rebindDriver) Open(dsn string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return connector.Connect(context.Background())
+	conn, err := connector.Connect(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	return &rebindConn{Conn: conn}, nil
 }
 
 func (d *rebindDriver) OpenConnector(dsn string) (driver.Connector, error) {

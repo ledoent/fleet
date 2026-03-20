@@ -94,3 +94,39 @@ func TestPostgresNewHost(t *testing.T) {
 	assert.NotZero(t, host.ID)
 	t.Logf("Created host ID: %d", host.ID)
 }
+
+func TestPostgresNewHostViaTestHelper(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	// This is how test helpers create hosts - using the test package helper
+	host := &fleet.Host{
+		OsqueryHostID:   ptr.String("pg-helper-host"),
+		NodeKey:         ptr.String("pg-helper-key"),
+		UUID:            "pg-helper-uuid",
+		Hostname:        "pg-helper",
+		Platform:        "darwin",
+		DetailUpdatedAt: time.Now(),
+		LabelUpdatedAt:  time.Now(),
+		PolicyUpdatedAt: time.Now(),
+		SeenTime:        time.Now(),
+	}
+	created, err := ds.NewHost(ctx, host)
+	require.NoError(t, err, "NewHost should work")
+	require.NotNil(t, created)
+	t.Logf("Host created: ID=%d", created.ID)
+
+	// Now try the operations that follow in typical test setup
+	err = ds.RecordLabelQueryExecutions(ctx, created, map[uint]*bool{}, time.Now(), false)
+	if err != nil {
+		t.Logf("RecordLabelQueryExecutions error: %v", err)
+	}
+
+	// Try saving host users
+	err = ds.SaveHostUsers(ctx, created.ID, []fleet.HostUser{
+		{Username: "testuser", Uid: 1001},
+	})
+	if err != nil {
+		t.Logf("SaveHostUsers error: %v", err)
+	}
+}
