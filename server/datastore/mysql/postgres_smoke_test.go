@@ -1,6 +1,10 @@
 package mysql
 
 import (
+	"github.com/fleetdm/fleet/v4/server/fleet"
+	"github.com/fleetdm/fleet/v4/server/ptr"
+	"context"
+	"time"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -66,4 +70,27 @@ func TestPostgresSmokeTest(t *testing.T) {
 	err = ds.primary.Get(&version, "SELECT "+ds.dialect.JSONUnquoteExtract("data", "$.version")+" FROM pg_json_test LIMIT 1")
 	require.NoError(t, err)
 	assert.Equal(t, "4.83", version)
+}
+
+func TestPostgresNewHost(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	host, err := ds.NewHost(ctx, &fleet.Host{
+		OsqueryHostID:   ptr.String("pg-test-host"),
+		NodeKey:         ptr.String("pg-test-key"),
+		UUID:            "pg-test-uuid",
+		Hostname:        "pg-test-hostname",
+		Platform:        "darwin",
+		DetailUpdatedAt: time.Now(),
+		LabelUpdatedAt:  time.Now(),
+		PolicyUpdatedAt: time.Now(),
+		SeenTime:        time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("NewHost failed: %v", err)
+	}
+	assert.NotNil(t, host)
+	assert.NotZero(t, host.ID)
+	t.Logf("Created host ID: %d", host.ID)
 }
