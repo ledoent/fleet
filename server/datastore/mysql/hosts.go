@@ -956,10 +956,11 @@ func queryStatsToScheduledQueryStats(queriesStats []fleet.QueryStats, packName s
 const hostMDMSelect = `,
 	JSON_OBJECT(
 		'enrollment_status', hmdm.enrollment_status,
+		
 		'dep_profile_error',
 		CASE
-			WHEN hdep.assign_profile_response IN ('` + string(fleet.DEPAssignProfileResponseFailed) + `', '` + string(fleet.DEPAssignProfileResponseThrottled) + `') THEN 'true'
-			ELSE 'false'
+			WHEN hdep.assign_profile_response IN ('` + string(fleet.DEPAssignProfileResponseFailed) + `', '` + string(fleet.DEPAssignProfileResponseThrottled) + `') THEN TRUE
+			ELSE FALSE
 		END,
 		'server_url',
 		CASE
@@ -973,8 +974,8 @@ const hostMDMSelect = `,
 			* unmarshaller was having problems converting int values to
 			* booleans.
 			*/
-			WHEN hdek.decryptable IS NULL OR hdek.decryptable = false THEN 'false'
-			ELSE 'true'
+			WHEN hdek.decryptable IS NULL OR hdek.decryptable = false THEN FALSE
+			ELSE TRUE
 		END,
 		'raw_decryptable',
 		CASE
@@ -994,12 +995,12 @@ const hostMDMSelect = `,
 				    AND mwe.device_state = '` + microsoft_mdm.MDMDeviceStateEnrolled + `'
 				    AND hmdm.enrolled = true
 				)
-				THEN 'true'
-				ELSE 'false'
+				THEN TRUE
+				ELSE FALSE
 				END
 			)
 			WHEN h.platform = 'android' THEN
-				CASE WHEN hmdm.enrolled = true THEN 'true' ELSE 'false' END
+				CASE WHEN hmdm.enrolled = true THEN TRUE ELSE FALSE END
 			WHEN h.platform IN ('ios', 'ipados', 'darwin') THEN (` +
 	// NOTE: if you change any of the conditions in this
 	// query, please update the AreHostsConnectedToFleetMDM
@@ -1011,11 +1012,11 @@ const hostMDMSelect = `,
 				    AND ne.type IN ('Device', 'User Enrollment (Device)')
 				    AND hmdm.enrolled = true
 				)
-				THEN 'true'
-				ELSE 'false'
+				THEN TRUE
+				ELSE FALSE
 				END
 			)
-			ELSE 'false'
+			ELSE FALSE
 		END,
 		'name', hmdm.name
 	) mdm_host_data
@@ -6253,14 +6254,14 @@ func (ds *Datastore) UpdateHostIssuesFailingPoliciesForSingleHost(ctx context.Co
 func updateHostIssuesFailingPoliciesForSingleHost(ctx context.Context, tx sqlx.ExecerContext, dialect DialectHelper, hostID uint) error {
 	stmt := `
 	INSERT INTO host_issues (host_id, failing_policies_count, total_issues_count)
-	SELECT host_id.id, COALESCE(SUM(!pm.passes), 0), COALESCE(SUM(!pm.passes), 0)
+	SELECT host_id.id, COALESCE(SUM(CASE WHEN pm.passes = false THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN pm.passes = false THEN 1 ELSE 0 END), 0)
 		FROM policy_membership pm
-		RIGHT JOIN (SELECT ? as id) as host_id
+		RIGHT JOIN (SELECT CAST(? AS integer) as id) as host_id
 		ON pm.host_id = host_id.id
 		GROUP BY host_id.id
 	` + dialect.OnDuplicateKey("host_id", `
 		failing_policies_count = VALUES(failing_policies_count),
-		total_issues_count = VALUES(failing_policies_count) + critical_vulnerabilities_count`)
+		total_issues_count = VALUES(failing_policies_count) + VALUES(critical_vulnerabilities_count)`)
 	if _, err := tx.ExecContext(ctx, stmt, hostID); err != nil {
 		return ctxerr.Wrap(ctx, err, "updating failing policies in host issues for one host")
 	}
@@ -6301,7 +6302,7 @@ func updateHostIssuesFailingPolicies(ctx context.Context, tx sqlx.ExecerContext,
 		GROUP BY pm.host_id
 	` + dialect.OnDuplicateKey("host_id", `
 		failing_policies_count = VALUES(failing_policies_count),
-		total_issues_count = VALUES(failing_policies_count) + critical_vulnerabilities_count`)
+		total_issues_count = VALUES(failing_policies_count) + VALUES(critical_vulnerabilities_count)`)
 
 	// Sort host IDs to ensure consistent lock ordering across all transactions.
 	// This prevents deadlocks when multiple transactions process overlapping sets of hosts.
