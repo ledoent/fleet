@@ -226,7 +226,8 @@ const sqlInsertCertificateAuthority = `INSERT INTO certificate_authorities (
 	client_secret_encrypted
 ) VALUES %s`
 
-const sqlUpsertCertificateAuthority = sqlInsertCertificateAuthority + ` ON DUPLICATE KEY UPDATE
+func sqlUpsertCertificateAuthority(dialect DialectHelper) string {
+	return sqlInsertCertificateAuthority + ` ` + dialect.OnDuplicateKey("name,type", `
 	type = VALUES(type),
 	name = VALUES(name),
 	url = VALUES(url),
@@ -241,7 +242,8 @@ const sqlUpsertCertificateAuthority = sqlInsertCertificateAuthority + ` ON DUPLI
 	password_encrypted = VALUES(password_encrypted),
 	challenge_encrypted = VALUES(challenge_encrypted),
 	client_id = VALUES(client_id),
-	client_secret_encrypted = VALUES(client_secret_encrypted)`
+	client_secret_encrypted = VALUES(client_secret_encrypted)`)
+}
 
 func sqlGenerateArgsForInsertCertificateAuthority(ctx context.Context, serverPrivateKey string, ca *fleet.CertificateAuthority) ([]interface{}, string, error) {
 	var upns []byte
@@ -304,7 +306,7 @@ func sqlGenerateArgsForInsertCertificateAuthority(ctx context.Context, serverPri
 	return args, placeholders, nil
 }
 
-func batchUpsertCertificateAuthorities(ctx context.Context, tx sqlx.ExtContext, serverPrivateKey string, certificateAuthorities []*fleet.CertificateAuthority) error {
+func batchUpsertCertificateAuthorities(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, serverPrivateKey string, certificateAuthorities []*fleet.CertificateAuthority) error {
 	if len(certificateAuthorities) == 0 {
 		return nil
 	}
@@ -321,7 +323,7 @@ func batchUpsertCertificateAuthorities(ctx context.Context, tx sqlx.ExtContext, 
 		placeholders.WriteString(fmt.Sprintf("%s,", p))
 	}
 
-	stmt := fmt.Sprintf(sqlUpsertCertificateAuthority, strings.TrimSuffix(placeholders.String(), ","))
+	stmt := fmt.Sprintf(sqlUpsertCertificateAuthority(dialect), strings.TrimSuffix(placeholders.String(), ","))
 
 	if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 		return ctxerr.Wrap(ctx, err, "upserting certificate authorities")
@@ -364,7 +366,7 @@ func (ds *Datastore) BatchApplyCertificateAuthorities(ctx context.Context, ops f
 	upserts = append(upserts, ops.Update...)
 
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		if err := batchUpsertCertificateAuthorities(ctx, tx, ds.serverPrivateKey, upserts); err != nil {
+		if err := batchUpsertCertificateAuthorities(ctx, tx, ds.dialect, ds.serverPrivateKey, upserts); err != nil {
 			return err
 		}
 		if err := ds.batchDeleteCertificateAuthorities(ctx, tx, ops.Delete); err != nil {

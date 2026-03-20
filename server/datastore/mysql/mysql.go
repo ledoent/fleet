@@ -346,7 +346,7 @@ func NewDatastore(conns *common_mysql.DBConnections, cfg config.MysqlConfig, c c
 		stmtCache:           make(map[string]*sqlx.Stmt),
 		minLastOpenedAtDiff: conns.Options.MinLastOpenedAtDiff,
 		serverPrivateKey:    conns.Options.PrivateKey,
-		Datastore:           NewAndroidDatastore(conns.Options.Logger, conns.Primary, conns.Replica),
+		Datastore:           NewAndroidDatastore(conns.Options.Logger, conns.Primary, conns.Replica, dialectForDriver(cfg.Driver)),
 	}
 
 	go ds.writeChanLoop()

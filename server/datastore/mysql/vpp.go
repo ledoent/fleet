@@ -341,7 +341,7 @@ func (ds *Datastore) BatchInsertVPPApps(ctx context.Context, apps []*fleet.VPPAp
 
 			app.TitleID = titleID
 
-			if err := insertVPPApps(ctx, tx, []*fleet.VPPApp{app}); err != nil {
+			if err := insertVPPApps(ctx, tx, ds.dialect, []*fleet.VPPApp{app}); err != nil {
 				return ctxerr.Wrap(ctx, err, "BatchInsertVPPApps insertVPPApps transaction")
 			}
 		}
@@ -508,7 +508,7 @@ func (ds *Datastore) SetTeamVPPApps(ctx context.Context, teamID *uint, incomingA
 			if vppToken != nil {
 				tokenID = &vppToken.ID
 			}
-			vppAppTeamID, err := insertVPPAppTeams(ctx, tx, toAdd, teamID, tokenID)
+			vppAppTeamID, err := insertVPPAppTeams(ctx, tx, ds.dialect, toAdd, teamID, tokenID)
 			if err != nil {
 				return ctxerr.Wrap(ctx, err, "SetTeamVPPApps inserting vpp app into team")
 			}
@@ -522,7 +522,7 @@ func (ds *Datastore) SetTeamVPPApps(ctx context.Context, teamID *uint, incomingA
 			}
 
 			if toAdd.ValidatedLabels != nil {
-				if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, vppAppTeamID, *toAdd.ValidatedLabels, softwareTypeVPP); err != nil {
+				if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, ds.dialect, vppAppTeamID, *toAdd.ValidatedLabels, softwareTypeVPP); err != nil {
 					return ctxerr.Wrap(ctx, err, "failed to update labels on vpp apps batch operation")
 				}
 			}
@@ -534,7 +534,7 @@ func (ds *Datastore) SetTeamVPPApps(ctx context.Context, teamID *uint, incomingA
 			}
 
 			if toAdd.DisplayName != nil {
-				if err := updateSoftwareTitleDisplayName(ctx, tx, teamID, appStoreAppIDsToTitleIDs[toAdd.VPPAppID.String()], *toAdd.DisplayName); err != nil {
+				if err := updateSoftwareTitleDisplayName(ctx, tx, ds.dialect, teamID, appStoreAppIDsToTitleIDs[toAdd.VPPAppID.String()], *toAdd.DisplayName); err != nil {
 					return ctxerr.Wrap(ctx, err, "setting software title display name for vpp app")
 				}
 			}
@@ -639,11 +639,11 @@ func (ds *Datastore) InsertVPPAppWithTeam(ctx context.Context, app *fleet.VPPApp
 
 		app.TitleID = titleID
 
-		if err := insertVPPApps(ctx, tx, []*fleet.VPPApp{app}); err != nil {
+		if err := insertVPPApps(ctx, tx, ds.dialect, []*fleet.VPPApp{app}); err != nil {
 			return ctxerr.Wrap(ctx, err, "InsertVPPAppWithTeam insertVPPApps transaction")
 		}
 
-		vppAppTeamID, err := insertVPPAppTeams(ctx, tx, app.VPPAppTeam, teamID, vppTokenID)
+		vppAppTeamID, err := insertVPPAppTeams(ctx, tx, ds.dialect, app.VPPAppTeam, teamID, vppTokenID)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "InsertVPPAppWithTeam insertVPPAppTeams transaction")
 		}
@@ -656,7 +656,7 @@ func (ds *Datastore) InsertVPPAppWithTeam(ctx context.Context, app *fleet.VPPApp
 		app.VPPAppTeam.AppTeamID = vppAppTeamID
 
 		if app.ValidatedLabels != nil {
-			if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, vppAppTeamID, *app.ValidatedLabels, softwareTypeVPP); err != nil {
+			if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, ds.dialect, vppAppTeamID, *app.ValidatedLabels, softwareTypeVPP); err != nil {
 				return ctxerr.Wrap(ctx, err, "InsertVPPAppWithTeam setOrUpdateSoftwareInstallerLabelsDB transaction")
 			}
 		}
@@ -685,7 +685,7 @@ func (ds *Datastore) InsertVPPAppWithTeam(ctx context.Context, app *fleet.VPPApp
 		}
 
 		if app.DisplayName != nil {
-			if err := updateSoftwareTitleDisplayName(ctx, tx, teamID, titleID, *app.DisplayName); err != nil {
+			if err := updateSoftwareTitleDisplayName(ctx, tx, ds.dialect, teamID, titleID, *app.DisplayName); err != nil {
 				return ctxerr.Wrap(ctx, err, "setting software title display name for vpp app")
 			}
 		}
@@ -752,23 +752,22 @@ WHERE
 
 func (ds *Datastore) InsertVPPApps(ctx context.Context, apps []*fleet.VPPApp) error {
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return insertVPPApps(ctx, tx, apps)
+		return insertVPPApps(ctx, tx, ds.dialect, apps)
 	})
 }
 
-func insertVPPApps(ctx context.Context, tx sqlx.ExtContext, apps []*fleet.VPPApp) error {
+func insertVPPApps(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, apps []*fleet.VPPApp) error {
 	stmt := `
 INSERT INTO vpp_apps
 	(adam_id, bundle_identifier, icon_url, name, latest_version, title_id, platform)
 VALUES
 %s
-ON DUPLICATE KEY UPDATE
+` + dialect.OnDuplicateKey("adam_id,platform", `
 	updated_at = CURRENT_TIMESTAMP,
 	latest_version = VALUES(latest_version),
 	icon_url = VALUES(icon_url),
 	name = VALUES(name),
-	title_id = VALUES(title_id)
-	`
+	title_id = VALUES(title_id)`)
 	var args []any
 	var insertVals strings.Builder
 
@@ -784,16 +783,16 @@ ON DUPLICATE KEY UPDATE
 	return ctxerr.Wrap(ctx, err, "insert VPP apps")
 }
 
-func insertVPPAppTeams(ctx context.Context, tx sqlx.ExtContext, appID fleet.VPPAppTeam, teamID *uint, vppTokenID *uint) (uint, error) {
+func insertVPPAppTeams(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, appID fleet.VPPAppTeam, teamID *uint, vppTokenID *uint) (uint, error) {
 	stmt := `
 INSERT INTO vpp_apps_teams
 	(adam_id, global_or_team_id, team_id, platform, self_service, vpp_token_id, install_during_setup)
 VALUES
 	(?, ?, ?, ?, ?, ?, COALESCE(?, false))
-ON DUPLICATE KEY UPDATE
+` + dialect.OnDuplicateKey("id", `
 	self_service = VALUES(self_service),
-	install_during_setup = COALESCE(?, install_during_setup)
-`
+	install_during_setup = COALESCE(?, install_during_setup)`)
+
 
 	var globalOrTmID uint
 	if teamID != nil {

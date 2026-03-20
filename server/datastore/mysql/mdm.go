@@ -1476,6 +1476,7 @@ WHERE
 func batchSetProfileLabelAssociationsDB(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	profileLabels []fleet.ConfigurationProfileLabel,
 	profileUUIDsWithoutLabels []string,
 	platform string,
@@ -1522,10 +1523,10 @@ func batchSetProfileLabelAssociationsDB(
               (%s_profile_uuid, label_id, label_name, exclude, require_all)
           VALUES
               %s
-          ON DUPLICATE KEY UPDATE
+          ` + dialect.OnDuplicateKey("id", `
               label_id = VALUES(label_id),
               exclude = VALUES(exclude),
-			  require_all = VALUES(require_all)
+			  require_all = VALUES(require_all)`) + `
 	`
 
 	selectStmt := `
@@ -1978,6 +1979,7 @@ func (ds *Datastore) IsHostConnectedToFleetMDM(ctx context.Context, host *fleet.
 func batchSetProfileVariableAssociationsDB(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	profileVariablesByUUID []fleet.MDMProfileUUIDFleetVariables,
 	platform string,
 ) (didUpdate bool, err error) {
@@ -2080,9 +2082,8 @@ func batchSetProfileVariableAssociationsDB(
 				fleet_variable_id
 			)
 			VALUES %s
-			ON DUPLICATE KEY UPDATE
-				fleet_variable_id = VALUES(fleet_variable_id)
-		`, platformPrefix, strings.TrimSuffix(valuePart, ","))
+		`, platformPrefix, strings.TrimSuffix(valuePart, ",")) +
+			dialect.OnDuplicateKey("id", "fleet_variable_id = VALUES(fleet_variable_id)")
 
 		_, err := tx.ExecContext(ctx, stmt, args...)
 		return err
@@ -2528,7 +2529,7 @@ func (ds *Datastore) batchSetLabelAndVariableAssociations(ctx context.Context, t
 	}
 
 	var didUpdateLabels bool
-	if didUpdateLabels, err = batchSetProfileLabelAssociationsDB(ctx, tx, incomingLabels, profsWithoutLabels,
+	if didUpdateLabels, err = batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, incomingLabels, profsWithoutLabels,
 		platform); err != nil {
 		return false, ctxerr.Wrap(ctx, err, fmt.Sprintf("inserting %s profile label associations", platform))
 	}
@@ -2554,7 +2555,7 @@ func (ds *Datastore) batchSetLabelAndVariableAssociations(ctx context.Context, t
 
 	if len(profilesVarsToUpsert) > 0 {
 		var didUpdateVariableAssociations bool
-		if didUpdateVariableAssociations, err = batchSetProfileVariableAssociationsDB(ctx, tx, profilesVarsToUpsert, platform); err != nil {
+		if didUpdateVariableAssociations, err = batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, profilesVarsToUpsert, platform); err != nil {
 			return false, ctxerr.Wrap(ctx, err, fmt.Sprintf("inserting %s profile variable associations", platform))
 		}
 

@@ -295,7 +295,7 @@ func (ds *Datastore) AsyncBatchSaveHostsScheduledQueryStats(ctx context.Context,
 			user_time,
 			wall_time
 		)
-		VALUES %s ON DUPLICATE KEY UPDATE
+		VALUES %s ` + ds.dialect.OnDuplicateKey("scheduled_query_id,host_id", `
 			scheduled_query_id = VALUES(scheduled_query_id),
 			host_id = VALUES(host_id),
 			average_memory = VALUES(average_memory),
@@ -306,7 +306,7 @@ func (ds *Datastore) AsyncBatchSaveHostsScheduledQueryStats(ctx context.Context,
 			output_size = VALUES(output_size),
 			system_time = VALUES(system_time),
 			user_time = VALUES(user_time),
-			wall_time = VALUES(wall_time);
+			wall_time = VALUES(wall_time)`) + `;
 	`
 	var countExecs int
 

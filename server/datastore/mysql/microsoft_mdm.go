@@ -422,7 +422,7 @@ func (ds *Datastore) MDMWindowsSaveResponse(ctx context.Context, deviceID string
 			}
 		}
 
-		if err := updateMDMWindowsHostProfileStatusFromResponseDB(ctx, tx, potentialProfilePayloads); err != nil {
+		if err := updateMDMWindowsHostProfileStatusFromResponseDB(ctx, tx, ds.dialect, potentialProfilePayloads); err != nil {
 			return ctxerr.Wrap(ctx, err, "updating host profile status")
 		}
 
@@ -475,6 +475,7 @@ VALUES %s
 func updateMDMWindowsHostProfileStatusFromResponseDB(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	payloads []*fleet.MDMWindowsProfilePayload,
 ) error {
 	if len(payloads) == 0 {
@@ -485,15 +486,15 @@ func updateMDMWindowsHostProfileStatusFromResponseDB(
 	// should be inserted from a device MDM response, so we first check for
 	// matching entries and then perform the INSERT ... ON DUPLICATE KEY to
 	// update their detail and status.
-	const updateHostProfilesStmt = `
+	updateHostProfilesStmt := `
 		INSERT INTO host_mdm_windows_profiles
 			(host_uuid, profile_uuid, detail, status, retries, command_uuid, checksum)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE
+		` + dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 			checksum = VALUES(checksum),
 			detail = VALUES(detail),
 			status = VALUES(status),
-			retries = VALUES(retries)`
+			retries = VALUES(retries)`)
 
 	// MySQL will use the `host_uuid` part of the primary key as a first
 	// pass, and then filter that subset by `command_uuid`.
@@ -1927,7 +1928,7 @@ INSERT INTO
 		if len(labels) == 0 {
 			profsWithoutLabel = append(profsWithoutLabel, profileUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profsWithoutLabel, "windows"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profsWithoutLabel, "windows"); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting windows profile label associations")
 		}
 
@@ -1939,7 +1940,7 @@ INSERT INTO
 					FleetVariables: usesFleetVars,
 				},
 			}
-			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, profilesVarsToUpsert, "windows"); err != nil {
+			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, profilesVarsToUpsert, "windows"); err != nil {
 				return ctxerr.Wrap(ctx, err, "inserting windows profile variable associations")
 			}
 		}

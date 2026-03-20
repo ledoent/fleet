@@ -14,11 +14,10 @@ import (
 func (ds *AndroidDatastore) CreateEnterprise(ctx context.Context, userID uint) (uint, error) {
 	// android_enterprises user_id is only set when the row is created
 	stmt := `INSERT INTO android_enterprises (signup_name, user_id) VALUES ('', ?)`
-	res, err := ds.Writer(ctx).ExecContext(ctx, stmt, userID)
+	id, err := insertAndGetIDTx(ctx, ds.Writer(ctx), ds.dialect, stmt, userID)
 	if err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "inserting enterprise")
 	}
-	id, _ := res.LastInsertId()
 	return uint(id), nil // nolint:gosec // dismiss G115
 }
 

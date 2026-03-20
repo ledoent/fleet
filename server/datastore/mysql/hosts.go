@@ -204,10 +204,10 @@ func (ds *Datastore) SerialUpdateHost(ctx context.Context, host *fleet.Host) err
 }
 
 func (ds *Datastore) SaveHostPackStats(ctx context.Context, teamID *uint, hostID uint, stats []fleet.PackStats) error {
-	return saveHostPackStatsDB(ctx, ds.writer(ctx), teamID, hostID, stats)
+	return saveHostPackStatsDB(ctx, ds.writer(ctx), ds.dialect, teamID, hostID, stats)
 }
 
-func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, teamID *uint, hostID uint, stats []fleet.PackStats) error {
+func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper, teamID *uint, hostID uint, stats []fleet.PackStats) error {
 	// NOTE: this implementation must be kept in sync with the async/batch version
 	// in AsyncBatchSaveHostsScheduledQueryStats (in scheduled_queries.go) - that is,
 	// the behaviour per host must be the same.
@@ -296,7 +296,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, teamID *uint, hostID 
 				user_time,
 				wall_time
 			)
-			VALUES %s ON DUPLICATE KEY UPDATE
+			VALUES %s `+dialect.OnDuplicateKey("scheduled_query_id,host_id", `
 				scheduled_query_id = VALUES(scheduled_query_id),
 				host_id = VALUES(host_id),
 				average_memory = VALUES(average_memory),
@@ -307,7 +307,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, teamID *uint, hostID 
 				output_size = VALUES(output_size),
 				system_time = VALUES(system_time),
 				user_time = VALUES(user_time),
-				wall_time = VALUES(wall_time)
+				wall_time = VALUES(wall_time)`)+`
 		`, values)
 		if _, err := db.ExecContext(ctx, sql, scheduledQueriesArgs...); err != nil {
 			return ctxerr.Wrap(ctx, err, "insert query schedule stats")
@@ -332,7 +332,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, teamID *uint, hostID 
 					user_time,
 					wall_time
 				)
-				VALUES %s ON DUPLICATE KEY UPDATE
+				VALUES %s `+dialect.OnDuplicateKey("scheduled_query_id,host_id", `
 					scheduled_query_id = VALUES(scheduled_query_id),
 					host_id = VALUES(host_id),
 					average_memory = VALUES(average_memory),
@@ -343,7 +343,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, teamID *uint, hostID 
 					output_size = VALUES(output_size),
 					system_time = VALUES(system_time),
 					user_time = VALUES(user_time),
-					wall_time = VALUES(wall_time)
+					wall_time = VALUES(wall_time)`)+`
 			`, values)
 		if _, err := db.ExecContext(ctx, sql, userPacksArgs...); err != nil {
 			return ctxerr.Wrap(ctx, err, "insert pack stats")
@@ -2606,7 +2606,7 @@ func (ds *Datastore) EnrollOsquery(ctx context.Context, opts ...fleet.DatastoreE
 					fmt.Sprintf("This is likely due to a duplicate UUID/identity identifier used by multiple hosts: %s", osqueryHostID))
 			}
 
-			if err := deleteAllPolicyMemberships(ctx, tx, enrolledHostInfo.ID); err != nil {
+			if err := deleteAllPolicyMemberships(ctx, tx, ds.dialect, enrolledHostInfo.ID); err != nil {
 				return ctxerr.Wrap(ctx, err, "cleanup policy membership on re-enroll")
 			}
 
@@ -3423,7 +3423,7 @@ func (ds *Datastore) AddHostsToTeam(ctx context.Context, params *fleet.AddHostsT
 		hostIDsBatch := hostIDs[start:end]
 		err := ds.withRetryTxx(
 			ctx, func(tx sqlx.ExtContext) error {
-				if err := cleanupPolicyMembershipOnTeamChange(ctx, tx, hostIDsBatch); err != nil {
+				if err := cleanupPolicyMembershipOnTeamChange(ctx, tx, ds.dialect, hostIDsBatch); err != nil {
 					return ctxerr.Wrap(ctx, err, "AddHostsToTeam delete policy membership")
 				}
 				if err := cleanupQueryResultsOnTeamChange(ctx, tx, hostIDsBatch); err != nil {
@@ -3460,14 +3460,14 @@ func (ds *Datastore) AddHostsToTeam(ctx context.Context, params *fleet.AddHostsT
 }
 
 func (ds *Datastore) SaveHostAdditional(ctx context.Context, hostID uint, additional *json.RawMessage) error {
-	return saveHostAdditionalDB(ctx, ds.writer(ctx), hostID, additional)
+	return saveHostAdditionalDB(ctx, ds.writer(ctx), ds.dialect, hostID, additional)
 }
 
-func saveHostAdditionalDB(ctx context.Context, exec sqlx.ExecerContext, hostID uint, additional *json.RawMessage) error {
+func saveHostAdditionalDB(ctx context.Context, exec sqlx.ExecerContext, dialect DialectHelper, hostID uint, additional *json.RawMessage) error {
 	sql := `
 		INSERT INTO host_additional (host_id, additional)
 		VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE additional = VALUES(additional)
+		` + dialect.OnDuplicateKey("host_id", "additional = VALUES(additional)") + `
 	`
 	if _, err := exec.ExecContext(ctx, sql, hostID, additional); err != nil {
 		return ctxerr.Wrap(ctx, err, "insert additional")
@@ -3477,11 +3477,11 @@ func saveHostAdditionalDB(ctx context.Context, exec sqlx.ExecerContext, hostID u
 
 func (ds *Datastore) SaveHostUsers(ctx context.Context, hostID uint, users []fleet.HostUser) error {
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return saveHostUsersDB(ctx, tx, hostID, users)
+		return saveHostUsersDB(ctx, tx, ds.dialect, hostID, users)
 	})
 }
 
-func saveHostUsersDB(ctx context.Context, tx sqlx.ExtContext, hostID uint, users []fleet.HostUser) error {
+func saveHostUsersDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hostID uint, users []fleet.HostUser) error {
 	currentHostUsers, err := loadHostUsersDB(ctx, tx, hostID)
 	if err != nil {
 		return err
@@ -3506,11 +3506,11 @@ func saveHostUsersDB(ctx context.Context, tx sqlx.ExtContext, hostID uint, users
 	insertSql := fmt.Sprintf(
 		`INSERT INTO host_users (host_id, uid, username, user_type, groupname, shell)
 				VALUES %s
-				ON DUPLICATE KEY UPDATE
+				`+dialect.OnDuplicateKey("host_id,uid", `
 				user_type = VALUES(user_type),
 				groupname = VALUES(groupname),
 				shell = VALUES(shell),
-				removed_at = NULL`,
+				removed_at = NULL`),
 		insertValues,
 	)
 	if _, err := tx.ExecContext(ctx, insertSql, insertArgs...); err != nil {
@@ -6241,16 +6241,16 @@ func (ds *Datastore) GetHostIssuesLastUpdated(ctx context.Context, hostId uint) 
 
 func (ds *Datastore) UpdateHostIssuesFailingPolicies(ctx context.Context, hostIDs []uint) error {
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return updateHostIssuesFailingPolicies(ctx, tx, hostIDs)
+		return updateHostIssuesFailingPolicies(ctx, tx, ds.dialect, hostIDs)
 	})
 }
 
 func (ds *Datastore) UpdateHostIssuesFailingPoliciesForSingleHost(ctx context.Context, hostID uint) error {
 	var tx sqlx.ExecerContext = ds.writer(ctx)
-	return updateHostIssuesFailingPoliciesForSingleHost(ctx, tx, hostID)
+	return updateHostIssuesFailingPoliciesForSingleHost(ctx, tx, ds.dialect, hostID)
 }
 
-func updateHostIssuesFailingPoliciesForSingleHost(ctx context.Context, tx sqlx.ExecerContext, hostID uint) error {
+func updateHostIssuesFailingPoliciesForSingleHost(ctx context.Context, tx sqlx.ExecerContext, dialect DialectHelper, hostID uint) error {
 	stmt := `
 	INSERT INTO host_issues (host_id, failing_policies_count, total_issues_count)
 	SELECT host_id.id, COALESCE(SUM(!pm.passes), 0), COALESCE(SUM(!pm.passes), 0)
@@ -6258,22 +6258,22 @@ func updateHostIssuesFailingPoliciesForSingleHost(ctx context.Context, tx sqlx.E
 		RIGHT JOIN (SELECT ? as id) as host_id
 		ON pm.host_id = host_id.id
 		GROUP BY host_id.id
-	ON DUPLICATE KEY UPDATE
+	` + dialect.OnDuplicateKey("host_id", `
 		failing_policies_count = VALUES(failing_policies_count),
-		total_issues_count = VALUES(failing_policies_count) + critical_vulnerabilities_count`
+		total_issues_count = VALUES(failing_policies_count) + critical_vulnerabilities_count`)
 	if _, err := tx.ExecContext(ctx, stmt, hostID); err != nil {
 		return ctxerr.Wrap(ctx, err, "updating failing policies in host issues for one host")
 	}
 	return nil
 }
 
-func updateHostIssuesFailingPolicies(ctx context.Context, tx sqlx.ExecerContext, hostIDs []uint) error {
+func updateHostIssuesFailingPolicies(ctx context.Context, tx sqlx.ExecerContext, dialect DialectHelper, hostIDs []uint) error {
 	if len(hostIDs) == 0 {
 		return nil
 	}
 
 	if len(hostIDs) == 1 {
-		return updateHostIssuesFailingPoliciesForSingleHost(ctx, tx, hostIDs[0])
+		return updateHostIssuesFailingPoliciesForSingleHost(ctx, tx, dialect, hostIDs[0])
 	}
 
 	// For multiple hosts, lock policy_membership rows first to prevent deadlocks
@@ -6299,9 +6299,9 @@ func updateHostIssuesFailingPolicies(ctx context.Context, tx sqlx.ExecerContext,
 		FROM policy_membership pm
 		WHERE pm.host_id IN (?)
 		GROUP BY pm.host_id
-	ON DUPLICATE KEY UPDATE
+	` + dialect.OnDuplicateKey("host_id", `
 		failing_policies_count = VALUES(failing_policies_count),
-		total_issues_count = VALUES(failing_policies_count) + critical_vulnerabilities_count`
+		total_issues_count = VALUES(failing_policies_count) + critical_vulnerabilities_count`)
 
 	// Sort host IDs to ensure consistent lock ordering across all transactions.
 	// This prevents deadlocks when multiple transactions process overlapping sets of hosts.

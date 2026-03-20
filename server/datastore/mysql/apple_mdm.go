@@ -212,30 +212,51 @@ INSERT INTO
 		if err != nil {
 			return err
 		}
-		res, err := tx.ExecContext(ctx, stmt,
-			profUUID, teamID, cp.Identifier, cp.Name, cp.Scope, cp.Mobileconfig, cp.Mobileconfig, cp.SecretsUpdatedAt, cp.Name, teamID, cp.Name,
-			teamID, cp.Name, teamID)
-		if err != nil {
-			switch {
-			case ds.dialect.IsDuplicate(err):
-				return ctxerr.Wrap(ctx, formatErrorDuplicateConfigProfile(err, &cp))
-			default:
-				return ctxerr.Wrap(ctx, err, "creating new apple mdm config profile")
+		if ds.dialect.ReturningID() != "" {
+			// PostgreSQL: RETURNING id will return sql.ErrNoRows if no row was inserted
+			err := tx.QueryRowxContext(ctx, stmt+ds.dialect.ReturningID(),
+				profUUID, teamID, cp.Identifier, cp.Name, cp.Scope, cp.Mobileconfig, cp.Mobileconfig, cp.SecretsUpdatedAt, cp.Name, teamID, cp.Name,
+				teamID, cp.Name, teamID).Scan(&profileID)
+			if errors.Is(err, sql.ErrNoRows) {
+				return &existsError{
+					ResourceType: "MDMAppleConfigProfile.PayloadDisplayName",
+					Identifier:   cp.Name,
+					TeamID:       cp.TeamID,
+				}
+			} else if err != nil {
+				switch {
+				case ds.dialect.IsDuplicate(err):
+					return ctxerr.Wrap(ctx, formatErrorDuplicateConfigProfile(err, &cp))
+				default:
+					return ctxerr.Wrap(ctx, err, "creating new apple mdm config profile")
+				}
 			}
-		}
-
-		aff, _ := res.RowsAffected()
-		if aff == 0 {
-			return &existsError{
-				ResourceType: "MDMAppleConfigProfile.PayloadDisplayName",
-				Identifier:   cp.Name,
-				TeamID:       cp.TeamID,
+		} else {
+			res, err := tx.ExecContext(ctx, stmt,
+				profUUID, teamID, cp.Identifier, cp.Name, cp.Scope, cp.Mobileconfig, cp.Mobileconfig, cp.SecretsUpdatedAt, cp.Name, teamID, cp.Name,
+				teamID, cp.Name, teamID)
+			if err != nil {
+				switch {
+				case ds.dialect.IsDuplicate(err):
+					return ctxerr.Wrap(ctx, formatErrorDuplicateConfigProfile(err, &cp))
+				default:
+					return ctxerr.Wrap(ctx, err, "creating new apple mdm config profile")
+				}
 			}
-		}
 
-		// record the ID as we want to return a fleet.Profile instance with it
-		// filled in.
-		profileID, _ = res.LastInsertId()
+			aff, _ := res.RowsAffected()
+			if aff == 0 {
+				return &existsError{
+					ResourceType: "MDMAppleConfigProfile.PayloadDisplayName",
+					Identifier:   cp.Name,
+					TeamID:       cp.TeamID,
+				}
+			}
+
+			// record the ID as we want to return a fleet.Profile instance with it
+			// filled in.
+			profileID, _ = res.LastInsertId()
+		}
 
 		labels := make([]fleet.ConfigurationProfileLabel, 0, len(cp.LabelsIncludeAll)+len(cp.LabelsIncludeAny)+len(cp.LabelsExcludeAny))
 		for i := range cp.LabelsIncludeAll {
@@ -260,10 +281,10 @@ INSERT INTO
 		if len(labels) == 0 {
 			profWithoutLabels = append(profWithoutLabels, profUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profWithoutLabels, "darwin"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profWithoutLabels, "darwin"); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting darwin profile label associations")
 		}
-		if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, []fleet.MDMProfileUUIDFleetVariables{
+		if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, []fleet.MDMProfileUUIDFleetVariables{
 			{ProfileUUID: profUUID, FleetVariables: usesFleetVars},
 		}, "darwin"); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting darwin profile variable associations")
@@ -1800,18 +1821,16 @@ func upsertMDMAppleHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, dialec
 	// enrolled yet.
 	enrolled := !fromSync
 
-	result, err := tx.ExecContext(ctx, `
+	mdmID, err := insertAndGetIDTx(ctx, tx, dialect, `
 		INSERT INTO mobile_device_management_solutions (name, server_url) VALUES (?, ?)
 		`+dialect.OnDuplicateKey("name, server_url", "server_url = VALUES(server_url)"),
 		fleet.WellKnownMDMFleet, serverURL)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert mdm solution")
 	}
-
-	var mdmID int64
-	if insertOnDuplicateDidInsertOrUpdate(result) {
-		mdmID, _ = result.LastInsertId()
-	} else {
+	if mdmID == 0 {
+		// ON DUPLICATE KEY UPDATE did not insert a new row (MySQL returns 0 for LastInsertId);
+		// fall back to querying the existing row's ID.
 		stmt := `SELECT id FROM mobile_device_management_solutions WHERE name = ? AND server_url = ?`
 		if err := sqlx.GetContext(ctx, tx, &mdmID, stmt, fleet.WellKnownMDMFleet, serverURL); err != nil {
 			return ctxerr.Wrap(ctx, err, "query mdm solution id")

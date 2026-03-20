@@ -344,6 +344,18 @@ func (ds *Datastore) InsertOSVulnerability(ctx context.Context, v fleet.OSVulner
 
 	args = append(args, v.OSID, v.CVE, s, v.ResolvedInVersion)
 
+	if ds.dialect.ReturningID() != "" {
+		// PostgreSQL: use RETURNING id and xmax to distinguish insert from update.
+		// xmax = 0 means the row was freshly inserted (not updated).
+		var id int64
+		var xmax uint32
+		err := ds.writer(ctx).QueryRowContext(ctx, sqlStmt+" RETURNING id, xmax", args...).Scan(&id, &xmax)
+		if err != nil {
+			return false, ctxerr.Wrap(ctx, err, "insert operating system vulnerability")
+		}
+		return xmax == 0, nil
+	}
+	// MySQL path
 	res, err := ds.writer(ctx).ExecContext(ctx, sqlStmt, args...)
 	if err != nil {
 		return false, ctxerr.Wrap(ctx, err, "insert operating system vulnerability")

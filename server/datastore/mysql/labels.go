@@ -190,7 +190,7 @@ func (ds *Datastore) ApplyLabelSpecsWithAuthor(ctx context.Context, specs []*fle
 			}
 		}
 
-		sql := `
+		insertSQL := `
 		INSERT INTO labels (
 			name,
 			description,
@@ -212,21 +212,11 @@ func (ds *Datastore) ApplyLabelSpecsWithAuthor(ctx context.Context, specs []*fle
 			criteria = VALUES(criteria)
 		`)
 
-		prepTx, ok := tx.(sqlx.PreparerContext)
-		if !ok {
-			return ctxerr.New(ctx, "tx in ApplyLabelSpecs is not a sqlx.PreparerContext")
-		}
-		stmt, err := prepTx.PrepareContext(ctx, sql)
-		if err != nil {
-			return ctxerr.Wrap(ctx, err, "prepare ApplyLabelSpecs insert")
-		}
-		defer stmt.Close()
-
 		for _, s := range specs {
 			if s.Name == "" {
 				return ctxerr.New(ctx, "label name must not be empty")
 			}
-			insertLabelResult, err := stmt.ExecContext(ctx, s.Name, s.Description, s.Query, s.Platform, s.LabelType, s.LabelMembershipType, s.HostVitalsCriteria, authorID, s.TeamID)
+			insertedID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertSQL, s.Name, s.Description, s.Query, s.Platform, s.LabelType, s.LabelMembershipType, s.HostVitalsCriteria, authorID, s.TeamID)
 			if err != nil {
 				return ctxerr.Wrap(ctx, err, "exec ApplyLabelSpecs insert")
 			}
@@ -257,18 +247,12 @@ func (ds *Datastore) ApplyLabelSpecsWithAuthor(ctx context.Context, specs []*fle
 				// Use the existing label ID
 				labelID = existing.ID
 			} else {
-				// New label - fetch the ID we just created
-				id, err := insertLabelResult.LastInsertId()
-				if err != nil {
-					return ctxerr.Wrap(ctx, err, "get new label ID for manual membership")
-				}
-				labelID = uint(id) //nolint:gosec
+				// New label - use the ID from the insert
+				labelID = uint(insertedID) //nolint:gosec
 			}
 
-			sql = `
-DELETE FROM label_membership WHERE label_id = ?
-`
-			_, err = tx.ExecContext(ctx, sql, labelID)
+			delSQL := `DELETE FROM label_membership WHERE label_id = ?`
+			_, err = tx.ExecContext(ctx, delSQL, labelID)
 			if err != nil {
 				return ctxerr.Wrap(ctx, err, "clear membership for ID")
 			}
@@ -318,15 +302,15 @@ DELETE FROM label_membership WHERE label_id = ?
 
 				// Use ignore because duplicate hostnames could appear in
 				// different batches and would result in duplicate key errors.
-				sql = fmt.Sprintf(
+				memberSQL := fmt.Sprintf(
 					ds.dialect.InsertIgnoreInto()+` label_membership (label_id, host_id) (SELECT DISTINCT ?, id FROM hosts WHERE %s)`+ds.dialect.OnConflictDoNothing("host_id,label_id"),
 					hostsFilterClause,
 				)
-				sql, args, err := sqlx.In(sql, labelID, stringIdents, stringIdents, stringIdents, intIdents)
+				memberSQL, args, err := sqlx.In(memberSQL, labelID, stringIdents, stringIdents, stringIdents, intIdents)
 				if err != nil {
 					return ctxerr.Wrap(ctx, err, "build membership IN statement")
 				}
-				_, err = tx.ExecContext(ctx, sql, args...)
+				_, err = tx.ExecContext(ctx, memberSQL, args...)
 				if err != nil {
 					return ctxerr.Wrap(ctx, err, "execute membership INSERT")
 				}

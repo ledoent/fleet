@@ -489,7 +489,7 @@ func (ds *Datastore) applyChangesForNewSoftwareDB(
 				return err
 			}
 
-			if err = updateSoftwareUpdatedAt(ctx, tx, hostID); err != nil {
+			if err = updateSoftwareUpdatedAt(ctx, tx, ds.dialect, hostID); err != nil {
 				return err
 			}
 			return nil
@@ -1510,9 +1510,10 @@ func updateModifiedHostSoftwareDB(
 func updateSoftwareUpdatedAt(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	hostID uint,
 ) error {
-	const stmt = `INSERT INTO host_updates(host_id, software_updated_at) VALUES (?, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE software_updated_at=VALUES(software_updated_at)`
+	stmt := `INSERT INTO host_updates(host_id, software_updated_at) VALUES (?, CURRENT_TIMESTAMP) ` + dialect.OnDuplicateKey("host_id", "software_updated_at=VALUES(software_updated_at)")
 
 	if _, err := tx.ExecContext(ctx, stmt, hostID); err != nil {
 		return ctxerr.Wrap(ctx, err, "update host updates")

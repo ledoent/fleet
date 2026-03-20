@@ -48,8 +48,10 @@ func (ds *Datastore) CreateOrUpdateCalendarEvent(
 				event = VALUES(event),
 				timezone = VALUES(timezone),
 				updated_at = CURRENT_TIMESTAMP`)
-		result, err := tx.ExecContext(
+		id, err = insertAndGetIDTx(
 			ctx,
+			tx,
+			ds.dialect,
 			calendarEventsQuery,
 			UUID[:],
 			email,
@@ -61,10 +63,9 @@ func (ds *Datastore) CreateOrUpdateCalendarEvent(
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "insert calendar event")
 		}
-
-		if insertOnDuplicateDidInsertOrUpdate(result) {
-			id, _ = result.LastInsertId()
-		} else {
+		if id == 0 {
+			// ON DUPLICATE KEY UPDATE did not insert a new row (MySQL returns 0 for LastInsertId);
+			// fall back to querying the existing row's ID.
 			stmt := `SELECT id FROM calendar_events WHERE email = ?`
 			if err := sqlx.GetContext(ctx, tx, &id, stmt, email); err != nil {
 				return ctxerr.Wrap(ctx, err, "calendar event id")

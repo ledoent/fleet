@@ -47,23 +47,8 @@ func (ds *Datastore) NewAndroidHost(ctx context.Context, host *fleet.AndroidHost
 			detail_updated_at,
 			label_updated_at,
 			uuid
-		) VALUES (
-			:node_key,
-			:hostname,
-			:computer_name,
-			:platform,
-			:os_version,
-			:build,
-			:memory,
-			:team_id,
-			:hardware_serial,
-			:cpu_type,
-			:hardware_model,
-			:hardware_vendor,
-			:detail_updated_at,
-			:label_updated_at,
-			:uuid
-		) ` + ds.dialect.OnDuplicateKey("id", `
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		` + ds.dialect.OnDuplicateKey("id", `
 			hostname = VALUES(hostname),
 			computer_name = VALUES(computer_name),
 			platform = VALUES(platform),
@@ -79,27 +64,26 @@ func (ds *Datastore) NewAndroidHost(ctx context.Context, host *fleet.AndroidHost
 			label_updated_at = VALUES(label_updated_at),
 			uuid = VALUES(uuid)
 		`)
-		result, err := sqlx.NamedExecContext(ctx, tx, stmt, map[string]interface{}{
-			"node_key":          host.NodeKey,
-			"hostname":          host.Hostname,
-			"computer_name":     host.ComputerName,
-			"platform":          host.Platform,
-			"os_version":        host.OSVersion,
-			"build":             host.Build,
-			"memory":            host.Memory,
-			"team_id":           host.TeamID,
-			"hardware_serial":   host.HardwareSerial,
-			"cpu_type":          host.CPUType,
-			"hardware_model":    host.HardwareModel,
-			"hardware_vendor":   host.HardwareVendor,
-			"detail_updated_at": host.DetailUpdatedAt,
-			"label_updated_at":  host.LabelUpdatedAt,
-			"uuid":              host.UUID,
-		})
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, stmt,
+			host.NodeKey,
+			host.Hostname,
+			host.ComputerName,
+			host.Platform,
+			host.OSVersion,
+			host.Build,
+			host.Memory,
+			host.TeamID,
+			host.HardwareSerial,
+			host.CPUType,
+			host.HardwareModel,
+			host.HardwareVendor,
+			host.DetailUpdatedAt,
+			host.LabelUpdatedAt,
+			host.UUID,
+		)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "new Android host")
 		}
-		id, _ := result.LastInsertId()
 		if id == 0 {
 			// This was an UPDATE, not an INSERT, so we need to get the host ID
 			var hostID uint
@@ -430,18 +414,16 @@ UPDATE host_mdm
 }
 
 func upsertAndroidHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, serverURL string, companyOwned, enrolled bool, hostID uint) error {
-	result, err := tx.ExecContext(ctx, `
+	mdmID, err := insertAndGetIDTx(ctx, tx, dialect, `
 		INSERT INTO mobile_device_management_solutions (name, server_url) VALUES (?, ?)
 		`+dialect.OnDuplicateKey("name, server_url", "server_url = VALUES(server_url)"),
 		fleet.WellKnownMDMFleet, serverURL)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert mdm solution")
 	}
-
-	var mdmID int64
-	if insertOnDuplicateDidInsertOrUpdate(result) {
-		mdmID, _ = result.LastInsertId()
-	} else {
+	if mdmID == 0 {
+		// ON DUPLICATE KEY UPDATE did not insert a new row (MySQL returns 0 for LastInsertId);
+		// fall back to querying the existing row's ID.
 		stmt := `SELECT id FROM mobile_device_management_solutions WHERE name = ? AND server_url = ?`
 		if err := sqlx.GetContext(ctx, tx, &mdmID, stmt, fleet.WellKnownMDMFleet, serverURL); err != nil {
 			return ctxerr.Wrap(ctx, err, "query mdm solution id")
@@ -527,7 +509,7 @@ INSERT INTO
 		if len(labels) == 0 {
 			profsWithoutLabel = append(profsWithoutLabel, profileUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profsWithoutLabel, "android"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profsWithoutLabel, "android"); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting android profile label associations")
 		}
 

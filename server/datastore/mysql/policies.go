@@ -492,7 +492,7 @@ func cleanupPolicy(
 	var err error
 
 	if shouldRemoveAllPolicyMemberships {
-		err = cleanupPolicyMembershipForPolicy(ctx, queryerContext, extContext, policyID)
+		err = cleanupPolicyMembershipForPolicy(ctx, queryerContext, extContext, dialect, policyID)
 	} else {
 		err = cleanupPolicyMembershipOnPolicyUpdate(ctx, queryerContext, extContext, policyID, policyPlatform, dialect)
 	}
@@ -1742,19 +1742,19 @@ func (ds *Datastore) AsyncBatchUpdatePolicyTimestamp(ctx context.Context, ids []
 	})
 }
 
-func deleteAllPolicyMemberships(ctx context.Context, tx sqlx.ExtContext, hostID uint) error {
+func deleteAllPolicyMemberships(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hostID uint) error {
 	query := `DELETE FROM policy_membership WHERE host_id = ?`
 	if _, err := tx.ExecContext(ctx, query, hostID); err != nil {
 		return ctxerr.Wrap(ctx, err, "exec delete policies")
 	}
 	// Use the single host method for better performance and no unnecessary locking
-	if err := updateHostIssuesFailingPoliciesForSingleHost(ctx, tx, hostID); err != nil {
+	if err := updateHostIssuesFailingPoliciesForSingleHost(ctx, tx, dialect, hostID); err != nil {
 		return err
 	}
 	return nil
 }
 
-func cleanupPolicyMembershipOnTeamChange(ctx context.Context, tx sqlx.ExtContext, hostIDs []uint) error {
+func cleanupPolicyMembershipOnTeamChange(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hostIDs []uint) error {
 	// hosts can only be in one team, so if there's a policy that has a team id and a result from one of our hosts
 	// it can only be from the previous team they are being transferred from
 	query, args, err := sqlx.In(`DELETE FROM policy_membership
@@ -1767,7 +1767,7 @@ func cleanupPolicyMembershipOnTeamChange(ctx context.Context, tx sqlx.ExtContext
 	}
 	// This method is currently called for a batch of hosts. Performance should be monitored. If performance becomes a concern,
 	// we can reduce batch size or move this method outside the transaction.
-	if err = updateHostIssuesFailingPolicies(ctx, tx, hostIDs); err != nil {
+	if err = updateHostIssuesFailingPolicies(ctx, tx, dialect, hostIDs); err != nil {
 		return err
 	}
 	return nil
@@ -1857,7 +1857,7 @@ func cleanupPolicyMembershipOnPolicyUpdate(
 			if _, err = db.ExecContext(ctx, batchStmt, args...); err != nil {
 				return ctxerr.Wrap(ctx, err, "batch cleanup policy membership for platform")
 			}
-			if err := updateHostIssuesFailingPolicies(ctx, db, batchHostIDs); err != nil {
+			if err := updateHostIssuesFailingPolicies(ctx, db, dialect, batchHostIDs); err != nil {
 				return err
 			}
 			afterHostID = batchHostIDs[len(batchHostIDs)-1]
@@ -1920,7 +1920,7 @@ func cleanupPolicyMembershipOnPolicyUpdate(
 		if _, err = db.ExecContext(ctx, batchStmt, args...); err != nil {
 			return ctxerr.Wrap(ctx, err, "batch cleanup policy membership for labels")
 		}
-		if err := updateHostIssuesFailingPolicies(ctx, db, batchHostIDs); err != nil {
+		if err := updateHostIssuesFailingPolicies(ctx, db, dialect, batchHostIDs); err != nil {
 			return err
 		}
 		afterLabelHostID = batchHostIDs[len(batchHostIDs)-1]
@@ -1935,6 +1935,7 @@ func cleanupPolicyMembershipForPolicy(
 	ctx context.Context,
 	queryerContext sqlx.QueryerContext,
 	exec sqlx.ExecerContext,
+	dialect DialectHelper,
 	policyID uint,
 ) error {
 	// Page through policy_membership using (policy_id, host_id) as a cursor. Selecting and deleting one
@@ -1967,7 +1968,7 @@ func cleanupPolicyMembershipForPolicy(
 		if _, err = exec.ExecContext(ctx, batchStmt, args...); err != nil {
 			return ctxerr.Wrap(ctx, err, "batch cleanup policy membership")
 		}
-		if err := updateHostIssuesFailingPolicies(ctx, exec, batchHostIDs); err != nil {
+		if err := updateHostIssuesFailingPolicies(ctx, exec, dialect, batchHostIDs); err != nil {
 			return err
 		}
 		afterHostID = batchHostIDs[len(batchHostIDs)-1]
@@ -2024,7 +2025,7 @@ func (ds *Datastore) CleanupPolicyMembership(ctx context.Context, now time.Time)
 		return ctxerr.Wrap(ctx, err, "select policies needing full membership cleanup")
 	}
 	for _, polID := range fullCleanupPolIDs {
-		if err := cleanupPolicyMembershipForPolicy(ctx, ds.reader(ctx), ds.writer(ctx), polID); err != nil {
+		if err := cleanupPolicyMembershipForPolicy(ctx, ds.reader(ctx), ds.writer(ctx), ds.dialect, polID); err != nil {
 			return ctxerr.Wrapf(ctx, err, "full membership cleanup for policy %d", polID)
 		}
 		if _, err := ds.writer(ctx).ExecContext(ctx,
@@ -2049,7 +2050,7 @@ type PolicyViolationDays struct {
 
 func (ds *Datastore) IncrementPolicyViolationDays(ctx context.Context) error {
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return incrementViolationDaysDB(ctx, tx)
+		return incrementViolationDaysDB(ctx, tx, ds.dialect)
 	})
 }
 
@@ -2140,7 +2141,7 @@ func (ds *Datastore) OutdatedAutomationBatch(ctx context.Context) ([]fleet.Polic
 	return failures, nil
 }
 
-func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) error {
+func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper) error {
 	const (
 		statsID        = 0
 		globalStats    = true
@@ -2213,8 +2214,7 @@ func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) error {
 		INSERT INTO
 			aggregated_stats (id, global_stats, type, json_value)
 		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			json_value = VALUES(json_value)`
+		` + dialect.OnDuplicateKey("id,type,global_stats", "json_value = VALUES(json_value)")
 	if _, err := tx.ExecContext(ctx, upsertStmt, statsID, globalStats, statsType, statsJSON); err != nil {
 		return ctxerr.Wrap(ctx, err, "update policy violation days aggregated stats")
 	}
@@ -2224,11 +2224,11 @@ func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) error {
 
 func (ds *Datastore) InitializePolicyViolationDays(ctx context.Context) error {
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return initializePolicyViolationDaysDB(ctx, tx)
+		return initializePolicyViolationDaysDB(ctx, tx, ds.dialect)
 	})
 }
 
-func initializePolicyViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) error {
+func initializePolicyViolationDaysDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper) error {
 	const (
 		statsID     = 0
 		globalStats = true
@@ -2244,9 +2244,8 @@ func initializePolicyViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) er
 		INSERT INTO
 			aggregated_stats (id, global_stats, type, json_value)
 		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			json_value = VALUES(json_value),
-			created_at = CURRENT_TIMESTAMP`
+		` + dialect.OnDuplicateKey("id,type,global_stats", `json_value = VALUES(json_value),
+			created_at = CURRENT_TIMESTAMP`)
 	if _, err := tx.ExecContext(ctx, stmt, statsID, globalStats, statsType, statsJSON); err != nil {
 		return ctxerr.Wrap(ctx, err, "initialize policy violation days aggregated stats")
 	}
