@@ -1452,11 +1452,11 @@ func insertMDMAppleHostDB(
 
 	mdmHost.ID = uint(id)
 
-	if err := upsertHostDisplayNames(ctx, tx, *mdmHost); err != nil {
+	if err := upsertHostDisplayNames(ctx, tx, dialect, *mdmHost); err != nil {
 		return ctxerr.Wrap(ctx, err, "ingest mdm apple host upsert display names")
 	}
 
-	if err := upsertMDMAppleHostLabelMembershipDB(ctx, tx, logger, *mdmHost); err != nil {
+	if err := upsertMDMAppleHostLabelMembershipDB(ctx, tx, dialect, logger, *mdmHost); err != nil {
 		return ctxerr.Wrap(ctx, err, "ingest mdm apple host upsert label membership")
 	}
 
@@ -1604,11 +1604,11 @@ func createHostFromMDMDB(
 		}
 	}
 
-	if err := upsertHostDisplayNames(ctx, tx, hosts...); err != nil {
+	if err := upsertHostDisplayNames(ctx, tx, dialect, hosts...); err != nil {
 		return 0, nil, ctxerr.Wrap(ctx, err, "ingest mdm apple host upsert display names")
 	}
 
-	if err := upsertMDMAppleHostLabelMembershipDB(ctx, tx, logger, hosts...); err != nil {
+	if err := upsertMDMAppleHostLabelMembershipDB(ctx, tx, dialect, logger, hosts...); err != nil {
 		return 0, nil, ctxerr.Wrap(ctx, err, "ingest mdm apple host upsert label membership")
 	}
 
@@ -1792,7 +1792,7 @@ func upsertHostDEPAssignmentsDB(ctx context.Context, tx sqlx.ExtContext, hosts [
 	return nil
 }
 
-func upsertHostDisplayNames(ctx context.Context, tx sqlx.ExtContext, hosts ...fleet.Host) error {
+func upsertHostDisplayNames(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hosts ...fleet.Host) error {
 	var args []interface{}
 	var parts []string
 	for _, h := range hosts {
@@ -1802,7 +1802,7 @@ func upsertHostDisplayNames(ctx context.Context, tx sqlx.ExtContext, hosts ...fl
 
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO host_display_names (host_id, display_name) VALUES %s
-			ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`, strings.Join(parts, ",")),
+			`+dialect.OnDuplicateKey("host_id", `display_name = VALUES(display_name)`), strings.Join(parts, ",")),
 		args...)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert host display names")
@@ -1855,7 +1855,7 @@ func upsertMDMAppleHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, dialec
 	return ctxerr.Wrap(ctx, err, "upsert host mdm info")
 }
 
-func upsertMDMAppleHostLabelMembershipDB(ctx context.Context, tx sqlx.ExtContext, logger *slog.Logger, hosts ...fleet.Host) error {
+func upsertMDMAppleHostLabelMembershipDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, logger *slog.Logger, hosts ...fleet.Host) error {
 	// Builtin label memberships are usually inserted when the first distributed
 	// query results are received; however, we want to insert pending MDM hosts
 	// now because it may still be some time before osquery is running on these
@@ -1915,7 +1915,7 @@ func upsertMDMAppleHostLabelMembershipDB(ctx context.Context, tx sqlx.ExtContext
 	}
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO label_membership (host_id, label_id) VALUES %s
-			ON DUPLICATE KEY UPDATE host_id = host_id`, strings.Join(parts, ",")), args...)
+			`+dialect.OnDuplicateKey("host_id,label_id", `host_id = VALUES(host_id)`), strings.Join(parts, ",")), args...)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert label membership")
 	}
@@ -2235,11 +2235,11 @@ INSERT INTO hosts (
 		// Upsert related host tables for the restored host just as if it were initially ingested
 		// from DEP sync. Note we are not upserting host_dep_assignments in order to preserve the
 		// existing timestamps.
-		if err := upsertHostDisplayNames(ctx, tx, *host); err != nil {
+		if err := upsertHostDisplayNames(ctx, tx, ds.dialect, *host); err != nil {
 			// TODO: Why didn't this work as expected?
 			return ctxerr.Wrap(ctx, err, "restore pending dep host display name")
 		}
-		if err := upsertMDMAppleHostLabelMembershipDB(ctx, tx, ds.logger, *host); err != nil {
+		if err := upsertMDMAppleHostLabelMembershipDB(ctx, tx, ds.dialect, ds.logger, *host); err != nil {
 			return ctxerr.Wrap(ctx, err, "restore pending dep host label membership")
 		}
 		if err := upsertMDMAppleHostMDMInfoDB(ctx, tx, ds.dialect, ac, true, false, host.ID); err != nil {

@@ -97,7 +97,7 @@ func (ds *Datastore) NewAndroidHost(ctx context.Context, host *fleet.AndroidHost
 		}
 		host.Device.HostID = host.Host.ID
 
-		err = upsertHostDisplayNames(ctx, tx, *host.Host)
+		err = upsertHostDisplayNames(ctx, tx, ds.dialect, *host.Host)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "new Android host display name")
 		}
@@ -351,7 +351,7 @@ func (ds *Datastore) insertAndroidHostLabelMembershipTx(ctx context.Context, tx 
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO label_membership (host_id, label_id) VALUES (?, ?), (?, ?)
-		`+ds.dialect.OnDuplicateKey("host_id,label_id", `host_id = host_id`),
+		`+ds.dialect.OnDuplicateKey("host_id,label_id", `host_id = VALUES(host_id)`),
 		hostID, allHostsLabelID, hostID, androidLabelID)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "set label membership")

@@ -345,7 +345,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForExistingHosts(
 			(hosts.team_id = ? OR (? = 0 AND hosts.team_id IS NULL)) AND
 			hosts.platform = '%s' AND
 			host_mdm.enrolled = 1
-		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `host_uuid = host_uuid`)+`
+		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `host_uuid = VALUES(host_uuid)`)+`
 	`, fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall, fleet.AndroidPlatform)
 	result, err := ds.writer(ctx).ExecContext(ctx, stmt, certificateTemplateID, teamID, teamID)
 	if err != nil {
