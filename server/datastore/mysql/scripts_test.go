@@ -1378,16 +1378,14 @@ type scriptContents struct {
 func testInsertScriptContents(t *testing.T, ds *Datastore) {
 	ctx := context.Background()
 	contents := `echo foobar;`
-	res, err := insertScriptContents(ctx, ds.writer(ctx), contents)
+	id, err := insertScriptContents(ctx, ds.writer(ctx), ds.dialect, contents)
 	require.NoError(t, err)
-	id, _ := res.LastInsertId()
 	require.Equal(t, int64(1), id)
 	expectedCS := md5ChecksumScriptContent(contents)
 
 	// insert same contents again, verify that the checksum and ID stayed the same
-	res, err = insertScriptContents(ctx, ds.writer(ctx), contents)
+	id, err = insertScriptContents(ctx, ds.writer(ctx), ds.dialect, contents)
 	require.NoError(t, err)
-	id, _ = res.LastInsertId()
 	require.Equal(t, int64(1), id)
 
 	stmt := `SELECT id, HEX(md5_checksum) as md5_checksum FROM script_contents WHERE id = ?`
@@ -1523,9 +1521,8 @@ func testCleanupUnusedScriptContents(t *testing.T, ds *Datastore) {
 func testGetAnyScriptContents(t *testing.T, ds *Datastore) {
 	ctx := context.Background()
 	contents := `echo foobar;`
-	res, err := insertScriptContents(ctx, ds.writer(ctx), contents)
+	id, err := insertScriptContents(ctx, ds.writer(ctx), ds.dialect, contents)
 	require.NoError(t, err)
-	id, _ := res.LastInsertId()
 
 	result, err := ds.GetAnyScriptContents(ctx, uint(id)) //nolint:gosec // dismiss G115
 	require.NoError(t, err)

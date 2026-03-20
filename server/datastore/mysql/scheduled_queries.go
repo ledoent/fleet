@@ -89,10 +89,10 @@ func (ds *Datastore) ListScheduledQueriesInPack(ctx context.Context, id uint) (f
 }
 
 func (ds *Datastore) NewScheduledQuery(ctx context.Context, sq *fleet.ScheduledQuery, opts ...fleet.OptionalArg) (*fleet.ScheduledQuery, error) {
-	return insertScheduledQueryDB(ctx, ds.writer(ctx), sq)
+	return insertScheduledQueryDB(ctx, ds.writer(ctx), ds.dialect, sq)
 }
 
-func insertScheduledQueryDB(ctx context.Context, q sqlx.ExtContext, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error) {
+func insertScheduledQueryDB(ctx context.Context, q sqlx.ExtContext, dialect DialectHelper, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error) {
 	// This query looks up the query name using the ID (for backwards
 	// compatibility with the UI)
 	query := `
@@ -113,12 +113,11 @@ func insertScheduledQueryDB(ctx context.Context, q sqlx.ExtContext, sq *fleet.Sc
 		FROM queries
 		WHERE id = ?
 		`
-	result, err := q.ExecContext(ctx, query, sq.QueryID, sq.Name, sq.PackID, sq.Snapshot, sq.Removed, sq.Interval, sq.Platform, sq.Version, sq.Shard, sq.Denylist, sq.QueryID)
+	id, err := insertAndGetIDTx(ctx, q, dialect, query, sq.QueryID, sq.Name, sq.PackID, sq.Snapshot, sq.Removed, sq.Interval, sq.Platform, sq.Version, sq.Shard, sq.Denylist, sq.QueryID)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "insert scheduled query")
 	}
 
-	id, _ := result.LastInsertId()
 	sq.ID = uint(id) //nolint:gosec // dismiss G115
 
 	query = `SELECT query, name FROM queries WHERE id = ? LIMIT 1`

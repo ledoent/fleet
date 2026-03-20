@@ -2666,26 +2666,23 @@ WHERE
 				return ctxerr.Errorf(ctx, "labels have not been validated for installer with name %s", installer.Filename)
 			}
 
-			isRes, err := insertScriptContents(ctx, tx, installer.InstallScript)
+			installScriptID, err := insertScriptContents(ctx, tx, ds.dialect, installer.InstallScript)
 			if err != nil {
 				return ctxerr.Wrapf(ctx, err, "inserting install script contents for software installer with name %q", installer.Filename)
 			}
-			installScriptID, _ := isRes.LastInsertId()
 
-			uisRes, err := insertScriptContents(ctx, tx, installer.UninstallScript)
+			uninstallScriptID, err := insertScriptContents(ctx, tx, ds.dialect, installer.UninstallScript)
 			if err != nil {
 				return ctxerr.Wrapf(ctx, err, "inserting uninstall script contents for software installer with name %q", installer.Filename)
 			}
-			uninstallScriptID, _ := uisRes.LastInsertId()
 
 			var postInstallScriptID *int64
 			if installer.PostInstallScript != "" {
-				pisRes, err := insertScriptContents(ctx, tx, installer.PostInstallScript)
+				insertID, err := insertScriptContents(ctx, tx, ds.dialect, installer.PostInstallScript)
 				if err != nil {
 					return ctxerr.Wrapf(ctx, err, "inserting post-install script contents for software installer with name %q", installer.Filename)
 				}
 
-				insertID, _ := pisRes.LastInsertId()
 				postInstallScriptID = &insertID
 			}
 

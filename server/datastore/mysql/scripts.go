@@ -26,12 +26,11 @@ func (ds *Datastore) NewHostScriptExecutionRequest(ctx context.Context, request 
 		var err error
 		if request.ScriptContentID == 0 {
 			// then we are doing a sync execution, so create the contents first
-			scRes, err := insertScriptContents(ctx, tx, request.ScriptContents)
+			id, err := insertScriptContents(ctx, tx, ds.dialect, request.ScriptContents)
 			if err != nil {
 				return err
 			}
 
-			id, _ := scRes.LastInsertId()
 			request.ScriptContentID = uint(id) //nolint:gosec // dismiss G115
 		}
 		res, err = ds.newHostScriptExecutionRequest(ctx, tx, request, false)
@@ -485,26 +484,22 @@ func (ds *Datastore) CountHostScriptAttempts(ctx context.Context, hostID, script
 }
 
 func (ds *Datastore) NewScript(ctx context.Context, script *fleet.Script) (*fleet.Script, error) {
-	var res sql.Result
+	var scriptID int64
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		var err error
-
 		// first insert script contents
-		scRes, err := insertScriptContents(ctx, tx, script.ScriptContents)
+		contentID, err := insertScriptContents(ctx, tx, ds.dialect, script.ScriptContents)
 		if err != nil {
 			return err
 		}
-		id, _ := scRes.LastInsertId()
 
 		// then create the script entity
-		res, err = insertScript(ctx, tx, script, uint(id)) //nolint:gosec // dismiss G115
+		scriptID, err = insertScript(ctx, tx, ds.dialect, script, uint(contentID)) //nolint:gosec // dismiss G115
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
-	return ds.getScriptDB(ctx, ds.writer(ctx), uint(id)) //nolint:gosec // dismiss G115
+	return ds.getScriptDB(ctx, ds.writer(ctx), uint(scriptID)) //nolint:gosec // dismiss G115
 }
 
 func (ds *Datastore) UpdateScriptContents(ctx context.Context, scriptID uint, scriptContents string) (*fleet.Script, error) {
@@ -518,11 +513,10 @@ func (ds *Datastore) UpdateScriptContents(ctx context.Context, scriptID uint, sc
 		}
 
 		// Insert or get existing content (insertScriptContents handles deduplication)
-		scRes, err := insertScriptContents(ctx, tx, scriptContents)
+		newContentID, err := insertScriptContents(ctx, tx, ds.dialect, scriptContents)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting/getting script contents")
 		}
-		newContentID, _ := scRes.LastInsertId()
 
 		// Update the script to point to the new content
 		if newContentID != oldContentID {
@@ -620,7 +614,7 @@ func (ds *Datastore) resetScriptPolicyAutomationAttempts(ctx context.Context, db
 	return nil
 }
 
-func insertScript(ctx context.Context, tx sqlx.ExtContext, script *fleet.Script, scriptContentsID uint) (sql.Result, error) {
+func insertScript(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, script *fleet.Script, scriptContentsID uint) (int64, error) {
 	const insertStmt = `
 INSERT INTO
   scripts (
@@ -633,7 +627,7 @@ VALUES
 	if script.TeamID != nil {
 		globalOrTeamID = *script.TeamID
 	}
-	res, err := tx.ExecContext(ctx, insertStmt,
+	id, err := insertAndGetIDTx(ctx, tx, dialect, insertStmt,
 		script.TeamID, globalOrTeamID, script.Name, scriptContentsID)
 	if err != nil {
 		if IsDuplicate(err) {
@@ -643,29 +637,27 @@ VALUES
 			// team does not exist
 			err = foreignKey("scripts", fmt.Sprintf("team_id=%v", script.TeamID))
 		}
-		return nil, ctxerr.Wrap(ctx, err, "insert script")
+		return 0, ctxerr.Wrap(ctx, err, "insert script")
 	}
-	return res, nil
+	return id, nil
 }
 
-func insertScriptContents(ctx context.Context, tx sqlx.ExtContext, contents string) (sql.Result, error) {
-	const insertStmt = `
+func insertScriptContents(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, contents string) (int64, error) {
+	insertStmt := `
 INSERT INTO
   script_contents (
 	  md5_checksum, contents
   )
 VALUES (UNHEX(?),?)
-ON DUPLICATE KEY UPDATE
-  id=LAST_INSERT_ID(id)
-	`
+` + dialect.OnDuplicateKey("md5_checksum", "id=LAST_INSERT_ID(id)")
 
 	md5Checksum := md5ChecksumScriptContent(contents)
-	res, err := tx.ExecContext(ctx, insertStmt, md5Checksum, contents)
+	id, err := insertAndGetIDTx(ctx, tx, dialect, insertStmt, md5Checksum, contents)
 	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "insert script contents")
+		return 0, ctxerr.Wrap(ctx, err, "insert script contents")
 	}
 
-	return res, nil
+	return id, nil
 }
 
 func md5ChecksumScriptContent(s string) string {
@@ -1370,11 +1362,10 @@ VALUES
 
 		// insert the new scripts and the ones that have changed
 		for _, s := range incomingScripts {
-			scRes, err := insertScriptContents(ctx, tx, s.ScriptContents)
+			contentID, err := insertScriptContents(ctx, tx, ds.dialect, s.ScriptContents)
 			if err != nil {
 				return ctxerr.Wrapf(ctx, err, "inserting script contents for script with name %q", s.Name)
 			}
-			contentID, _ := scRes.LastInsertId()
 			scriptID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertNewOrEditedScript, tmID, globalOrTeamID, s.Name, uint(contentID)) //nolint:gosec // dismiss G115
 			if err != nil {
 				return ctxerr.Wrapf(ctx, err, "insert new/edited script with name %q", s.Name)
@@ -2072,12 +2063,11 @@ func (ds *Datastore) LockHostViaScript(ctx context.Context, request *fleet.HostS
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		var err error
 
-		scRes, err := insertScriptContents(ctx, tx, request.ScriptContents)
+		id, err := insertScriptContents(ctx, tx, ds.dialect, request.ScriptContents)
 		if err != nil {
 			return err
 		}
 
-		id, _ := scRes.LastInsertId()
 		request.ScriptContentID = uint(id) //nolint:gosec // dismiss G115
 
 		res, err = ds.newHostScriptExecutionRequest(ctx, tx, request, true)
@@ -2120,12 +2110,11 @@ func (ds *Datastore) UnlockHostViaScript(ctx context.Context, request *fleet.Hos
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		var err error
 
-		scRes, err := insertScriptContents(ctx, tx, request.ScriptContents)
+		id, err := insertScriptContents(ctx, tx, ds.dialect, request.ScriptContents)
 		if err != nil {
 			return err
 		}
 
-		id, _ := scRes.LastInsertId()
 		request.ScriptContentID = uint(id) //nolint:gosec // dismiss G115
 
 		res, err = ds.newHostScriptExecutionRequest(ctx, tx, request, true)
@@ -2169,12 +2158,11 @@ func (ds *Datastore) WipeHostViaScript(ctx context.Context, request *fleet.HostS
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		var err error
 
-		scRes, err := insertScriptContents(ctx, tx, request.ScriptContents)
+		id, err := insertScriptContents(ctx, tx, ds.dialect, request.ScriptContents)
 		if err != nil {
 			return err
 		}
 
-		id, _ := scRes.LastInsertId()
 		request.ScriptContentID = uint(id) //nolint:gosec // dismiss G115
 
 		res, err = ds.newHostScriptExecutionRequest(ctx, tx, request, true)

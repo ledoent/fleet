@@ -124,7 +124,7 @@ func (ds *Datastore) NewAndroidHost(ctx context.Context, host *fleet.AndroidHost
 
 		// create entry in host_mdm as enrolled (manually), because currently all
 		// android hosts are necessarily MDM-enrolled when created.
-		if err := upsertAndroidHostMDMInfoDB(ctx, tx, appCfg.ServerSettings.ServerURL, companyOwned, true, host.Host.ID); err != nil {
+		if err := upsertAndroidHostMDMInfoDB(ctx, tx, ds.dialect, appCfg.ServerSettings.ServerURL, companyOwned, true, host.Host.ID); err != nil {
 			return ctxerr.Wrap(ctx, err, "new Android host MDM info")
 		}
 
@@ -217,7 +217,7 @@ func (ds *Datastore) UpdateAndroidHost(ctx context.Context, host *fleet.AndroidH
 
 		if fromEnroll {
 			// update host_mdm to set enrolled back to true
-			if err := upsertAndroidHostMDMInfoDB(ctx, tx, appCfg.ServerSettings.ServerURL, companyOwned, true, host.Host.ID); err != nil {
+			if err := upsertAndroidHostMDMInfoDB(ctx, tx, ds.dialect, appCfg.ServerSettings.ServerURL, companyOwned, true, host.Host.ID); err != nil {
 				return ctxerr.Wrap(ctx, err, "update Android host MDM info")
 			}
 
@@ -429,10 +429,10 @@ UPDATE host_mdm
 	return rows > 0, nil
 }
 
-func upsertAndroidHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, serverURL string, companyOwned, enrolled bool, hostID uint) error {
+func upsertAndroidHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, serverURL string, companyOwned, enrolled bool, hostID uint) error {
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO mobile_device_management_solutions (name, server_url) VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE server_url = VALUES(server_url)`,
+		`+dialect.OnDuplicateKey("name, server_url", "server_url = VALUES(server_url)"),
 		fleet.WellKnownMDMFleet, serverURL)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "upsert mdm solution")
@@ -455,7 +455,7 @@ func upsertAndroidHostMDMInfoDB(ctx context.Context, tx sqlx.ExtContext, serverU
 
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO host_mdm (enrolled, server_url, installed_from_dep, mdm_id, is_server, is_personal_enrollment, host_id) VALUES %s
-		ON DUPLICATE KEY UPDATE enrolled = VALUES(enrolled), server_url = VALUES(server_url), mdm_id = VALUES(mdm_id), is_personal_enrollment = VALUES(is_personal_enrollment)`, strings.Join(parts, ",")), args...)
+		`+dialect.OnDuplicateKey("host_id", "enrolled = VALUES(enrolled), server_url = VALUES(server_url), mdm_id = VALUES(mdm_id), is_personal_enrollment = VALUES(is_personal_enrollment)"), strings.Join(parts, ",")), args...)
 
 	return ctxerr.Wrap(ctx, err, "upsert host mdm info")
 }

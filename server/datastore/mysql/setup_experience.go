@@ -733,14 +733,11 @@ WHERE
 
 func (ds *Datastore) SetSetupExperienceScript(ctx context.Context, script *fleet.Script) error {
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		var err error
-
 		// first insert script contents
-		scRes, err := insertScriptContents(ctx, tx, script.ScriptContents)
+		id, err := insertScriptContents(ctx, tx, ds.dialect, script.ScriptContents)
 		if err != nil {
 			return err
 		}
-		id, _ := scRes.LastInsertId()
 
 		// This clause allows for PUT semantics. The basic idea is:
 		// - no existing setup script -> go through the usual insert logic
