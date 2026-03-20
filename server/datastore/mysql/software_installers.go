@@ -350,7 +350,7 @@ INSERT INTO software_installers (
 			true,
 		}
 
-		res, err := tx.ExecContext(ctx, stmt, args...)
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, stmt, args...)
 		if err != nil {
 			if ds.dialect.IsDuplicate(err) {
 				// already exists for this team/no team
@@ -363,7 +363,6 @@ INSERT INTO software_installers (
 			return err
 		}
 
-		id, _ := res.LastInsertId()
 		installerID = uint(id) //nolint:gosec // dismiss G115
 
 		if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, installerID, *payload.ValidatedLabels, softwareTypeInstaller); err != nil {
@@ -1337,7 +1336,7 @@ VALUES
 	execID := uuid.NewString()
 
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		res, err := tx.ExecContext(ctx, insertUAStmt,
+		activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertUAStmt,
 			hostID,
 			opts.Priority(),
 			userID,
@@ -1354,8 +1353,6 @@ VALUES
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "insert software install request")
 		}
-
-		activityID, _ := res.LastInsertId()
 		_, err = tx.ExecContext(ctx, insertSIUAStmt,
 			activityID,
 			softwareInstallerID,
@@ -1516,7 +1513,7 @@ VALUES
 	}
 
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		res, err := tx.ExecContext(ctx, insertUAStmt,
+		activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertUAStmt,
 			hostID,
 			0, // Uninstalls are never used in setup experience, so always default priority
 			userID,
@@ -1530,8 +1527,6 @@ VALUES
 		if err != nil {
 			return err
 		}
-
-		activityID, _ := res.LastInsertId()
 		_, err = tx.ExecContext(ctx, insertSIUAStmt,
 			activityID,
 			softwareInstallerID,

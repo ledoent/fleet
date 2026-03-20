@@ -266,12 +266,11 @@ func (ds *Datastore) NewPack(ctx context.Context, pack *fleet.Pack, opts ...flee
 			(name, description, platform, disabled)
 			VALUES ( ?, ?, ?, ? )
 		`
-		result, err := tx.ExecContext(ctx, query, pack.Name, pack.Description, pack.Platform, pack.Disabled)
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, query, pack.Name, pack.Description, pack.Platform, pack.Disabled)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "insert pack")
 		}
 
-		id, _ := result.LastInsertId()
 		pack.ID = uint(id) //nolint:gosec // dismiss G115
 
 		if err := replacePackTargetsDB(ctx, tx, pack); err != nil {

@@ -331,11 +331,10 @@ func (ds *Datastore) MDMWindowsSaveResponse(ctx context.Context, deviceID string
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		// store the full response
 		const saveFullRespStmt = `INSERT INTO windows_mdm_responses (enrollment_id, raw_response) VALUES (?, ?)`
-		sqlResult, err := tx.ExecContext(ctx, saveFullRespStmt, enrolledDevice.ID, enrichedSyncML.Raw)
+		responseID, err := insertAndGetIDTx(ctx, tx, ds.dialect, saveFullRespStmt, enrolledDevice.ID, enrichedSyncML.Raw)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "saving full response")
 		}
-		responseID, _ := sqlResult.LastInsertId()
 
 		// find commands we sent that match the UUID responses we've got
 		findCommandsStmt := `SELECT command_uuid, raw_command, target_loc_uri FROM windows_mdm_commands WHERE command_uuid IN (?)`

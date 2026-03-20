@@ -614,9 +614,7 @@ func (ds *Datastore) NewLabel(ctx context.Context, label *fleet.Label, opts ...f
 		team_id
 	) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ? )
 	`
-	result, err := ds.writer(ctx).ExecContext(
-		ctx,
-		query,
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), query,
 		label.Name,
 		label.Description,
 		label.Query,
@@ -631,7 +629,6 @@ func (ds *Datastore) NewLabel(ctx context.Context, label *fleet.Label, opts ...f
 		return nil, ctxerr.Wrap(ctx, err, "inserting label")
 	}
 
-	id, _ := result.LastInsertId()
 	label.ID = uint(id) //nolint:gosec // dismiss G115
 	now := time.Now().UTC().Truncate(time.Second)
 	label.CreatedAt = now

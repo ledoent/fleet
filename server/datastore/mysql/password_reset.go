@@ -19,12 +19,11 @@ func (ds *Datastore) NewPasswordResetRequest(ctx context.Context, req *fleet.Pas
 		( user_id, token, expires_at)
 		VALUES (?,?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? MINUTE))
 	`
-	response, err := ds.writer(ctx).ExecContext(ctx, sqlStatement, req.UserID, req.Token, PasswordResetRequestDuration.Minutes())
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), sqlStatement, req.UserID, req.Token, PasswordResetRequestDuration.Minutes())
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "inserting password reset requests")
 	}
 
-	id, _ := response.LastInsertId()
 	req.ID = uint(id) //nolint:gosec // dismiss G115
 	return req, nil
 }

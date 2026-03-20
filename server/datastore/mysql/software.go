@@ -6573,12 +6573,11 @@ WHERE hvsi.host_id = ? AND st.id IN (?)
 
 func (ds *Datastore) NewSoftwareCategory(ctx context.Context, name string) (*fleet.SoftwareCategory, error) {
 	stmt := `INSERT INTO software_categories (name) VALUES (?)`
-	res, err := ds.writer(ctx).ExecContext(ctx, stmt, name)
+	r, err := ds.insertAndGetID(ctx, ds.writer(ctx), stmt, name)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "new software category")
 	}
 
-	r, _ := res.LastInsertId()
 	id := uint(r) //nolint:gosec // dismiss G115
 	return &fleet.SoftwareCategory{Name: name, ID: id}, nil
 }

@@ -278,8 +278,9 @@ func (ds *Datastore) NewQuery(
 		) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
 	`
 
-	result, err := ds.writer(ctx).ExecContext(
+	id, err := ds.insertAndGetID(
 		ctx,
+		ds.writer(ctx),
 		queryStatement,
 		query.Name,
 		query.Description,
@@ -305,7 +306,6 @@ func (ds *Datastore) NewQuery(
 		return nil, ctxerr.Wrap(ctx, err, "creating new Query")
 	}
 
-	id, _ := result.LastInsertId()
 	query.ID = uint(id) //nolint:gosec // dismiss G115
 	query.Packs = []fleet.Pack{}
 

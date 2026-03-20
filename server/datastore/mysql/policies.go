@@ -111,7 +111,7 @@ func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, ar
 	}
 	// We must normalize the name for full Unicode support (Unicode equivalence).
 	nameUnicode := norm.NFC.String(args.Name)
-	res, err := db.ExecContext(ctx,
+	lastIdInt64, err := insertAndGetIDTx(ctx, db, dialect,
 		fmt.Sprintf(
 			`INSERT INTO policies (name, query, description, resolution, author_id, platforms, critical, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, %s)`,
 			policiesChecksumComputedColumn(),
@@ -125,10 +125,6 @@ func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, ar
 		return nil, ctxerr.Wrap(ctx, alreadyExists("Policy", nameUnicode))
 	default:
 		return nil, ctxerr.Wrap(ctx, err, "inserting new policy")
-	}
-	lastIdInt64, err := res.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting last id after inserting policy")
 	}
 	policyID := uint(lastIdInt64) //nolint:gosec // dismiss G115
 
@@ -1125,7 +1121,7 @@ func newTeamPolicy(ctx context.Context, db sqlx.ExtContext, teamID uint, authorI
 		return nil, ctxerr.Wrap(ctx, err, "create team policy")
 	}
 
-	res, err := db.ExecContext(ctx,
+	lastIdInt64, err := insertAndGetIDTx(ctx, db, dialect,
 		fmt.Sprintf(
 			`INSERT INTO policies (
 				name, query, description, team_id, resolution, author_id,
@@ -1150,10 +1146,6 @@ func newTeamPolicy(ctx context.Context, db sqlx.ExtContext, teamID uint, authorI
 		return nil, ctxerr.Wrap(ctx, alreadyExists("Policy", nameUnicode))
 	default:
 		return nil, ctxerr.Wrap(ctx, err, "inserting new policy")
-	}
-	lastIdInt64, err := res.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting last id after inserting policy")
 	}
 
 	policyID := uint(lastIdInt64) //nolint:gosec // dismiss G115

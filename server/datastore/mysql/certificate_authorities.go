@@ -195,16 +195,12 @@ func (ds *Datastore) NewCertificateAuthority(ctx context.Context, ca *fleet.Cert
 		return nil, err
 	}
 
-	result, err := ds.writer(ctx).ExecContext(ctx, fmt.Sprintf(sqlInsertCertificateAuthority, placeholders), args...)
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), fmt.Sprintf(sqlInsertCertificateAuthority, placeholders), args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "idx_ca_type_name") {
 			return nil, fleet.ConflictError{Message: "a certificate authority with this name already exists"}
 		}
 		return nil, ctxerr.Wrap(ctx, err, "inserting new certificate authority")
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting last insert ID for new certificate authority")
 	}
 	ca.ID = uint(id) //nolint:gosec // dismiss G115
 	return ca, nil

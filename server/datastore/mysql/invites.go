@@ -37,7 +37,7 @@ func (ds *Datastore) NewInvite(ctx context.Context, i *fleet.Invite) (*fleet.Inv
 	  VALUES ( ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-		result, err := tx.ExecContext(ctx, sqlStmt, i.InvitedBy, i.Email,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlStmt, i.InvitedBy, i.Email,
 			i.Name, i.Position, i.Token, i.SSOEnabled, i.MFAEnabled, i.GlobalRole)
 		if err != nil && ds.dialect.IsDuplicate(err) {
 			return ctxerr.Wrap(ctx, alreadyExists("Invite", i.Email))
@@ -45,7 +45,6 @@ func (ds *Datastore) NewInvite(ctx context.Context, i *fleet.Invite) (*fleet.Inv
 			return ctxerr.Wrap(ctx, err, "create invite")
 		}
 
-		id, _ := result.LastInsertId()
 		i.ID = uint(id) //nolint:gosec // dismiss G115
 
 		if len(i.Teams) == 0 {

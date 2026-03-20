@@ -907,7 +907,7 @@ func (ds *Datastore) NewMDMAppleEnrollmentProfile(
 	ctx context.Context,
 	payload fleet.MDMAppleEnrollmentProfilePayload,
 ) (*fleet.MDMAppleEnrollmentProfile, error) {
-	res, err := ds.writer(ctx).ExecContext(ctx,
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx),
 		`
 INSERT INTO
     mdm_apple_enrollment_profiles (token, type, dep_profile)
@@ -922,7 +922,6 @@ VALUES (?, ?, ?)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err)
 	}
-	id, _ := res.LastInsertId()
 	return &fleet.MDMAppleEnrollmentProfile{
 		ID:         uint(id), //nolint:gosec // dismiss G115
 		Token:      payload.Token,
@@ -1155,15 +1154,13 @@ WHERE
 }
 
 func (ds *Datastore) NewMDMAppleInstaller(ctx context.Context, name string, size int64, manifest string, installer []byte, urlToken string) (*fleet.MDMAppleInstaller, error) {
-	res, err := ds.writer(ctx).ExecContext(
-		ctx,
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx),
 		`INSERT INTO mdm_apple_installers (name, size, manifest, installer, url_token) VALUES (?, ?, ?, ?, ?)`,
 		name, size, manifest, installer, urlToken,
 	)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err)
 	}
-	id, _ := res.LastInsertId()
 	return &fleet.MDMAppleInstaller{
 		ID:        uint(id), //nolint:gosec // dismiss G115
 		Size:      size,
@@ -6439,9 +6436,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		return nil, ctxerr.Wrap(ctx, err, "encrypt abm_token with datastore.serverPrivateKey")
 	}
 
-	res, err := ds.writer(ctx).ExecContext(
-		ctx,
-		stmt,
+	tokenID, err := ds.insertAndGetID(ctx, ds.writer(ctx), stmt,
 		tok.OrganizationName,
 		tok.AppleID,
 		tok.TermsExpired,
@@ -6454,8 +6449,6 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "inserting abm_token")
 	}
-
-	tokenID, _ := res.LastInsertId()
 
 	tok.ID = uint(tokenID) //nolint:gosec // dismiss G115
 

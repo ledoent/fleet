@@ -138,9 +138,7 @@ func (ds *Datastore) NewHost(ctx context.Context, host *fleet.Host) (*fleet.Host
 		)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
-		result, err := tx.ExecContext(
-			ctx,
-			sqlStatement,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlStatement,
 			host.OsqueryHostID,
 			host.DetailUpdatedAt,
 			host.LabelUpdatedAt,
@@ -166,7 +164,6 @@ func (ds *Datastore) NewHost(ctx context.Context, host *fleet.Host) (*fleet.Host
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "new host")
 		}
-		id, _ := result.LastInsertId()
 		host.ID = uint(id)
 
 		_, err = tx.ExecContext(ctx,
@@ -2468,7 +2465,7 @@ func (ds *Datastore) EnrollOrbit(ctx context.Context, opts ...fleet.DatastoreEnr
 					platform_like
 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
 			`
-			result, err := tx.ExecContext(ctx, sqlInsert,
+			hostID, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlInsert,
 				zeroTime,
 				zeroTime,
 				zeroTime,
@@ -2488,7 +2485,6 @@ func (ds *Datastore) EnrollOrbit(ctx context.Context, opts ...fleet.DatastoreEnr
 			if err != nil {
 				return ctxerr.Wrap(ctx, err, "orbit enroll error inserting host details")
 			}
-			hostID, _ := result.LastInsertId()
 			const sqlHostDisplayName = `
 				INSERT INTO host_display_names (host_id, display_name) VALUES (?, ?)
 			`
@@ -2570,12 +2566,11 @@ func (ds *Datastore) EnrollOsquery(ctx context.Context, opts ...fleet.DatastoreE
 					hardware_serial
 				) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
 			`
-			result, err := tx.ExecContext(ctx, sqlInsert, zeroTime, zeroTime, zeroTime, osqueryHostID, nodeKey, teamID, hardwareUUID, hardwareSerial)
+			lastInsertID, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlInsert, zeroTime, zeroTime, zeroTime, osqueryHostID, nodeKey, teamID, hardwareUUID, hardwareSerial)
 			if err != nil {
 				ds.logger.InfoContext(ctx, "host insert error", "err", err)
 				return ctxerr.Wrap(ctx, err, "insert host")
 			}
-			lastInsertID, _ := result.LastInsertId()
 			const sqlHostDisplayName = `
 				INSERT INTO host_display_names (host_id, display_name) VALUES (?, '')
 			`

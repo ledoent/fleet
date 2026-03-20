@@ -33,9 +33,7 @@ func (ds *Datastore) NewTeam(ctx context.Context, team *fleet.Team) (*fleet.Team
       config
     ) VALUES (?, ?, ?, ?)
     `
-		result, err := tx.ExecContext(
-			ctx,
-			query,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, query,
 			team.Name,
 			team.Filename,
 			team.Description,
@@ -45,7 +43,6 @@ func (ds *Datastore) NewTeam(ctx context.Context, team *fleet.Team) (*fleet.Team
 			return ctxerr.Wrap(ctx, err, "insert team")
 		}
 
-		id, _ := result.LastInsertId()
 		team.ID = uint(id) //nolint:gosec // dismiss G115
 		team.CreatedAt = time.Now().UTC().Truncate(time.Second)
 

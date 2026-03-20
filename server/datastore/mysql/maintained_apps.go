@@ -26,11 +26,10 @@ VALUES
 		var err error
 
 		// upsert the maintained app
-		res, err := tx.ExecContext(ctx, upsertStmt, app.Name, app.Slug, app.Platform, app.UniqueIdentifier)
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, upsertStmt, app.Name, app.Slug, app.Platform, app.UniqueIdentifier)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "upsert maintained app")
 		}
-		id, _ := res.LastInsertId()
 		appID = uint(id) //nolint:gosec // dismiss G115
 		return nil
 	})

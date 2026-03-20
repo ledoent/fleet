@@ -109,7 +109,7 @@ func (ds *Datastore) insertInHouseAppDB(ctx context.Context, tx sqlx.ExtContext,
 	)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-	res, err := tx.ExecContext(ctx, stmt, args...)
+	id64, err := insertAndGetIDTx(ctx, tx, ds.dialect, stmt, args...)
 	if err != nil {
 		if ds.dialect.IsDuplicate(err) {
 			teamName, err := ds.getTeamName(ctx, payload.TeamID)
@@ -121,11 +121,7 @@ func (ds *Datastore) insertInHouseAppDB(ctx context.Context, tx sqlx.ExtContext,
 		}
 		return 0, ctxerr.Wrap(ctx, err, "insertInHouseAppDB")
 	}
-	id64, err := res.LastInsertId()
 	installerID := uint(id64) //nolint:gosec // dismiss G115
-	if err != nil {
-		return 0, ctxerr.Wrap(ctx, err, "insertInHouseAppDB")
-	}
 
 	if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, installerID, *payload.ValidatedLabels, softwareTypeInHouseApp); err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "insertInHouseAppDB")
@@ -528,7 +524,7 @@ VALUES
 	}
 
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		res, err := tx.ExecContext(ctx, insertUAStmt,
+		activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertUAStmt,
 			hostID,
 			opts.Priority(),
 			userID,
@@ -540,8 +536,6 @@ VALUES
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "insert in house app install request")
 		}
-
-		activityID, _ := res.LastInsertId()
 		_, err = tx.ExecContext(ctx, insertIHAUAStmt,
 			activityID,
 			inHouseAppID,

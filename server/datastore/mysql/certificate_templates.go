@@ -180,7 +180,7 @@ func (ds *Datastore) GetCertificateTemplatesByTeamID(ctx context.Context, teamID
 }
 
 func (ds *Datastore) CreateCertificateTemplate(ctx context.Context, certificateTemplate *fleet.CertificateTemplate) (*fleet.CertificateTemplateResponse, error) {
-	result, err := ds.writer(ctx).ExecContext(ctx, `
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), `
 		INSERT INTO certificate_templates (
 			name,
 			team_id,
@@ -193,11 +193,6 @@ func (ds *Datastore) CreateCertificateTemplate(ctx context.Context, certificateT
 			return nil, ctxerr.Wrap(ctx, alreadyExists("CertificateTemplate", certificateTemplate.Name), "inserting certificate_template")
 		}
 		return nil, ctxerr.Wrap(ctx, err, "inserting certificate_template")
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting last insert id for certificate_template")
 	}
 
 	return &fleet.CertificateTemplateResponse{

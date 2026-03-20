@@ -94,7 +94,7 @@ VALUES
 	)
 
 	execID := uuid.New().String()
-	result, err := tx.ExecContext(ctx, insUAStmt,
+	activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insUAStmt,
 		request.HostID,
 		request.Priority(),
 		request.UserID,
@@ -107,8 +107,6 @@ VALUES
 	if err != nil {
 		return "", 0, ctxerr.Wrap(ctx, err, "new script upcoming activity")
 	}
-
-	activityID, _ := result.LastInsertId()
 	_, err = tx.ExecContext(ctx, insSUAStmt,
 		activityID,
 		request.ScriptID,
@@ -1377,11 +1375,10 @@ VALUES
 				return ctxerr.Wrapf(ctx, err, "inserting script contents for script with name %q", s.Name)
 			}
 			contentID, _ := scRes.LastInsertId()
-			insertRes, err := tx.ExecContext(ctx, insertNewOrEditedScript, tmID, globalOrTeamID, s.Name, uint(contentID)) //nolint:gosec // dismiss G115
+			scriptID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertNewOrEditedScript, tmID, globalOrTeamID, s.Name, uint(contentID)) //nolint:gosec // dismiss G115
 			if err != nil {
 				return ctxerr.Wrapf(ctx, err, "insert new/edited script with name %q", s.Name)
 			}
-			scriptID, _ := insertRes.LastInsertId()
 
 			if _, err := tx.ExecContext(ctx, clearPendingExecutionsWithObsoleteScriptHSR, int(constants.MaxServerWaitTime.Seconds()), scriptID, contentID); err != nil {
 				return ctxerr.Wrapf(ctx, err, "clear obsolete pending script executions with name %q", s.Name)

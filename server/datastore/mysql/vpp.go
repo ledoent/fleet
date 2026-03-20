@@ -1118,7 +1118,7 @@ VALUES
 	}
 
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		res, err := tx.ExecContext(ctx, insertUAStmt,
+		activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertUAStmt,
 			hostID,
 			opts.Priority(),
 			userID,
@@ -1132,8 +1132,6 @@ VALUES
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "insert vpp install request")
 		}
-
-		activityID, _ := res.LastInsertId()
 		_, err = tx.ExecContext(ctx, insertVAUAStmt,
 			activityID,
 			appID.AdamID,
@@ -1387,9 +1385,7 @@ func (ds *Datastore) InsertVPPToken(ctx context.Context, tok *fleet.VPPTokenData
 		return nil, ctxerr.Wrap(ctx, err, "encrypt token with datastore.serverPrivateKey")
 	}
 
-	res, err := ds.writer(ctx).ExecContext(
-		ctx,
-		insertStmt,
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), insertStmt,
 		vppTokenDB.OrgName,
 		vppTokenDB.Location,
 		vppTokenDB.RenewDate,
@@ -1398,8 +1394,6 @@ func (ds *Datastore) InsertVPPToken(ctx context.Context, tok *fleet.VPPTokenData
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "inserting vpp token")
 	}
-
-	id, _ := res.LastInsertId()
 
 	vppTokenDB.ID = uint(id) //nolint:gosec // dismiss G115
 
