@@ -78,6 +78,9 @@ func rebindQuery(query string) string {
 	query = rewriteDeleteUsing(query)
 	// MySQL IF(cond, true_val, false_val) → PG CASE WHEN cond THEN true_val ELSE false_val END
 	query = rewriteIF(query)
+	// TIMESTAMPDIFF(SECOND, x, y) → EXTRACT(EPOCH FROM (y - x))
+	// MySQL's TIMESTAMPDIFF returns the difference in the specified unit.
+	query = rewriteTimestampDiff(query)
 	// TIMESTAMP(x) → x::timestamp (PG cast syntax)
 	// MySQL TIMESTAMP(?) converts a value to timestamp type
 	query = regexp.MustCompile(`\bTIMESTAMP\(([^)]+)\)`).ReplaceAllString(query, "($1)::timestamp")
@@ -101,6 +104,8 @@ func rebindQuery(query string) string {
 	// Cast to int for use in SUM/COUNT aggregates.
 	query = strings.ReplaceAll(query, "pm.passes = 1", "(pm.passes IS TRUE)::int")
 	query = strings.ReplaceAll(query, "pm.passes = 0", "(pm.passes = false)::int")
+	// MySQL !boolean → PG NOT boolean (for use in SUM aggregates)
+	query = strings.ReplaceAll(query, "!pm.passes", "(NOT pm.passes)::int")
 	// Fix FIND_IN_SET/ANY result compared to integer: PG = ANY() returns boolean
 	// MySQL FIND_IN_SET returns integer, so code uses <> 0 / != 0 checks
 	// PG = ANY() returns boolean, making these comparisons invalid
@@ -178,13 +183,52 @@ func (c *rebindConn) Prepare(query string) (driver.Stmt, error) {
 	return c.Conn.Prepare(rebindQuery(query))
 }
 
-// rewriteDateAdd converts MySQL DATE_ADD(expr, INTERVAL value UNIT) to PG (expr + (value) * INTERVAL '1 unit')
+// rewriteDateAdd converts MySQL DATE_ADD(expr, INTERVAL value UNIT) to PG (expr + (value) * INTERVAL '1 unit').
+// Uses paren-balancing to find the DATE_ADD arguments correctly when they contain
+// nested function calls like COALESCE(x, y) or LEAST(a, b).
 func rewriteDateAdd(query string, unit string) string {
 	pgUnit := strings.ToLower(unit) + "s"
-	// Pattern: DATE_ADD(expr, INTERVAL value UNIT)
-	// We need to handle nested expressions in expr and value
-	re := regexp.MustCompile(`DATE_ADD\(([^,]+),\s*INTERVAL\s+(.+?)\s+` + unit + `\)`)
-	return re.ReplaceAllString(query, "(${1} + (${2}) * INTERVAL '1 "+pgUnit+"')")
+	prefix := "DATE_ADD("
+	for {
+		idx := strings.Index(query, prefix)
+		if idx < 0 {
+			return query
+		}
+		// Find the matching closing paren and split on the top-level comma
+		start := idx + len(prefix)
+		depth := 1
+		commaPos := -1
+		i := start
+		for i < len(query) && depth > 0 {
+			switch query[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			case ',':
+				if depth == 1 && commaPos < 0 {
+					commaPos = i
+				}
+			}
+			i++
+		}
+		if depth != 0 || commaPos < 0 {
+			return query // unbalanced or no comma found
+		}
+		expr := strings.TrimSpace(query[start:commaPos])
+		intervalPart := strings.TrimSpace(query[commaPos+1 : i-1])
+
+		// Parse: INTERVAL <value> <UNIT>
+		intervalRe := regexp.MustCompile(`(?i)INTERVAL\s+(.+)\s+` + unit)
+		m := intervalRe.FindStringSubmatch(intervalPart)
+		if m == nil {
+			// This DATE_ADD doesn't use this unit, skip past it
+			return query[:i] + rewriteDateAdd(query[i:], unit)
+		}
+		value := strings.TrimSpace(m[1])
+		replacement := "(" + expr + " + (" + value + ") * INTERVAL '1 " + pgUnit + "')"
+		query = query[:idx] + replacement + query[i:]
+	}
 }
 
 // rewriteUnhex converts MySQL UNHEX(expr) → PG decode(expr, 'hex').
@@ -247,6 +291,50 @@ func rewriteDeleteUsing(query string) string {
 	query = reOnWhere.ReplaceAllString(query, "${1}WHERE ${2} AND ")
 
 	return query
+}
+
+// rewriteTimestampDiff converts MySQL TIMESTAMPDIFF(SECOND, x, y) → PG EXTRACT(EPOCH FROM (y - x)).
+func rewriteTimestampDiff(query string) string {
+	re := regexp.MustCompile(`(?i)TIMESTAMPDIFF\(\s*SECOND\s*,\s*(.+?)\s*,\s*(.+?)\s*\)`)
+	if !re.MatchString(query) {
+		return query
+	}
+	// Use paren-balanced parsing for complex arguments
+	prefix := "TIMESTAMPDIFF("
+	for {
+		idx := strings.Index(strings.ToUpper(query), strings.ToUpper(prefix))
+		if idx < 0 {
+			return query
+		}
+		start := idx + len(prefix)
+		depth := 1
+		var parts []string
+		partStart := start
+		i := start
+		for i < len(query) && depth > 0 {
+			switch query[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					parts = append(parts, strings.TrimSpace(query[partStart:i]))
+				}
+			case ',':
+				if depth == 1 {
+					parts = append(parts, strings.TrimSpace(query[partStart:i]))
+					partStart = i + 1
+				}
+			}
+			i++
+		}
+		if depth != 0 || len(parts) != 3 {
+			return query
+		}
+		// parts[0] = unit (SECOND), parts[1] = start_time, parts[2] = end_time
+		replacement := fmt.Sprintf("EXTRACT(EPOCH FROM (%s - %s))", parts[2], parts[1])
+		query = query[:idx] + replacement + query[i:]
+	}
 }
 
 // rewriteIF converts MySQL IF(cond, true_val, false_val) → PG CASE WHEN cond THEN true_val ELSE false_val END.
