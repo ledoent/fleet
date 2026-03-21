@@ -282,8 +282,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 	if scheduledQueriesQueryCount > 0 {
 		// This query will import stats for queries (new format).
 		values := strings.TrimSuffix(strings.Repeat("((SELECT q.id FROM queries q WHERE COALESCE(q.team_id, 0) = ? AND q.name = ?),?,?,?,?,?,?,?,?,?,?),", scheduledQueriesQueryCount), ",")
-		sql := fmt.Sprintf(`
-			INSERT IGNORE INTO scheduled_query_stats (
+		sql := fmt.Sprintf(dialect.InsertIgnoreInto()+` scheduled_query_stats (
 				scheduled_query_id,
 				host_id,
 				average_memory,
@@ -318,8 +317,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 		// This query will import stats for 2017 packs.
 		// NOTE(lucas): If more than one scheduled query reference the same query then only one of the stats will be written.
 		values := strings.TrimSuffix(strings.Repeat("((SELECT sq.query_id FROM scheduled_queries sq JOIN packs p ON (sq.pack_id = p.id) WHERE p.pack_type IS NULL AND p.name = ? AND sq.name = ?),?,?,?,?,?,?,?,?,?,?),", userPacksQueryCount), ",")
-		sql := fmt.Sprintf(`
-				INSERT IGNORE INTO scheduled_query_stats (
+		sql := fmt.Sprintf(dialect.InsertIgnoreInto()+` scheduled_query_stats (
 					scheduled_query_id,
 					host_id,
 					average_memory,
@@ -377,10 +375,10 @@ func loadHostPackStatsDB(ctx context.Context, db sqlx.QueryerContext, hid uint, 
 		goqu.I("p.name").As("pack_name"),
 		goqu.I("p.id").As("pack_id"),
 		goqu.COALESCE(goqu.I("sqs.average_memory"), 0).As("average_memory"),
-		goqu.COALESCE(goqu.I("sqs.denylisted"), false).As("denylisted"),
+		goqu.COALESCE(goqu.I("sqs.denylisted"), goqu.L("FALSE")).As("denylisted"),
 		goqu.COALESCE(goqu.I("sqs.executions"), 0).As("executions"),
 		goqu.I("sq.interval").As("schedule_interval"),
-		goqu.COALESCE(goqu.I("sqs.last_executed"), goqu.L("timestamp(?)", common_mysql.DefaultNonZeroTime)).As("last_executed"),
+		goqu.COALESCE(goqu.I("sqs.last_executed"), goqu.L("TIMESTAMP(?)", common_mysql.DefaultNonZeroTime)).As("last_executed"),
 		goqu.COALESCE(goqu.I("sqs.output_size"), 0).As("output_size"),
 		goqu.COALESCE(goqu.I("sqs.system_time"), 0).As("system_time"),
 		goqu.COALESCE(goqu.I("sqs.user_time"), 0).As("user_time"),
@@ -959,8 +957,8 @@ const hostMDMSelect = `,
 		
 		'dep_profile_error',
 		CASE
-			WHEN hdep.assign_profile_response IN ('` + string(fleet.DEPAssignProfileResponseFailed) + `', '` + string(fleet.DEPAssignProfileResponseThrottled) + `') THEN TRUE
-			ELSE FALSE
+			WHEN hdep.assign_profile_response IN ('` + string(fleet.DEPAssignProfileResponseFailed) + `', '` + string(fleet.DEPAssignProfileResponseThrottled) + `') THEN CAST(TRUE AS JSON)
+			ELSE CAST(FALSE AS JSON)
 		END,
 		'server_url',
 		CASE
@@ -974,13 +972,13 @@ const hostMDMSelect = `,
 			* unmarshaller was having problems converting int values to
 			* booleans.
 			*/
-			WHEN hdek.decryptable IS NULL OR hdek.decryptable = false THEN FALSE
-			ELSE TRUE
+			WHEN hdek.decryptable IS NULL OR hdek.decryptable = false THEN CAST(FALSE AS JSON)
+			ELSE CAST(TRUE AS JSON)
 		END,
 		'raw_decryptable',
 		CASE
 			WHEN hdek.host_id IS NULL THEN -1
-			ELSE CAST(hdek.decryptable AS integer)
+			ELSE hdek.decryptable
 		END,
 		'connected_to_fleet',
 		CASE
@@ -995,12 +993,12 @@ const hostMDMSelect = `,
 				    AND mwe.device_state = '` + microsoft_mdm.MDMDeviceStateEnrolled + `'
 				    AND hmdm.enrolled = true
 				)
-				THEN TRUE
-				ELSE FALSE
+				THEN CAST(TRUE AS JSON)
+				ELSE CAST(FALSE AS JSON)
 				END
 			)
 			WHEN h.platform = 'android' THEN
-				CASE WHEN hmdm.enrolled = true THEN TRUE ELSE FALSE END
+				CASE WHEN hmdm.enrolled = true THEN CAST(TRUE AS JSON) ELSE CAST(FALSE AS JSON) END
 			WHEN h.platform IN ('ios', 'ipados', 'darwin') THEN (` +
 	// NOTE: if you change any of the conditions in this
 	// query, please update the AreHostsConnectedToFleetMDM
@@ -1012,11 +1010,11 @@ const hostMDMSelect = `,
 				    AND ne.type IN ('Device', 'User Enrollment (Device)')
 				    AND hmdm.enrolled = true
 				)
-				THEN TRUE
-				ELSE FALSE
+				THEN CAST(TRUE AS JSON)
+				ELSE CAST(FALSE AS JSON)
 				END
 			)
-			ELSE FALSE
+			ELSE CAST(FALSE AS JSON)
 		END,
 		'name', hmdm.name
 	) mdm_host_data
@@ -1521,17 +1519,17 @@ func (*Datastore) getBatchExecutionFilters(whereParams []interface{}, opt fleet.
 		batchScriptExecutionJoin += ` LEFT JOIN host_script_results hsr ON bsehr.host_execution_id = hsr.execution_id`
 		switch opt.BatchScriptExecutionStatusFilter {
 		case fleet.BatchScriptExecutionRan:
-			batchScriptExecutionFilter += ` AND hsr.exit_code = 0 AND hsr.canceled = 0`
+			batchScriptExecutionFilter += ` AND hsr.exit_code = 0 AND hsr.canceled = false`
 		case fleet.BatchScriptExecutionPending:
 			// Pending can mean "waiting for execution" or "waiting for results".
 			// hsr.exit_code IS NULL <- this means the script has not reported back
-			// (hsr.canceled IS NULL OR hsr.canceled = 0) <- this can mean the script is running, or that it hasn't been activated yet,
+			// (hsr.canceled IS NULL OR hsr.canceled = false) <- this can mean the script is running, or that it hasn't been activated yet,
 			//                      but either way we haven't canceled it.
 			// bsehr.error IS NULL <- this means the batch script framework didn't mark this host as incompatible
 			//                        with this script run.
-			batchScriptExecutionFilter += ` AND ((hsr.host_id AND (hsr.exit_code IS NULL AND (hsr.canceled IS NULL OR hsr.canceled = 0) AND bsehr.error IS NULL)) OR (hsr.host_id is NULL AND ba.canceled = 0 AND bsehr.error IS NULL))`
+			batchScriptExecutionFilter += ` AND ((hsr.host_id AND (hsr.exit_code IS NULL AND (hsr.canceled IS NULL OR hsr.canceled = false) AND bsehr.error IS NULL)) OR (hsr.host_id is NULL AND ba.canceled = 0 AND bsehr.error IS NULL))`
 		case fleet.BatchScriptExecutionErrored:
-			batchScriptExecutionFilter += ` AND hsr.exit_code <> 0 AND hsr.canceled = 0`
+			batchScriptExecutionFilter += ` AND hsr.exit_code <> 0 AND hsr.canceled = false`
 		case fleet.BatchScriptExecutionIncompatible:
 			batchScriptExecutionFilter += ` AND bsehr.error IS NOT NULL`
 		case fleet.BatchScriptExecutionCanceled:
@@ -6256,7 +6254,7 @@ func updateHostIssuesFailingPoliciesForSingleHost(ctx context.Context, tx sqlx.E
 	INSERT INTO host_issues (host_id, failing_policies_count, total_issues_count)
 	SELECT host_id.id, COALESCE(SUM(CASE WHEN pm.passes = false THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN pm.passes = false THEN 1 ELSE 0 END), 0)
 		FROM policy_membership pm
-		RIGHT JOIN (SELECT CAST(? AS integer) as id) as host_id
+		RIGHT JOIN (SELECT CAST(? AS UNSIGNED) as id) as host_id
 		ON pm.host_id = host_id.id
 		GROUP BY host_id.id
 	` + dialect.OnDuplicateKey("host_id", `

@@ -63,8 +63,37 @@ type rebindConn struct {
 // It handles: ? → $N placeholders, JSON_OBJECT → jsonb_build_object,
 // DATE_ADD → PG interval arithmetic, INTERVAL N SECOND/MINUTE/etc.
 func rebindQuery(query string) string {
-	// Replace MySQL JSON_OBJECT with PG jsonb_build_object
+	// Replace MySQL-specific functions with PG equivalents
 	query = strings.ReplaceAll(query, "JSON_OBJECT(", "jsonb_build_object(")
+	// TIMESTAMP(x) → CAST(x AS timestamp)
+	query = regexp.MustCompile(`\bTIMESTAMP\(`).ReplaceAllString(query, "CAST(")
+	// Need to close the CAST with AS timestamp) — but the args are complex.
+	// Simpler: just keep TIMESTAMP() since PG also has it... actually PG doesn't.
+	// Use a regex to replace TIMESTAMP(expr) → CAST(expr AS timestamp)
+	query = regexp.MustCompile(`CAST\(([^)]+)\)`).ReplaceAllStringFunc(query, func(m string) string {
+		// Only rewrite the ones we created from TIMESTAMP()
+		inner := m[5 : len(m)-1] // strip "CAST(" and ")"
+		if !strings.Contains(inner, "AS ") {
+			return "CAST(" + inner + " AS timestamp)"
+		}
+		return m
+	})
+	// CAST(... AS UNSIGNED) → CAST(... AS integer) (MySQL unsigned → PG integer)
+	query = strings.ReplaceAll(query, "AS UNSIGNED)", "AS integer)")
+	// CAST(TRUE/FALSE AS JSON) → TRUE/FALSE (PG jsonb_build_object accepts boolean directly)
+	query = strings.ReplaceAll(query, "CAST(TRUE AS JSON)", "TRUE")
+	query = strings.ReplaceAll(query, "CAST(FALSE AS JSON)", "FALSE")
+	// MAX(boolean_col) → BOOL_OR(boolean_col) for PG
+	query = regexp.MustCompile(`MAX\(([^)]*\.denylisted)\)`).ReplaceAllString(query, "BOOL_OR($1)")
+	// Fix CASE type mismatch: ELSE hdek.decryptable (boolean) mixed with THEN -1 (integer)
+	// Cast boolean to integer in CASE branches
+	query = strings.ReplaceAll(query, "ELSE hdek.decryptable", "ELSE CAST(hdek.decryptable AS integer)")
+	// Fix CAST(AVG(...) AS UNSIGNED) → CAST(AVG(...) AS integer) (already handled above)
+	// Fix boolean = integer comparisons that PG doesn't allow
+	for _, col := range []string{"ne.enabled", "hsr.canceled"} {
+		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
+		query = strings.ReplaceAll(query, col+" = 0", col+" = false")
+	}
 
 	// Replace MySQL DATE_ADD(x, INTERVAL expr UNIT) → (x + (expr) * INTERVAL '1 UNIT')
 	// This handles: DATE_ADD(col, INTERVAL 30 DAY), DATE_ADD(col, INTERVAL expr SECOND), etc.
