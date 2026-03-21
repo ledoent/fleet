@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/md5"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -112,11 +113,8 @@ func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, ar
 	// We must normalize the name for full Unicode support (Unicode equivalence).
 	nameUnicode := norm.NFC.String(args.Name)
 	lastIdInt64, err := insertAndGetIDTx(ctx, db, dialect,
-		fmt.Sprintf(
-			`INSERT INTO policies (name, query, description, resolution, author_id, platforms, critical, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, %s)`,
-			policiesChecksumComputedColumn(),
-		),
-		nameUnicode, args.Query, args.Description, args.Resolution, authorID, args.Platform, args.Critical,
+		`INSERT INTO policies (name, query, description, resolution, author_id, platforms, critical, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		nameUnicode, args.Query, args.Description, args.Resolution, authorID, args.Platform, args.Critical, policyChecksum(nil, nameUnicode),
 	)
 	switch {
 	case err == nil:
@@ -275,6 +273,17 @@ func policiesChecksumComputedColumn() string {
 	) `
 }
 
+// policyChecksum computes the checksum for a policy in Go (portable across databases).
+// The checksum is MD5(CONCAT_WS(\x00, COALESCE(team_id, ''), name)) as raw bytes.
+func policyChecksum(teamID *uint, name string) []byte {
+	var teamStr string
+	if teamID != nil {
+		teamStr = fmt.Sprintf("%d", *teamID)
+	}
+	h := md5.Sum([]byte(teamStr + "\x00" + name))
+	return h[:]
+}
+
 func (ds *Datastore) Policy(ctx context.Context, id uint) (*fleet.Policy, error) {
 	return policyDB(ctx, ds.reader(ctx), id, nil)
 }
@@ -365,11 +374,11 @@ func savePolicy(ctx context.Context, db sqlx.ExtContext, logger *slog.Logger, p 
 			SET name = ?, query = ?, description = ?, resolution = ?,
 			platforms = ?, critical = ?, calendar_events_enabled = ?,
 			software_installer_id = ?, script_id = ?, vpp_apps_teams_id = ?,
-			conditional_access_enabled = ?, checksum = ` + policiesChecksumComputedColumn() + `
+			conditional_access_enabled = ?, checksum = ?
 			WHERE id = ?
 	`
 	result, err := db.ExecContext(
-		ctx, updateStmt, p.Name, p.Query, p.Description, p.Resolution, p.Platform, p.Critical, p.CalendarEventsEnabled, p.SoftwareInstallerID, p.ScriptID, p.VPPAppsTeamsID, p.ConditionalAccessEnabled, p.ID,
+		ctx, updateStmt, p.Name, p.Query, p.Description, p.Resolution, p.Platform, p.Critical, p.CalendarEventsEnabled, p.SoftwareInstallerID, p.ScriptID, p.VPPAppsTeamsID, p.ConditionalAccessEnabled, policyChecksum(p.TeamID, p.Name), p.ID,
 	)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "updating policy")
@@ -1122,18 +1131,15 @@ func newTeamPolicy(ctx context.Context, db sqlx.ExtContext, teamID uint, authorI
 	}
 
 	lastIdInt64, err := insertAndGetIDTx(ctx, db, dialect,
-		fmt.Sprintf(
-			`INSERT INTO policies (
-				name, query, description, team_id, resolution, author_id,
-				platforms, critical, calendar_events_enabled, software_installer_id,
-				script_id, vpp_apps_teams_id, conditional_access_enabled, checksum,
-				type, patch_software_title_id
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, ?)`,
-			policiesChecksumComputedColumn(),
-		),
+		`INSERT INTO policies (
+			name, query, description, team_id, resolution, author_id,
+			platforms, critical, calendar_events_enabled, software_installer_id,
+			script_id, vpp_apps_teams_id, conditional_access_enabled, checksum,
+			type, patch_software_title_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nameUnicode, args.Query, args.Description, teamID, args.Resolution, authorID, args.Platform, args.Critical,
 		args.CalendarEventsEnabled, args.SoftwareInstallerID, args.ScriptID, args.VPPAppsTeamsID,
-		args.ConditionalAccessEnabled, args.Type, args.PatchSoftwareTitleID,
+		args.ConditionalAccessEnabled, policyChecksum(&teamID, nameUnicode), args.Type, args.PatchSoftwareTitleID,
 	)
 	switch {
 	case err == nil:
@@ -1407,8 +1413,7 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 		// Reset on retry so we don't accumulate duplicate cleanup entries.
 		pendingCleanups = pendingCleanups[:0]
 
-		query := fmt.Sprintf(
-			`
+		query := `
 		INSERT INTO policies (
 			name,
 			query,
@@ -1426,9 +1431,8 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			checksum,
 			type,
 			patch_software_title_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, ?)
-		`, policiesChecksumComputedColumn(),
-		) + ds.dialect.OnDuplicateKey("id", `query = VALUES(query),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		` + ds.dialect.OnDuplicateKey("checksum", `query = VALUES(query),
 			description = VALUES(description),
 			author_id = VALUES(author_id),
 			resolution = VALUES(resolution),
@@ -1484,7 +1488,7 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 					query,
 					spec.Name, spec.Query, spec.Description, authorID, spec.Resolution, teamID, spec.Platform, spec.Critical,
 					spec.CalendarEventsEnabled, softwareInstallerID, vppAppsTeamsID, scriptID, spec.ConditionalAccessEnabled,
-					spec.Type, fmaTitleID,
+					policyChecksum(teamID, norm.NFC.String(spec.Name)), spec.Type, fmaTitleID,
 				)
 				if err != nil {
 					return ctxerr.Wrap(ctx, err, "exec ApplyPolicySpecs insert")
@@ -1864,9 +1868,8 @@ func cleanupPolicyMembershipOnPolicyUpdate(
 		}
 		// Clean up orphaned memberships (host_id refs to deleted hosts, not covered by INNER JOIN above)
 		if _, err := db.ExecContext(ctx, `
-			DELETE pm FROM policy_membership pm
-			LEFT JOIN hosts h ON pm.host_id = h.id
-			WHERE pm.policy_id = ? AND h.id IS NULL`, policyID); err != nil {
+			DELETE FROM policy_membership
+			WHERE policy_id = ? AND NOT EXISTS (SELECT 1 FROM hosts WHERE hosts.id = policy_membership.host_id)`, policyID); err != nil {
 			return ctxerr.Wrap(ctx, err, "cleanup orphaned policy membership for platform")
 		}
 	}
@@ -1975,9 +1978,8 @@ func cleanupPolicyMembershipForPolicy(
 	}
 	// Clean up orphaned memberships (host_id refs to deleted hosts, not covered by INNER JOIN above)
 	if _, err := exec.ExecContext(ctx, `
-		DELETE pm FROM policy_membership pm
-		LEFT JOIN hosts h ON pm.host_id = h.id
-		WHERE pm.policy_id = ? AND h.id IS NULL`, policyID); err != nil {
+		DELETE FROM policy_membership
+		WHERE policy_id = ? AND NOT EXISTS (SELECT 1 FROM hosts WHERE hosts.id = policy_membership.host_id)`, policyID); err != nil {
 		return ctxerr.Wrap(ctx, err, "cleanup orphaned policy membership")
 	}
 
@@ -2386,7 +2388,7 @@ func (ds *Datastore) UpdateHostPolicyCounts(ctx context.Context) error {
 
 			insertStmt := `INSERT INTO policy_stats (policy_id, inherited_team_id, passing_host_count, failing_host_count)
 			VALUES (:policy_id, :inherited_team_id, :passing_host_count, :failing_host_count)
-			` + ds.dialect.OnDuplicateKey("id", `updated_at = NOW(),
+			` + ds.dialect.OnDuplicateKey("policy_id,inherited_team_id_char", `updated_at = NOW(),
 				passing_host_count = VALUES(passing_host_count),
 				failing_host_count = VALUES(failing_host_count)`)
 			_, err = sqlx.NamedExecContext(ctx, db, insertStmt, policyStats)
@@ -2412,7 +2414,7 @@ func (ds *Datastore) UpdateHostPolicyCounts(ctx context.Context) error {
 		FROM policies p
 		LEFT JOIN policy_membership pm ON p.id = pm.policy_id
 		GROUP BY p.id
-		`+ds.dialect.OnDuplicateKey("id", `updated_at = NOW(),
+		`+ds.dialect.OnDuplicateKey("policy_id,inherited_team_id_char", `updated_at = NOW(),
 			passing_host_count = VALUES(passing_host_count),
 			failing_host_count = VALUES(failing_host_count)`))
 	if err != nil {

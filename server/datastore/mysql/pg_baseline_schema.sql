@@ -1655,12 +1655,15 @@ CREATE TABLE IF NOT EXISTS "policies" (
   "platforms" varchar(255) NOT NULL DEFAULT '',
   "critical" boolean NOT NULL DEFAULT FALSE,
   "checksum" bytea NOT NULL,
-  "calendar_events_enabled" smallint  NOT NULL DEFAULT '0',
+  "calendar_events_enabled" boolean NOT NULL DEFAULT FALSE,
   "software_installer_id" int  DEFAULT NULL,
   "script_id" int  DEFAULT NULL,
   "vpp_apps_teams_id" int  DEFAULT NULL,
-  "conditional_access_enabled" smallint  NOT NULL DEFAULT '0',
+  "conditional_access_enabled" boolean NOT NULL DEFAULT FALSE,
   "conditional_access_bypass_enabled" boolean NOT NULL DEFAULT TRUE,
+  "type" varchar(255) NOT NULL DEFAULT 'dynamic',
+  "patch_software_title_id" int DEFAULT NULL,
+  "needs_full_membership_cleanup" boolean NOT NULL DEFAULT FALSE,
   PRIMARY KEY ("id"),
   CONSTRAINT "idx_policies_checksum" UNIQUE ("checksum")
 );
@@ -1700,7 +1703,7 @@ CREATE TABLE IF NOT EXISTS "policy_stats" (
   "failing_host_count" integer  NOT NULL DEFAULT '0',
   "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ,
-  "inherited_team_id_char" text,
+  "inherited_team_id_char" text GENERATED ALWAYS AS (CASE WHEN inherited_team_id IS NULL THEN 'global' ELSE inherited_team_id::text END) STORED,
   PRIMARY KEY ("id"),
   CONSTRAINT "policy_id" UNIQUE ("policy_id","inherited_team_id_char")
 );
@@ -1723,7 +1726,7 @@ CREATE TABLE IF NOT EXISTS "queries" (
   "automations_enabled" boolean  NOT NULL DEFAULT FALSE,
   "logging_type" varchar(255) NOT NULL DEFAULT 'snapshot',
   "discard_data" boolean NOT NULL DEFAULT TRUE,
-  "is_scheduled" text,
+  "is_scheduled" boolean GENERATED ALWAYS AS (schedule_interval > 0) STORED,
   PRIMARY KEY ("id"),
   CONSTRAINT "idx_team_id_name_unq" UNIQUE ("team_id_char","name"),
   CONSTRAINT "idx_name_team_id_unq" UNIQUE ("name","team_id_char")
@@ -3190,8 +3193,4 @@ CREATE TABLE "operating_system_version_vulnerabilities" ("id" bigint GENERATED A
   "resolved_in_version" varchar(255), "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, "team_id" integer NOT NULL DEFAULT 0);
 
-DROP TABLE IF EXISTS "policy_stats" CASCADE;
-CREATE TABLE "policy_stats" ("id" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  "policy_id" integer NOT NULL, "inherited_team_id" integer,
-  "passing_host_count" integer NOT NULL DEFAULT 0, "failing_host_count" integer NOT NULL DEFAULT 0,
-  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP);
+-- policy_stats already created above with inherited_team_id_char generated column

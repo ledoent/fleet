@@ -563,6 +563,23 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 
 	// Insert required seed data (app_config_json needs at least one row)
 	_, _ = testDB.Exec(`INSERT INTO app_config_json (id, json_value) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING`)
+	// Insert built-in labels that migrations would normally create
+	_, _ = testDB.Exec(`INSERT INTO labels (name, query, label_type, label_membership_type) VALUES
+		('All Hosts', 'SELECT 1', 1, 0),
+		('macOS', 'SELECT 1', 1, 0),
+		('Ubuntu Linux', 'SELECT 1', 1, 0),
+		('CentOS Linux', 'SELECT 1', 1, 0),
+		('Windows', 'SELECT 1', 1, 0),
+		('Red Hat Linux', 'SELECT 1', 1, 0),
+		('All Linux', 'SELECT 1', 1, 0),
+		('chrome', 'SELECT 1', 1, 0),
+		('iOS', 'SELECT 1', 1, 0),
+		('iPadOS', 'SELECT 1', 1, 0),
+		('Fedora Linux', 'SELECT 1', 1, 0)
+		ON CONFLICT DO NOTHING`)
+	// Insert mdm delivery status and operation type seed data
+	_, _ = testDB.Exec(`INSERT INTO mdm_delivery_status (status) VALUES ('failed'), ('applied'), ('pending'), ('verified'), ('verifying') ON CONFLICT DO NOTHING`)
+	_, _ = testDB.Exec(`INSERT INTO mdm_operation_types (operation_type) VALUES ('install'), ('remove') ON CONFLICT DO NOTHING`)
 
 	ds := &Datastore{
 		primary:   testDB,

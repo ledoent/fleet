@@ -295,7 +295,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 				user_time,
 				wall_time
 			)
-			VALUES %s `+dialect.OnDuplicateKey("scheduled_query_id,host_id", `
+			VALUES %s `+dialect.OnDuplicateKey("host_id,scheduled_query_id,query_type", `
 				scheduled_query_id = VALUES(scheduled_query_id),
 				host_id = VALUES(host_id),
 				average_memory = VALUES(average_memory),
@@ -330,7 +330,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 					user_time,
 					wall_time
 				)
-				VALUES %s `+dialect.OnDuplicateKey("scheduled_query_id,host_id", `
+				VALUES %s `+dialect.OnDuplicateKey("host_id,scheduled_query_id,query_type", `
 					scheduled_query_id = VALUES(scheduled_query_id),
 					host_id = VALUES(host_id),
 					average_memory = VALUES(average_memory),
@@ -464,14 +464,14 @@ func loadHostScheduledQueryStatsDB(ctx context.Context, db sqlx.QueryerContext, 
 			q.discard_data,
 			q.automations_enabled,
 			MAX(qr.last_fetched) as last_fetched,
-			COALESCE(sqs.average_memory, 0) AS average_memory,
-			COALESCE(sqs.denylisted, false) AS denylisted,
-			COALESCE(sqs.executions, 0) AS executions,
-			COALESCE(sqs.last_executed, TIMESTAMP(?)) AS last_executed,
-			COALESCE(sqs.output_size, 0) AS output_size,
-			COALESCE(sqs.system_time, 0) AS system_time,
-			COALESCE(sqs.user_time, 0) AS user_time,
-			COALESCE(sqs.wall_time, 0) AS wall_time
+			COALESCE(MAX(sqs.average_memory), 0) AS average_memory,
+			COALESCE(MAX(sqs.denylisted), false) AS denylisted,
+			COALESCE(MAX(sqs.executions), 0) AS executions,
+			COALESCE(MAX(sqs.last_executed), TIMESTAMP(?)) AS last_executed,
+			COALESCE(MAX(sqs.output_size), 0) AS output_size,
+			COALESCE(MAX(sqs.system_time), 0) AS system_time,
+			COALESCE(MAX(sqs.user_time), 0) AS user_time,
+			COALESCE(MAX(sqs.wall_time), 0) AS wall_time
 		FROM
 			queries q
 		LEFT JOIN
@@ -706,7 +706,7 @@ func deleteHosts(ctx context.Context, tx sqlx.ExtContext, hostIDs []uint) error 
 	// no point trying the uuid-based tables if the host's uuid is missing
 	if len(hostUUIDs) != 0 {
 		for table, col := range additionalHostRefsByUUID {
-			stmt, args, err := sqlx.In(fmt.Sprintf("DELETE FROM `%s` WHERE `%s` IN (?)", table, col), hostUUIDs)
+			stmt, args, err := sqlx.In(fmt.Sprintf(`DELETE FROM "%s" WHERE "%s" IN (?)`, table, col), hostUUIDs)
 			if err != nil {
 				return ctxerr.Wrapf(ctx, err, "building delete statement for %s for hosts %v", table, hostUUIDs)
 			}

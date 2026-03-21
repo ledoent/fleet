@@ -103,7 +103,7 @@ func insertScheduledQueryDB(ctx context.Context, q sqlx.ExtContext, dialect Dial
 			pack_id,
 			snapshot,
 			removed,
-			` + "`interval`" + `,
+			"interval",
 			platform,
 			version,
 			shard,
@@ -150,7 +150,7 @@ func (ds *Datastore) SaveScheduledQuery(ctx context.Context, sq *fleet.Scheduled
 func saveScheduledQueryDB(ctx context.Context, exec sqlx.ExecerContext, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error) {
 	query := `
 		UPDATE scheduled_queries
-			SET pack_id = ?, query_id = ?, ` + "`interval`" + ` = ?, snapshot = ?, removed = ?, platform = ?, version = ?, shard = ?, denylist = ?
+			SET pack_id = ?, query_id = ?, "interval" = ?, snapshot = ?, removed = ?, platform = ?, version = ?, shard = ?, denylist = ?
 			WHERE id = ?
 	`
 	result, err := exec.ExecContext(ctx, query, sq.PackID, sq.QueryID, sq.Interval, sq.Snapshot, sq.Removed, sq.Platform, sq.Version, sq.Shard, sq.Denylist, sq.ID)
