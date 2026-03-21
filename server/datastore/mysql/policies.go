@@ -2082,7 +2082,7 @@ func (ds *Datastore) IncreasePolicyAutomationIteration(ctx context.Context, poli
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO policy_automation_iterations (policy_id, iteration) VALUES (?,1)
-			`+ds.dialect.OnDuplicateKey("policy_id", "iteration = iteration + 1"),
+			`+ds.dialect.OnDuplicateKey("policy_id", "iteration = policy_automation_iterations.iteration + 1"),
 			policyID)
 		return err
 	})

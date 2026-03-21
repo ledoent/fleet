@@ -577,7 +577,7 @@ func (ds *Datastore) addSoftwareTitleToMatchingSoftware(ctx context.Context, tit
 	args = append(args, whereArgs...)
 	updateSoftwareStmt := fmt.Sprintf(`
 		    UPDATE software s
-		    SET s.title_id = ?
+		    SET title_id = ?
 		    %s`, whereClause)
 	_, err := ds.writer(ctx).ExecContext(ctx, updateSoftwareStmt, args...)
 	return ctxerr.Wrap(ctx, err, "adding fk reference in software to software_titles")
