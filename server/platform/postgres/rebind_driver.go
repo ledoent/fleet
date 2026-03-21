@@ -65,19 +65,9 @@ type rebindConn struct {
 func rebindQuery(query string) string {
 	// Replace MySQL-specific functions with PG equivalents
 	query = strings.ReplaceAll(query, "JSON_OBJECT(", "jsonb_build_object(")
-	// TIMESTAMP(x) → CAST(x AS timestamp)
-	query = regexp.MustCompile(`\bTIMESTAMP\(`).ReplaceAllString(query, "CAST(")
-	// Need to close the CAST with AS timestamp) — but the args are complex.
-	// Simpler: just keep TIMESTAMP() since PG also has it... actually PG doesn't.
-	// Use a regex to replace TIMESTAMP(expr) → CAST(expr AS timestamp)
-	query = regexp.MustCompile(`CAST\(([^)]+)\)`).ReplaceAllStringFunc(query, func(m string) string {
-		// Only rewrite the ones we created from TIMESTAMP()
-		inner := m[5 : len(m)-1] // strip "CAST(" and ")"
-		if !strings.Contains(inner, "AS ") {
-			return "CAST(" + inner + " AS timestamp)"
-		}
-		return m
-	})
+	// TIMESTAMP(x) → x::timestamp (PG cast syntax)
+	// MySQL TIMESTAMP(?) converts a value to timestamp type
+	query = regexp.MustCompile(`\bTIMESTAMP\(([^)]+)\)`).ReplaceAllString(query, "($1)::timestamp")
 	// CAST(... AS UNSIGNED) → CAST(... AS integer) (MySQL unsigned → PG integer)
 	query = strings.ReplaceAll(query, "AS UNSIGNED)", "AS integer)")
 	// CAST(TRUE/FALSE AS JSON) → TRUE/FALSE (PG jsonb_build_object accepts boolean directly)
@@ -93,6 +83,13 @@ func rebindQuery(query string) string {
 	for _, col := range []string{"ne.enabled", "hsr.canceled"} {
 		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
 		query = strings.ReplaceAll(query, col+" = 0", col+" = false")
+	}
+	// Fix FIND_IN_SET/ANY result compared to integer: PG = ANY() returns boolean
+	// MySQL FIND_IN_SET returns integer, so code uses <> 0 / != 0 checks
+	// PG = ANY() returns boolean, making these comparisons invalid
+	if strings.Contains(query, "string_to_array") {
+		query = strings.ReplaceAll(query, ")) <> 0", "))")
+		query = strings.ReplaceAll(query, ")) != 0", "))")
 	}
 
 	// Replace MySQL DATE_ADD(x, INTERVAL expr UNIT) → (x + (expr) * INTERVAL '1 UNIT')
