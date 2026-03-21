@@ -78,6 +78,8 @@ func rebindQuery(query string) string {
 	query = rewriteDeleteUsing(query)
 	// MySQL IF(cond, true_val, false_val) → PG CASE WHEN cond THEN true_val ELSE false_val END
 	query = rewriteIF(query)
+	// MySQL FIELD(x, 'a', 'b', ...) → PG CASE x WHEN 'a' THEN 1 WHEN 'b' THEN 2 ... ELSE 0 END
+	query = rewriteField(query)
 	// TIMESTAMPDIFF(SECOND, x, y) → EXTRACT(EPOCH FROM (y - x))
 	// MySQL's TIMESTAMPDIFF returns the difference in the specified unit.
 	query = rewriteTimestampDiff(query)
@@ -119,12 +121,13 @@ func rebindQuery(query string) string {
 		query = strings.ReplaceAll(query, "')) != 0", "'))")
 	}
 
-	// Replace MySQL DATE_ADD(x, INTERVAL expr UNIT) → (x + (expr) * INTERVAL '1 UNIT')
-	// This handles: DATE_ADD(col, INTERVAL 30 DAY), DATE_ADD(col, INTERVAL expr SECOND), etc.
+	// Replace MySQL DATE_ADD/DATE_SUB(x, INTERVAL expr UNIT) → PG interval arithmetic
 	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
-		pattern := "DATE_ADD("
-		if strings.Contains(query, pattern) {
-			query = rewriteDateAdd(query, unit)
+		if strings.Contains(query, "DATE_ADD(") {
+			query = rewriteDateAddSub(query, unit, "+")
+		}
+		if strings.Contains(query, "DATE_SUB(") {
+			query = rewriteDateAddSub(query, unit, "-")
 		}
 	}
 
@@ -183,12 +186,16 @@ func (c *rebindConn) Prepare(query string) (driver.Stmt, error) {
 	return c.Conn.Prepare(rebindQuery(query))
 }
 
-// rewriteDateAdd converts MySQL DATE_ADD(expr, INTERVAL value UNIT) to PG (expr + (value) * INTERVAL '1 unit').
-// Uses paren-balancing to find the DATE_ADD arguments correctly when they contain
-// nested function calls like COALESCE(x, y) or LEAST(a, b).
-func rewriteDateAdd(query string, unit string) string {
+// rewriteDateAddSub converts MySQL DATE_ADD/DATE_SUB(expr, INTERVAL value UNIT) to PG interval arithmetic.
+// op is "+" for DATE_ADD and "-" for DATE_SUB.
+func rewriteDateAddSub(query string, unit string, op string) string {
 	pgUnit := strings.ToLower(unit) + "s"
-	prefix := "DATE_ADD("
+	var prefix string
+	if op == "+" {
+		prefix = "DATE_ADD("
+	} else {
+		prefix = "DATE_SUB("
+	}
 	for {
 		idx := strings.Index(query, prefix)
 		if idx < 0 {
@@ -222,11 +229,11 @@ func rewriteDateAdd(query string, unit string) string {
 		intervalRe := regexp.MustCompile(`(?i)INTERVAL\s+(.+)\s+` + unit)
 		m := intervalRe.FindStringSubmatch(intervalPart)
 		if m == nil {
-			// This DATE_ADD doesn't use this unit, skip past it
-			return query[:i] + rewriteDateAdd(query[i:], unit)
+			// This DATE_ADD/SUB doesn't use this unit, skip past it
+			return query[:i] + rewriteDateAddSub(query[i:], unit, op)
 		}
 		value := strings.TrimSpace(m[1])
-		replacement := "(" + expr + " + (" + value + ") * INTERVAL '1 " + pgUnit + "')"
+		replacement := "(" + expr + " " + op + " (" + value + ") * INTERVAL '1 " + pgUnit + "')"
 		query = query[:idx] + replacement + query[i:]
 	}
 }
@@ -392,4 +399,50 @@ func rewriteIF(query string) string {
 
 func isIdentChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// rewriteField converts MySQL FIELD(x, 'a', 'b', ...) → PG CASE x WHEN 'a' THEN 1 WHEN 'b' THEN 2 ... ELSE 0 END.
+func rewriteField(query string) string {
+	prefix := "FIELD("
+	idx := strings.Index(query, prefix)
+	if idx < 0 {
+		return query
+	}
+	// Ensure FIELD( is not part of a larger identifier
+	if idx > 0 && isIdentChar(query[idx-1]) {
+		return query
+	}
+	start := idx + len(prefix)
+	depth := 1
+	var parts []string
+	partStart := start
+	i := start
+	for i < len(query) && depth > 0 {
+		switch query[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(query[partStart:i]))
+			}
+		case ',':
+			if depth == 1 {
+				parts = append(parts, strings.TrimSpace(query[partStart:i]))
+				partStart = i + 1
+			}
+		}
+		i++
+	}
+	if depth != 0 || len(parts) < 2 {
+		return query
+	}
+	var b strings.Builder
+	b.WriteString("CASE ")
+	b.WriteString(parts[0])
+	for j := 1; j < len(parts); j++ {
+		fmt.Fprintf(&b, " WHEN %s THEN %d", parts[j], j)
+	}
+	b.WriteString(" ELSE 0 END")
+	return query[:idx] + b.String() + query[i:]
 }

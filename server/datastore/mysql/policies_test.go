@@ -1503,8 +1503,8 @@ func testPolicyQueriesForHost(t *testing.T, ds *Datastore) {
 	// Manually insert a global policy with null resolution.
 	res, err := ds.writer(context.Background()).ExecContext(
 		context.Background(),
-		fmt.Sprintf(`INSERT INTO policies (name, query, description, checksum) VALUES (?, ?, ?, %s)`, policiesChecksumComputedColumn()),
-		q.Name+"2", q.Query, q.Description+"2",
+		`INSERT INTO policies (name, query, description, checksum) VALUES (?, ?, ?, ?)`,
+		q.Name+"2", q.Query, q.Description+"2", policyChecksum(nil, q.Name+"2"),
 	)
 	require.NoError(t, err)
 	id, err := res.LastInsertId()
@@ -3053,11 +3053,8 @@ func testPolicyViolationDays(t *testing.T, ds *Datastore) {
 		hosts[i] = h
 	}
 
-	createPolStmt := fmt.Sprintf(
-		`INSERT INTO policies (name, query, description, author_id, platforms, created_at, updated_at, checksum) VALUES (?, ?, '', ?, ?, ?, ?, %s)`,
-		policiesChecksumComputedColumn(),
-	)
-	res, err := ds.writer(ctx).ExecContext(ctx, createPolStmt, "test_pol", "select 1", user.ID, "", then, then)
+	createPolStmt := `INSERT INTO policies (name, query, description, author_id, platforms, created_at, updated_at, checksum) VALUES (?, ?, '', ?, ?, ?, ?, ?)`
+	res, err := ds.writer(ctx).ExecContext(ctx, createPolStmt, "test_pol", "select 1", user.ID, "", then, then, policyChecksum(nil, "test_pol"))
 	require.NoError(t, err)
 	id, _ := res.LastInsertId()
 	pol, err := ds.Policy(ctx, uint(id)) //nolint:gosec // dismiss G115
@@ -3151,10 +3148,8 @@ func testPolicyCleanupPolicyMembership(t *testing.T, ds *Datastore) {
 	}
 
 	// create some policies, using direct insert statements to control the timestamps
-	createPolStmt := fmt.Sprintf(
-		`INSERT INTO policies (name, query, description, author_id, platforms, created_at, updated_at, checksum)
-                    VALUES (?, ?, '', ?, ?, ?, ?, %s)`, policiesChecksumComputedColumn(),
-	)
+	createPolStmt := `INSERT INTO policies (name, query, description, author_id, platforms, created_at, updated_at, checksum)
+                    VALUES (?, ?, '', ?, ?, ?, ?, ?)`
 
 	jan2020 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	feb2020 := time.Date(2020, 2, 1, 0, 0, 0, 0, time.UTC)
@@ -3163,7 +3158,8 @@ func testPolicyCleanupPolicyMembership(t *testing.T, ds *Datastore) {
 	may2020 := time.Date(2020, 5, 1, 0, 0, 0, 0, time.UTC)
 	pols := make([]*fleet.Policy, 3)
 	for i, dt := range []time.Time{jan2020, feb2020, mar2020} {
-		res, err := ds.writer(ctx).ExecContext(ctx, createPolStmt, "p"+strconv.Itoa(i+1), "select 1", user.ID, "", dt, dt)
+		name := "p" + strconv.Itoa(i+1)
+		res, err := ds.writer(ctx).ExecContext(ctx, createPolStmt, name, "select 1", user.ID, "", dt, dt, policyChecksum(nil, name))
 		require.NoError(t, err)
 		id, _ := res.LastInsertId()
 		pol, err := ds.Policy(ctx, uint(id)) //nolint:gosec // dismiss G115

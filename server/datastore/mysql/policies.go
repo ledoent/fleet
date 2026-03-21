@@ -2125,7 +2125,7 @@ func (ds *Datastore) OutdatedAutomationBatch(ctx context.Context) ([]fleet.Polic
 			return nil
 		}
 		query := `
-			UPDATE policy_membership pm SET pm.automation_iteration = (
+			UPDATE policy_membership pm SET automation_iteration = (
 				SELECT ai.iteration
 				FROM policy_automation_iterations ai
 				WHERE pm.policy_id = ai.policy_id
