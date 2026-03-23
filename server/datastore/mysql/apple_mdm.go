@@ -2382,7 +2382,7 @@ INSERT INTO
   )
 VALUES
   -- see https://stackoverflow.com/a/51393124/1094941
-  ( CONCAT('` + fleet.MDMAppleProfileUUIDPrefix + `', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, ?, ?, UNHEX(MD5(mobileconfig)), CURRENT_TIMESTAMP(6), ?)
+  ( CONCAT('` + fleet.MDMAppleProfileUUIDPrefix + `', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, ?, ?, UNHEX(MD5(?)), CURRENT_TIMESTAMP(6), ?)
 ` + ds.dialect.OnDuplicateKey("profile_uuid", `
   uploaded_at = IF(checksum = VALUES(checksum) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP(6)),
   secrets_updated_at = VALUES(secrets_updated_at),
@@ -2480,7 +2480,7 @@ VALUES
 	// contents is the same as it was already).
 	for _, p := range incomingProfs {
 		if result, err = tx.ExecContext(ctx, insertNewOrEditedProfile, profTeamID, p.Identifier, p.Name, p.Scope,
-			p.Mobileconfig, p.SecretsUpdatedAt); err != nil {
+			p.Mobileconfig, p.Mobileconfig, p.SecretsUpdatedAt); err != nil {
 			return false, ctxerr.Wrapf(ctx, err, "insert new/edited profile with identifier %q", p.Identifier)
 		}
 		didInsertOrUpdate := insertOnDuplicateDidInsertOrUpdate(result)
@@ -4015,9 +4015,9 @@ func (ds *Datastore) BulkUpsertMDMAppleConfigProfiles(ctx context.Context, paylo
 			teamID = *cp.TeamID
 		}
 
-		args = append(args, teamID, cp.Identifier, cp.Name, cp.Scope, cp.Mobileconfig, cp.SecretsUpdatedAt)
+		args = append(args, teamID, cp.Identifier, cp.Name, cp.Scope, cp.Mobileconfig, cp.Mobileconfig, cp.SecretsUpdatedAt)
 		// see https://stackoverflow.com/a/51393124/1094941
-		sb.WriteString("( CONCAT('a', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, ?, ?, UNHEX(MD5(mobileconfig)), CURRENT_TIMESTAMP(), ?),")
+		sb.WriteString("( CONCAT('a', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, ?, ?, UNHEX(MD5(?)), CURRENT_TIMESTAMP(), ?),")
 	}
 
 	stmt := fmt.Sprintf(`
@@ -6821,9 +6821,9 @@ func (ds *Datastore) CleanupHostMDMCommands(ctx context.Context) error {
 	// Delete commands that don't have a corresponding host or have been sent over 1 day ago.
 	// We are using 1 day instead of 7 days in case MDM commands fail to be sent or fail to process. They can be resent the next day.
 	const stmt = `
-		DELETE hmc FROM host_mdm_commands AS hmc
-		LEFT JOIN hosts h ON h.id = hmc.host_id
-		WHERE h.id IS NULL OR hmc.updated_at < NOW() - INTERVAL 1 DAY`
+		DELETE FROM host_mdm_commands
+		WHERE NOT EXISTS (SELECT 1 FROM hosts h WHERE h.id = host_mdm_commands.host_id)
+		OR host_mdm_commands.updated_at < NOW() - INTERVAL 1 DAY`
 	if _, err := ds.writer(ctx).ExecContext(ctx, stmt); err != nil {
 		return ctxerr.Wrap(ctx, err, "delete from host_mdm_commands")
 	}
@@ -6836,21 +6836,21 @@ func (ds *Datastore) CleanupHostMDMAppleProfiles(ctx context.Context) error {
 	// This could also occur due to errors (i.e., large server/DB load) or server being stopped while processing the profiles.
 	// After the entry is deleted, the mdm_apple_profile_manager job will try to requeue the profile.
 	stmt := fmt.Sprintf(`
-	DELETE hmap FROM host_mdm_apple_profiles AS hmap
+	DELETE FROM host_mdm_apple_profiles
 WHERE (
-        hmap.status IS NULL
-        OR hmap.status = '%s'
+        host_mdm_apple_profiles.status IS NULL
+        OR host_mdm_apple_profiles.status = '%s'
     )
-    AND hmap.updated_at < NOW() - INTERVAL 1 HOUR
+    AND host_mdm_apple_profiles.updated_at < NOW() - INTERVAL 1 HOUR
     AND NOT EXISTS (
         SELECT 1
         FROM
             nano_enrollments ne
-            STRAIGHT_JOIN nano_enrollment_queue neq ON neq.id = ne.id
-            AND neq.command_uuid = hmap.command_uuid
+            JOIN nano_enrollment_queue neq ON neq.id = ne.id
+            AND neq.command_uuid = host_mdm_apple_profiles.command_uuid
             AND neq.active = 1
         WHERE
-            ne.device_id = hmap.host_uuid
+            ne.device_id = host_mdm_apple_profiles.host_uuid
             AND ne.enabled = 1
     );`,
 		fleet.MDMDeliveryPending)

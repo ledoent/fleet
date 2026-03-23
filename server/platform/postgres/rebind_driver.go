@@ -75,6 +75,10 @@ func rebindQuery(query string) string {
 	// NOW(6) / CURRENT_TIMESTAMP(6) → NOW() / CURRENT_TIMESTAMP (PG already returns microsecond precision)
 	query = strings.ReplaceAll(query, "NOW(6)", "NOW()")
 	query = strings.ReplaceAll(query, "CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP")
+	// CURRENT_TIMESTAMP() → CURRENT_TIMESTAMP (PG doesn't use parens)
+	query = strings.ReplaceAll(query, "CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP")
+	// MD5() → md5() (PG uses lowercase)
+	query = strings.ReplaceAll(query, "MD5(", "md5(")
 	// JSON_OBJECT → jsonb_build_object, then cast placeholder args to text
 	// (PG's jsonb_build_object has VARIADIC "any" so it can't infer $N types)
 	query = strings.ReplaceAll(query, "JSON_OBJECT(", "jsonb_build_object(")
