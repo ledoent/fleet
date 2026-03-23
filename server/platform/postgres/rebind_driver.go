@@ -227,9 +227,9 @@ func rebindQuery(query string) string {
 		query = re.ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
 	}
 	// Resolve ambiguous column references in ON CONFLICT DO UPDATE SET clauses.
-	// PG considers bare column names ambiguous between the target table and EXCLUDED.
-	// Qualify them with the target table name extracted from INSERT INTO <table>.
-	if strings.Contains(query, "ON CONFLICT") && strings.Contains(query, "EXCLUDED.") {
+	// Only apply when the query has CASE/IF expressions in the ON CONFLICT SET clause,
+	// since simple "col = EXCLUDED.col" assignments aren't ambiguous.
+	if strings.Contains(query, "ON CONFLICT") && strings.Contains(query, "EXCLUDED.") && (strings.Contains(query, "CASE WHEN") || strings.Contains(query, "COALESCE")) {
 		query = resolveOnConflictAmbiguity(query)
 	}
 
@@ -820,7 +820,7 @@ func resolveOnConflictAmbiguity(query string) string {
 			}
 
 			if shouldQualify {
-				result.WriteString(`"` + tableName + `".` + matched)
+				result.WriteString(tableName + "." + matched)
 			} else {
 				result.WriteString(matched)
 			}
