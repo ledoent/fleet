@@ -3447,8 +3447,9 @@ func testHostsByIdentifier(t *testing.T, ds *Datastore) {
 
 func testHostLiteByIdentifierAndID(t *testing.T, ds *Datastore) {
 	now := time.Now().UTC().Truncate(time.Second)
+	hosts := make([]*fleet.Host, 10)
 	for i := 1; i <= 10; i++ {
-		_, err := ds.NewHost(
+		host, err := ds.NewHost(
 			context.Background(), &fleet.Host{
 				DetailUpdatedAt: now,
 				LabelUpdatedAt:  now,
@@ -3462,6 +3463,7 @@ func testHostLiteByIdentifierAndID(t *testing.T, ds *Datastore) {
 			},
 		)
 		require.NoError(t, err)
+		hosts[i-1] = host
 	}
 
 	var (
@@ -3471,7 +3473,7 @@ func testHostLiteByIdentifierAndID(t *testing.T, ds *Datastore) {
 	identifier := "uuid_1"
 	h, err = ds.HostLiteByIdentifier(context.Background(), identifier)
 	require.NoError(t, err)
-	assert.Equal(t, uint(1), h.ID)
+	assert.Equal(t, hosts[0].ID, h.ID)
 	assert.Equal(t, now.UTC(), h.SeenTime)
 
 	// Also test fetching host by ID
@@ -3481,22 +3483,22 @@ func testHostLiteByIdentifierAndID(t *testing.T, ds *Datastore) {
 
 	h, err = ds.HostLiteByIdentifier(context.Background(), "osquery_host_id_2")
 	require.NoError(t, err)
-	assert.Equal(t, uint(2), h.ID)
+	assert.Equal(t, hosts[1].ID, h.ID)
 	assert.Equal(t, now.UTC(), h.SeenTime)
 
 	h, err = ds.HostLiteByIdentifier(context.Background(), "node_key_4")
 	require.NoError(t, err)
-	assert.Equal(t, uint(4), h.ID)
+	assert.Equal(t, hosts[3].ID, h.ID)
 	assert.Equal(t, now.UTC(), h.SeenTime)
 
 	h, err = ds.HostLiteByIdentifier(context.Background(), "hostname_7")
 	require.NoError(t, err)
-	assert.Equal(t, uint(7), h.ID)
+	assert.Equal(t, hosts[6].ID, h.ID)
 	assert.Equal(t, now.UTC(), h.SeenTime)
 
 	h, err = ds.HostLiteByIdentifier(context.Background(), "serial_9")
 	require.NoError(t, err)
-	assert.Equal(t, uint(9), h.ID)
+	assert.Equal(t, hosts[8].ID, h.ID)
 	assert.Equal(t, now.UTC(), h.SeenTime)
 
 	h, err = ds.HostLiteByIdentifier(context.Background(), "foobar")
@@ -7819,7 +7821,7 @@ func testHostsLite(t *testing.T, ds *Datastore) {
 	var nfe fleet.NotFoundError
 	require.True(t, errors.As(err, &nfe))
 
-	now := time.Now()
+	now := time.Now().UTC()
 	h, err := ds.NewHost(context.Background(), &fleet.Host{
 		ID:                  1,
 		OsqueryHostID:       ptr.String("foobar"),
@@ -7849,7 +7851,7 @@ func testHostsLite(t *testing.T, ds *Datastore) {
 	// HostLite does not load host seen time.
 	require.Empty(t, h.SeenTime)
 
-	require.Equal(t, uint(1), h.ID)
+	require.NotZero(t, h.ID)
 	require.NotEmpty(t, h.CreatedAt)
 	require.NotEmpty(t, h.UpdatedAt)
 	require.Equal(t, "foobar", *h.OsqueryHostID)
@@ -10812,7 +10814,7 @@ func testHostsEnrollOrbit(t *testing.T, ds *Datastore) {
 
 		ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
 			_, err := q.ExecContext(ctx, `INSERT INTO host_mdm(host_id, enrolled, server_url, installed_from_dep, mdm_id, is_server)
-		VALUES(?, 1, 'https://example.com/mdm', 0, ?, 0)`, h1Orbit.ID, h1Orbit.ID+100)
+		VALUES(?, ?, 'https://example.com/mdm', ?, ?, ?)`, h1Orbit.ID, true, false, h1Orbit.ID+100, false)
 			return err
 		})
 		h1WithMdmFetched, err := ds.Host(ctx, h1Orbit.ID)

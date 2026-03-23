@@ -2003,12 +2003,12 @@ func (ds *Datastore) CleanupPolicyMembership(ctx context.Context, now time.Time)
 			FROM
 				policies p
 			WHERE
-				p.updated_at >= DATE_SUB(?, INTERVAL ? SECOND) AND
+				p.updated_at >= ? AND
 				p.created_at < p.updated_at`
 	)
 
 	var pols []*fleet.Policy
-	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &pols, updatedPoliciesStmt, now, int(recentlyUpdatedPoliciesInterval.Seconds())); err != nil {
+	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &pols, updatedPoliciesStmt, now.Add(-recentlyUpdatedPoliciesInterval)); err != nil {
 		return ctxerr.Wrap(ctx, err, "select recently updated policies")
 	}
 
@@ -2199,7 +2199,7 @@ func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext, dialect D
 	// `policy_membership`
 	var newCounts PolicyViolationDays
 	if err := sqlx.GetContext(ctx, tx, &newCounts, `
-		 SELECT	(select count(*) from policy_membership where passes=0) as failing_host_count,
+		 SELECT	(select count(*) from policy_membership where passes = false) as failing_host_count,
 	   		(select count(*) from policy_membership) as total_host_count`,
 	); err != nil {
 		return ctxerr.Wrap(ctx, err, "count policy violation days")
@@ -2216,7 +2216,7 @@ func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext, dialect D
 		INSERT INTO
 			aggregated_stats (id, global_stats, type, json_value)
 		VALUES (?, ?, ?, ?)
-		` + dialect.OnDuplicateKey("id,type,global_stats", "json_value = VALUES(json_value)")
+		` + dialect.OnDuplicateKey("id,type,global_stats", "json_value = VALUES(json_value), updated_at = NOW()")
 	if _, err := tx.ExecContext(ctx, upsertStmt, statsID, globalStats, statsType, statsJSON); err != nil {
 		return ctxerr.Wrap(ctx, err, "update policy violation days aggregated stats")
 	}
@@ -2512,7 +2512,7 @@ func (ds *Datastore) GetTeamHostsPolicyMemberships(
 	LEFT JOIN (
 		SELECT host_id, 0 AS passing, %s AS failing_policy_ids
 		FROM policy_membership
-		WHERE policy_id IN (?) AND passes = 0
+		WHERE policy_id IN (?) AND passes = false
 		GROUP BY host_id
 	) pm ON h.id = pm.host_id`, ds.dialect.GroupConcat("policy_id", ",")) + `
 	LEFT JOIN (
@@ -2539,7 +2539,7 @@ func (ds *Datastore) GetTeamHostsPolicyMemberships(
 	) sh ON h.id = sh.host_id
 	LEFT JOIN host_display_names hdn ON h.id = hdn.host_id
 	LEFT JOIN host_calendar_events hce ON h.id = hce.host_id
-	WHERE h.team_id = ? AND ((pm.passing IS NOT NULL AND NOT pm.passing) OR (COALESCE(pm.passing, 1) AND hce.host_id IS NOT NULL))
+	WHERE h.team_id = ? AND ((pm.passing IS NOT NULL AND pm.passing = 0) OR (COALESCE(pm.passing, 1) = 1 AND hce.host_id IS NOT NULL))
 `
 
 	query, args, err := sqlx.In(query,

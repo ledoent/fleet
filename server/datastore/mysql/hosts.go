@@ -279,10 +279,95 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 		return nil
 	}
 
+	// Deduplicate scheduled queries stats by (team_id, query_name) — last entry wins.
+	// PG's ON CONFLICT can't update the same row twice in a single INSERT.
+	if scheduledQueriesQueryCount > 1 {
+		type sqKey struct {
+			teamID uint
+			name   string
+		}
+		argsPerRow := 12 // 2 (subquery) + 10 (values)
+		seen := make(map[sqKey]int)
+		for i := 0; i < scheduledQueriesQueryCount; i++ {
+			base := i * argsPerRow
+			key := sqKey{
+				teamID: scheduledQueriesArgs[base].(uint),
+				name:   scheduledQueriesArgs[base+1].(string),
+			}
+			seen[key] = i
+		}
+		if len(seen) < scheduledQueriesQueryCount {
+			var dedupedArgs []interface{}
+			dedupedCount := 0
+			for i := 0; i < scheduledQueriesQueryCount; i++ {
+				base := i * argsPerRow
+				key := sqKey{
+					teamID: scheduledQueriesArgs[base].(uint),
+					name:   scheduledQueriesArgs[base+1].(string),
+				}
+				if seen[key] == i { // keep only last occurrence
+					dedupedArgs = append(dedupedArgs, scheduledQueriesArgs[base:base+argsPerRow]...)
+					dedupedCount++
+				}
+			}
+			scheduledQueriesArgs = dedupedArgs
+			scheduledQueriesQueryCount = dedupedCount
+		}
+	}
+
+	// Deduplicate user packs stats by (pack_name, query_name) — last entry wins.
+	// PG's ON CONFLICT can't update the same row twice in a single INSERT.
+	if userPacksQueryCount > 1 {
+		type packStatKey struct {
+			pack, query string
+		}
+		argsPerRow := 12 // 2 (subquery) + 10 (values)
+		seen := make(map[packStatKey]int)
+		for i := 0; i < userPacksQueryCount; i++ {
+			base := i * argsPerRow
+			key := packStatKey{
+				pack:  userPacksArgs[base].(string),
+				query: userPacksArgs[base+1].(string),
+			}
+			seen[key] = i
+		}
+		if len(seen) < userPacksQueryCount {
+			var dedupedArgs []interface{}
+			dedupedCount := 0
+			for i := 0; i < userPacksQueryCount; i++ {
+				base := i * argsPerRow
+				key := packStatKey{
+					pack:  userPacksArgs[base].(string),
+					query: userPacksArgs[base+1].(string),
+				}
+				if seen[key] == i { // keep only last occurrence
+					dedupedArgs = append(dedupedArgs, userPacksArgs[base:base+argsPerRow]...)
+					dedupedCount++
+				}
+			}
+			userPacksArgs = dedupedArgs
+			userPacksQueryCount = dedupedCount
+		}
+	}
+
 	if scheduledQueriesQueryCount > 0 {
 		// This query will import stats for queries (new format).
-		values := strings.TrimSuffix(strings.Repeat("((SELECT q.id FROM queries q WHERE COALESCE(q.team_id, 0) = ? AND q.name = ?),?,?,?,?,?,?,?,?,?,?),", scheduledQueriesQueryCount), ",")
-		sql := fmt.Sprintf(dialect.InsertIgnoreInto()+` scheduled_query_stats (
+		// Uses INSERT...SELECT form so that rows where the query doesn't exist
+		// are naturally excluded (the SELECT returns 0 rows instead of NULL,
+		// which avoids NOT NULL violations on PG).
+		argsPerRow := 12 // 2 (subquery: teamID, name) + 10 (values)
+		var selectParts []string
+		var reorderedArgs []interface{}
+		for i := 0; i < scheduledQueriesQueryCount; i++ {
+			base := i * argsPerRow
+			selectParts = append(selectParts,
+				"SELECT q.id, ?,?,?,?,?,?,?,?,?,? FROM queries q WHERE COALESCE(q.team_id, 0) = ? AND q.name = ?")
+			// Reorder: value args first (host_id..wall_time), then subquery args (teamID, name)
+			reorderedArgs = append(reorderedArgs, scheduledQueriesArgs[base+2:base+argsPerRow]...)
+			reorderedArgs = append(reorderedArgs, scheduledQueriesArgs[base:base+2]...)
+		}
+		selectSQL := strings.Join(selectParts, " UNION ALL ")
+		sql := dialect.InsertIgnoreInto() + ` scheduled_query_stats (
 				scheduled_query_id,
 				host_id,
 				average_memory,
@@ -295,7 +380,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 				user_time,
 				wall_time
 			)
-			VALUES %s `+dialect.OnDuplicateKey("host_id,scheduled_query_id,query_type", `
+			` + selectSQL + ` ` + dialect.OnDuplicateKey("host_id,scheduled_query_id,query_type", `
 				scheduled_query_id = VALUES(scheduled_query_id),
 				host_id = VALUES(host_id),
 				average_memory = VALUES(average_memory),
@@ -306,9 +391,9 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 				output_size = VALUES(output_size),
 				system_time = VALUES(system_time),
 				user_time = VALUES(user_time),
-				wall_time = VALUES(wall_time)`)+`
-		`, values)
-		if _, err := db.ExecContext(ctx, sql, scheduledQueriesArgs...); err != nil {
+				wall_time = VALUES(wall_time)`) + `
+		`
+		if _, err := db.ExecContext(ctx, sql, reorderedArgs...); err != nil {
 			return ctxerr.Wrap(ctx, err, "insert query schedule stats")
 		}
 	}
@@ -2884,7 +2969,7 @@ func (ds *Datastore) LoadHostByOrbitNodeKey(ctx context.Context, nodeKey string)
       h.policy_updated_at,
       h.public_ip,
       h.orbit_node_key,
-      IF(hdep.host_id AND ISNULL(hdep.deleted_at), true, false) AS dep_assigned_to_fleet,
+      (hdep.host_id IS NOT NULL AND hdep.deleted_at IS NULL) AS dep_assigned_to_fleet,
       hd.encrypted as disk_encryption_enabled,
       COALESCE(hdek.decryptable, false) as encryption_key_available,
       t.name as team_name,
@@ -2975,7 +3060,7 @@ func (ds *Datastore) LoadHostByDeviceAuthToken(ctx context.Context, authToken st
       COALESCE(hd.percent_disk_space_available, 0) as percent_disk_space_available,
       COALESCE(hd.gigs_total_disk_space, 0) as gigs_total_disk_space,
       hd.encrypted as disk_encryption_enabled,
-      IF(hdep.host_id AND ISNULL(hdep.deleted_at), true, false) AS dep_assigned_to_fleet,
+      (hdep.host_id IS NOT NULL AND hdep.deleted_at IS NULL) AS dep_assigned_to_fleet,
       ` + hostHasIdentityCertSQL + ` as has_host_identity_cert
     FROM
       host_device_auth hda
@@ -3258,7 +3343,7 @@ SELECT
 	h.policy_updated_at,
 	h.refetch_requested,
 	h.refetch_critical_queries_until,
-	IF(hdep.host_id AND ISNULL(hdep.deleted_at), true, false) AS dep_assigned_to_fleet
+	(hdep.host_id IS NOT NULL AND hdep.deleted_at IS NULL) AS dep_assigned_to_fleet
 FROM
 	hosts h
 LEFT OUTER JOIN
@@ -3651,7 +3736,12 @@ func (ds *Datastore) ListPoliciesForHost(ctx context.Context, host *fleet.Host) 
 		WHERE pl.policy_id = p.id
 		AND pl.exclude = true
 	)
-	ORDER BY FIELD(response, 'fail', '', 'pass'), p.name`
+	ORDER BY CASE
+		WHEN pm.passes = false THEN 1
+		WHEN pm.passes IS NULL THEN 2
+		WHEN pm.passes = true THEN 3
+		ELSE 0
+	END, p.name`
 
 	var policies []*fleet.HostPolicy
 	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &policies, query, host.ID, host.ID, host.FleetPlatform(), host.ID, host.ID); err != nil {

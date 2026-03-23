@@ -2150,20 +2150,22 @@ func (ds *Datastore) MarkAllPendingAppleVPPAndInHouseInstallsAsFailed(ctx contex
 	// but those in host_vpp_software_installs could be Android as well.
 
 	clearVPPUpcomingActivitiesStmt := `
-DELETE ua FROM
-	upcoming_activities ua
-JOIN
-	host_vpp_software_installs hvsi ON hvsi.command_uuid = ua.execution_id
-WHERE ua.activity_type = ? AND hvsi.verification_failed_at IS NULL
-AND hvsi.verification_at IS NULL AND hvsi.platform != 'android'
+DELETE FROM upcoming_activities
+WHERE upcoming_activities.activity_type = ? AND EXISTS (
+	SELECT 1 FROM host_vpp_software_installs hvsi
+	WHERE hvsi.command_uuid = upcoming_activities.execution_id
+	AND hvsi.verification_failed_at IS NULL
+	AND hvsi.verification_at IS NULL AND hvsi.platform != 'android'
+)
 `
 
 	clearInHouseUpcomingActivitiesStmt := `
-DELETE ua FROM
-	upcoming_activities ua
-JOIN
-	host_in_house_software_installs hihs ON hihs.command_uuid = ua.execution_id
-WHERE ua.activity_type = ? AND hihs.verification_failed_at IS NULL AND hihs.verification_at IS NULL
+DELETE FROM upcoming_activities
+WHERE upcoming_activities.activity_type = ? AND EXISTS (
+	SELECT 1 FROM host_in_house_software_installs hihs
+	WHERE hihs.command_uuid = upcoming_activities.execution_id
+	AND hihs.verification_failed_at IS NULL AND hihs.verification_at IS NULL
+)
 `
 
 	installVPPFailStmt := `

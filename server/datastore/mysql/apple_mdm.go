@@ -213,8 +213,8 @@ INSERT INTO
 			return err
 		}
 		if ds.dialect.ReturningID() != "" {
-			// PostgreSQL: RETURNING id will return sql.ErrNoRows if no row was inserted
-			err := tx.QueryRowxContext(ctx, stmt+ds.dialect.ReturningID(),
+			// PostgreSQL: RETURNING profile_id (this table uses profile_id, not id)
+			err := tx.QueryRowxContext(ctx, stmt+" RETURNING profile_id",
 				profUUID, teamID, cp.Identifier, cp.Name, cp.Scope, cp.Mobileconfig, cp.Mobileconfig, cp.SecretsUpdatedAt, cp.Name, teamID, cp.Name,
 				teamID, cp.Name, teamID).Scan(&profileID)
 			if errors.Is(err, sql.ErrNoRows) {

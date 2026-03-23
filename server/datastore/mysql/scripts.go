@@ -78,8 +78,8 @@ INSERT INTO upcoming_activities
 VALUES
 	(?, ?, ?, ?, 'script', ?,
 		JSON_OBJECT(
-			'sync_request', ?,
-			'is_internal', ?,
+			'sync_request', CAST(? AS UNSIGNED),
+			'is_internal', CAST(? AS UNSIGNED),
 			'user', (SELECT JSON_OBJECT('name', name, 'email', email, 'gravatar_url', gravatar_url) FROM users WHERE id = ?)
 		)
 	)`
@@ -93,14 +93,24 @@ VALUES
 	)
 
 	execID := uuid.New().String()
+	// Convert booleans to int for JSON_OBJECT compatibility with PG's jsonb_build_object,
+	// which needs typed parameters. CAST(? AS UNSIGNED) → CAST($N AS integer) on PG.
+	syncRequestInt := 0
+	if request.SyncRequest {
+		syncRequestInt = 1
+	}
+	isInternalInt := 0
+	if isInternal {
+		isInternalInt = 1
+	}
 	activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insUAStmt,
 		request.HostID,
 		request.Priority(),
 		request.UserID,
 		request.PolicyID != nil, // fleet-initiated if request is via a policy failure
 		execID,
-		request.SyncRequest,
-		isInternal,
+		syncRequestInt,
+		isInternalInt,
 		request.UserID,
 	)
 	if err != nil {

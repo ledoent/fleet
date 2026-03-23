@@ -1282,12 +1282,12 @@ INSERT INTO upcoming_activities
 VALUES
 	(?, ?, ?, ?, 'software_install', ?,
 		JSON_OBJECT(
-			'self_service', ?,
+			'self_service', CAST(? AS UNSIGNED),
 			'installer_filename', ?,
 			'version', ?,
 			'software_title_name', ?,
 			'source', ?,
-			'with_retries', ?,
+			'with_retries', CAST(? AS UNSIGNED),
 			'user', (SELECT JSON_OBJECT('name', name, 'email', email, 'gravatar_url', gravatar_url) FROM users WHERE id = ?)
 		)
 	)`
@@ -1335,6 +1335,15 @@ VALUES
 	}
 	execID := uuid.NewString()
 
+	// Convert booleans to int for JSON_OBJECT compatibility with PG's jsonb_build_object.
+	selfServiceInt := 0
+	if opts.SelfService {
+		selfServiceInt = 1
+	}
+	withRetriesInt := 0
+	if opts.WithRetries {
+		withRetriesInt = 1
+	}
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertUAStmt,
 			hostID,
@@ -1342,12 +1351,12 @@ VALUES
 			userID,
 			opts.IsFleetInitiated(),
 			execID,
-			opts.SelfService,
+			selfServiceInt,
 			installerDetails.Filename,
 			installerDetails.Version,
 			installerDetails.TitleName,
 			installerDetails.Source,
-			opts.WithRetries,
+			withRetriesInt,
 			userID,
 		)
 		if err != nil {
@@ -1471,7 +1480,7 @@ VALUES
 			'software_title_name', ?,
 			'source', ?,
 			'user', (SELECT JSON_OBJECT('name', name, 'email', email, 'gravatar_url', gravatar_url) FROM users WHERE id = ?),
-			'self_service', ?
+			'self_service', CAST(? AS UNSIGNED)
 		)
 	)`
 
@@ -1512,6 +1521,10 @@ VALUES
 		userID = &ctxUser.ID
 	}
 
+	selfServiceInt := 0
+	if selfService {
+		selfServiceInt = 1
+	}
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertUAStmt,
 			hostID,
@@ -1522,7 +1535,7 @@ VALUES
 			installerDetails.TitleName,
 			installerDetails.Source,
 			userID,
-			selfService,
+			selfServiceInt,
 		)
 		if err != nil {
 			return err

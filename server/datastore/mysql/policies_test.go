@@ -1501,13 +1501,10 @@ func testPolicyQueriesForHost(t *testing.T, ds *Datastore) {
 	assert.Equal(t, "pass", policies[0].Response)
 
 	// Manually insert a global policy with null resolution.
-	res, err := ds.writer(context.Background()).ExecContext(
-		context.Background(),
+	id, err := ds.insertAndGetID(context.Background(), ds.writer(context.Background()),
 		`INSERT INTO policies (name, query, description, checksum) VALUES (?, ?, ?, ?)`,
 		q.Name+"2", q.Query, q.Description+"2", policyChecksum(nil, q.Name+"2"),
 	)
-	require.NoError(t, err)
-	id, err := res.LastInsertId()
 	require.NoError(t, err)
 	require.NoError(t,
 		ds.RecordPolicyQueryExecutions(context.Background(), host2, map[uint]*bool{uint(id): nil}, //nolint:gosec // dismiss G115
@@ -3054,9 +3051,8 @@ func testPolicyViolationDays(t *testing.T, ds *Datastore) {
 	}
 
 	createPolStmt := `INSERT INTO policies (name, query, description, author_id, platforms, created_at, updated_at, checksum) VALUES (?, ?, '', ?, ?, ?, ?, ?)`
-	res, err := ds.writer(ctx).ExecContext(ctx, createPolStmt, "test_pol", "select 1", user.ID, "", then, then, policyChecksum(nil, "test_pol"))
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), createPolStmt, "test_pol", "select 1", user.ID, "", then, then, policyChecksum(nil, "test_pol"))
 	require.NoError(t, err)
-	id, _ := res.LastInsertId()
 	pol, err := ds.Policy(ctx, uint(id)) //nolint:gosec // dismiss G115
 	require.NoError(t, err)
 
@@ -3159,9 +3155,8 @@ func testPolicyCleanupPolicyMembership(t *testing.T, ds *Datastore) {
 	pols := make([]*fleet.Policy, 3)
 	for i, dt := range []time.Time{jan2020, feb2020, mar2020} {
 		name := "p" + strconv.Itoa(i+1)
-		res, err := ds.writer(ctx).ExecContext(ctx, createPolStmt, name, "select 1", user.ID, "", dt, dt, policyChecksum(nil, name))
+		id, err := ds.insertAndGetID(ctx, ds.writer(ctx), createPolStmt, name, "select 1", user.ID, "", dt, dt, policyChecksum(nil, name))
 		require.NoError(t, err)
-		id, _ := res.LastInsertId()
 		pol, err := ds.Policy(ctx, uint(id)) //nolint:gosec // dismiss G115
 		require.NoError(t, err)
 		pols[i] = pol
@@ -6970,12 +6965,9 @@ func testPolicyModificationResetsAttemptNumber(t *testing.T, ds *Datastore) {
 	// Create script content
 	var scriptContentID int64
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		res, err := q.ExecContext(ctx, `INSERT INTO script_contents (md5_checksum, contents) VALUES (?, ?)`,
+		var err error
+		scriptContentID, err = insertAndGetIDTx(ctx, q, ds.dialect, `INSERT INTO script_contents (md5_checksum, contents) VALUES (?, ?)`,
 			"md5hash", "echo 'test'")
-		if err != nil {
-			return err
-		}
-		scriptContentID, err = res.LastInsertId()
 		return err
 	})
 
@@ -6991,24 +6983,18 @@ func testPolicyModificationResetsAttemptNumber(t *testing.T, ds *Datastore) {
 	// Create a software title and installer
 	titleID := int64(0)
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		res, err := q.ExecContext(ctx, `INSERT INTO software_titles (name, source) VALUES (?, ?)`, "Test App", "apps")
-		if err != nil {
-			return err
-		}
-		titleID, err = res.LastInsertId()
+		var err error
+		titleID, err = insertAndGetIDTx(ctx, q, ds.dialect, `INSERT INTO software_titles (name, source) VALUES (?, ?)`, "Test App", "apps")
 		return err
 	})
 
 	installerID := int64(0)
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		res, err := q.ExecContext(ctx, `
+		var err error
+		installerID, err = insertAndGetIDTx(ctx, q, ds.dialect, `
 			INSERT INTO software_installers (team_id, global_or_team_id, title_id, storage_id, filename, extension, version, install_script_content_id, uninstall_script_content_id, platform, package_ids)
 			VALUES (?, ?, ?, 'storage', 'test.pkg', 'pkg', '1.0', ?, ?, 'darwin', '')
 		`, team.ID, team.ID, titleID, scriptContentID, scriptContentID)
-		if err != nil {
-			return err
-		}
-		installerID, err = res.LastInsertId()
 		return err
 	})
 
@@ -7365,11 +7351,11 @@ func testApplyPolicySpecsNeedsFullMembershipCleanupFlag(t *testing.T, ds *Datast
 		{Name: "flag test policy", Query: "select 2;", Platform: "", Type: fleet.PolicyTypeDynamic},
 	}))
 
-	// The flag must be 0 after successful completion (set inside TX, cleared after cleanup).
-	var flagVal int
+	// The flag must be false after successful completion (set inside TX, cleared after cleanup).
+	var flagVal bool
 	require.NoError(t, ds.writer(ctx).Get(&flagVal,
 		`SELECT needs_full_membership_cleanup FROM policies WHERE id = ?`, pol.ID))
-	assert.Zero(t, flagVal, "needs_full_membership_cleanup must be cleared after successful cleanup")
+	assert.False(t, flagVal, "needs_full_membership_cleanup must be cleared after successful cleanup")
 
 	// All memberships must have been removed.
 	require.NoError(t, ds.writer(ctx).Get(&count, `SELECT COUNT(*) FROM policy_membership WHERE policy_id = ?`, pol.ID))
@@ -7443,7 +7429,7 @@ func testCleanupPolicyMembershipCrashRecovery(t *testing.T, ds *Datastore) {
 
 		// Simulate: TX committed with the flag set, but cleanup never ran (crash/error).
 		_, err = ds.writer(ctx).ExecContext(ctx,
-			`UPDATE policies SET needs_full_membership_cleanup = 1 WHERE id = ?`, pol.ID)
+			`UPDATE policies SET needs_full_membership_cleanup = true WHERE id = ?`, pol.ID)
 		require.NoError(t, err)
 
 		// Retry GitOps with the same spec. ApplyPolicySpecs must detect the flag and
@@ -7453,10 +7439,10 @@ func testCleanupPolicyMembershipCrashRecovery(t *testing.T, ds *Datastore) {
 		}))
 
 		// Flag must be cleared by the retry.
-		var flagVal int
+		var flagVal bool
 		require.NoError(t, ds.writer(ctx).Get(&flagVal,
 			`SELECT needs_full_membership_cleanup FROM policies WHERE id = ?`, pol.ID))
-		assert.Zero(t, flagVal, "flag must be cleared by the GitOps retry")
+		assert.False(t, flagVal, "flag must be cleared by the GitOps retry")
 
 		// All memberships must be gone.
 		require.NoError(t, ds.writer(ctx).Get(&count, `SELECT COUNT(*) FROM policy_membership WHERE policy_id = ?`, pol.ID))
@@ -7475,17 +7461,17 @@ func testCleanupPolicyMembershipCrashRecovery(t *testing.T, ds *Datastore) {
 
 		// Simulate interrupted cleanup: set the flag directly, leave membership rows in place.
 		_, err := ds.writer(ctx).ExecContext(ctx,
-			`UPDATE policies SET needs_full_membership_cleanup = 1 WHERE id = ?`, pol.ID)
+			`UPDATE policies SET needs_full_membership_cleanup = true WHERE id = ?`, pol.ID)
 		require.NoError(t, err)
 
 		// CleanupPolicyMembership (cron) should pick up the flag and run the full cleanup.
 		require.NoError(t, ds.CleanupPolicyMembership(ctx, time.Now()))
 
 		// Flag must be cleared.
-		var flagVal int
+		var flagVal bool
 		require.NoError(t, ds.writer(ctx).Get(&flagVal,
 			`SELECT needs_full_membership_cleanup FROM policies WHERE id = ?`, pol.ID))
-		assert.Zero(t, flagVal, "flag must be cleared by CleanupPolicyMembership")
+		assert.False(t, flagVal, "flag must be cleared by CleanupPolicyMembership")
 
 		// All memberships must be removed.
 		require.NoError(t, ds.writer(ctx).Get(&count, `SELECT COUNT(*) FROM policy_membership WHERE policy_id = ?`, pol.ID))
@@ -7506,17 +7492,17 @@ func testCleanupPolicyMembershipCrashRecovery(t *testing.T, ds *Datastore) {
 
 		// Set the flag to simulate the crash window between cleanup and flag clear.
 		_, err := ds.writer(ctx).ExecContext(ctx,
-			`UPDATE policies SET needs_full_membership_cleanup = 1 WHERE id = ?`, pol.ID)
+			`UPDATE policies SET needs_full_membership_cleanup = true WHERE id = ?`, pol.ID)
 		require.NoError(t, err)
 
 		// CleanupPolicyMembership (cron) should handle this without errors.
 		require.NoError(t, ds.CleanupPolicyMembership(ctx, time.Now()))
 
 		// Flag must be cleared.
-		var flagVal int
+		var flagVal bool
 		require.NoError(t, ds.writer(ctx).Get(&flagVal,
 			`SELECT needs_full_membership_cleanup FROM policies WHERE id = ?`, pol.ID))
-		assert.Zero(t, flagVal, "flag must be cleared even when no membership rows remain")
+		assert.False(t, flagVal, "flag must be cleared even when no membership rows remain")
 	})
 }
 

@@ -2479,9 +2479,11 @@ func (ds *Datastore) DeleteOutOfDateVulnerabilities(ctx context.Context, source 
 
 func (ds *Datastore) DeleteOrphanedSoftwareVulnerabilities(ctx context.Context) error {
 	if _, err := ds.writer(ctx).ExecContext(ctx, `
-		DELETE sc FROM software_cve sc
-		LEFT JOIN host_software hs ON hs.software_id = sc.software_id
-		WHERE hs.host_id IS NULL
+		DELETE FROM software_cve
+		WHERE NOT EXISTS (
+			SELECT 1 FROM host_software hs
+			WHERE hs.software_id = software_cve.software_id
+		)
 	`); err != nil {
 		return ctxerr.Wrap(ctx, err, "deleting orphaned software vulnerabilities")
 	}
@@ -2846,12 +2848,12 @@ func (ds *Datastore) CleanupSoftwareTitles(ctx context.Context) error {
 		// Re-check orphan status on the writer to avoid deleting a title that an IT admin just linked
 		// (e.g., added a software installer) between the reader SELECT and this DELETE.
 		deleteOrphanedSoftwareTitlesStmt = `
-		DELETE st FROM software_titles st
-		LEFT JOIN software s ON st.id = s.title_id
-		LEFT JOIN software_installers si ON st.id = si.title_id
-		LEFT JOIN in_house_apps iha ON st.id = iha.title_id
-		LEFT JOIN vpp_apps vap ON st.id = vap.title_id
-		WHERE st.id IN (?) AND s.title_id IS NULL AND si.title_id IS NULL AND iha.title_id IS NULL AND vap.title_id IS NULL`
+		DELETE FROM software_titles
+		WHERE id IN (?)
+		AND NOT EXISTS (SELECT 1 FROM software s WHERE s.title_id = software_titles.id)
+		AND NOT EXISTS (SELECT 1 FROM software_installers si WHERE si.title_id = software_titles.id)
+		AND NOT EXISTS (SELECT 1 FROM in_house_apps iha WHERE iha.title_id = software_titles.id)
+		AND NOT EXISTS (SELECT 1 FROM vpp_apps vap WHERE vap.title_id = software_titles.id)`
 	)
 
 	var lastID uint

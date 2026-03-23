@@ -29,6 +29,16 @@ func (postgresDialect) ReplaceInto() string { return "INSERT INTO" }
 // valuesPattern matches MySQL VALUES(`col`) or VALUES(col) in ON DUPLICATE KEY UPDATE clauses.
 var valuesPattern = regexp.MustCompile("VALUES\\(`?([^`)]+)`?\\)")
 
+// lastInsertIDPattern matches id=LAST_INSERT_ID(id) assignments in ON DUPLICATE KEY UPDATE clauses.
+// This MySQL trick returns the existing row's ID on conflict; PG uses RETURNING id instead.
+var lastInsertIDPattern = regexp.MustCompile(`(?:,\s*)?id\s*=\s*LAST_INSERT_ID\(id\)(?:\s*,)?`)
+
+// stripLastInsertID removes id=LAST_INSERT_ID(id) from an ON DUPLICATE KEY UPDATE clause.
+func stripLastInsertID(clause string) string {
+	result := lastInsertIDPattern.ReplaceAllString(clause, "")
+	return strings.Trim(result, ", ")
+}
+
 // translateValuesToExcluded rewrites MySQL VALUES(col) references to PostgreSQL EXCLUDED.col.
 //
 //	VALUES(name)    → EXCLUDED.name
@@ -39,8 +49,18 @@ func translateValuesToExcluded(clause string) string {
 
 // OnDuplicateKey returns: ON CONFLICT (<conflictTarget>) DO UPDATE SET <translated>
 // The updateClause uses MySQL syntax; VALUES(col) is translated to EXCLUDED.col.
+// If the clause contains id=LAST_INSERT_ID(id), it is stripped (PG uses RETURNING id).
+// If stripping leaves an empty clause, a no-op update on the first conflict column is used
+// so that RETURNING id still works.
 func (postgresDialect) OnDuplicateKey(conflictTarget, updateClause string) string {
-	return "ON CONFLICT (" + conflictTarget + ") DO UPDATE SET " + translateValuesToExcluded(updateClause)
+	cleaned := stripLastInsertID(updateClause)
+	if strings.TrimSpace(cleaned) == "" {
+		// No-op update: set the first conflict column to itself so RETURNING id works.
+		firstCol := strings.SplitN(conflictTarget, ",", 2)[0]
+		firstCol = strings.TrimSpace(firstCol)
+		return "ON CONFLICT (" + conflictTarget + ") DO UPDATE SET " + firstCol + " = EXCLUDED." + firstCol
+	}
+	return "ON CONFLICT (" + conflictTarget + ") DO UPDATE SET " + translateValuesToExcluded(cleaned)
 }
 
 // OnConflictDoNothing returns: ON CONFLICT (<conflictTarget>) DO NOTHING
