@@ -91,6 +91,8 @@ func rebindQuery(query string) string {
 	query = rewriteConcat(query)
 	// ISNULL(expr) → (expr IS NULL) — MySQL's ISNULL returns 1/0; PG doesn't have it.
 	query = rewriteISNULL(query)
+	// IFNULL(a, b) → COALESCE(a, b) — MySQL's IFNULL is PG's COALESCE
+	query = strings.ReplaceAll(query, "IFNULL(", "COALESCE(")
 	// UUID_TO_BIN(UUID(), true) → gen_random_uuid() (must come before UUID() replacement)
 	query = regexp.MustCompile(`UUID_TO_BIN\(UUID\(\),\s*true\)`).ReplaceAllString(query, "gen_random_uuid()")
 	query = regexp.MustCompile(`UUID_TO_BIN\(uuid\(\),\s*true\)`).ReplaceAllString(query, "gen_random_uuid()")
@@ -115,8 +117,11 @@ func rebindQuery(query string) string {
 	query = regexp.MustCompile(`TIMEDIFF\(([^,]+),\s*([^)]+)\)`).ReplaceAllString(query, "($1 - $2)")
 	// TIME_TO_SEC(interval) → EXTRACT(EPOCH FROM interval)
 	query = regexp.MustCompile(`TIME_TO_SEC\(([^)]+)\)`).ReplaceAllString(query, "EXTRACT(EPOCH FROM $1)")
-	// ON DUPLICATE KEY UPDATE → handled by dialect helpers (OnDuplicateKey method).
-	// Raw occurrences in production code need to be migrated to use dialect helpers.
+	// ON DUPLICATE KEY UPDATE → rewrite to ON CONFLICT DO UPDATE SET for raw SQL
+	// that doesn't go through dialect helpers.
+	if strings.Contains(query, "ON DUPLICATE KEY UPDATE") {
+		query = rewriteOnDuplicateKey(query)
+	}
 	// FROM DUAL → removed (PG doesn't need FROM DUAL for SELECT without a table)
 	query = regexp.MustCompile(`(?i)\s+FROM\s+DUAL\b`).ReplaceAllString(query, "")
 	// STRAIGHT_JOIN → JOIN (MySQL optimizer hint, not supported by PG)
@@ -178,8 +183,10 @@ func rebindQuery(query string) string {
 		"hsi2.removed", "hsi2.canceled", "hsi.removed", "hsi.canceled",
 		"abt.terms_expired", "n.token_update_tally", "ne.token_update_tally",
 		"n.enrolled", "q.active", "cve_meta.published",
-		"h.distributed_interval", // not boolean but used in comparisons
-		"hrkp.deleted",
+		"hrkp.deleted", "rkp.deleted",
+		// Unqualified boolean columns in SET/WHERE clauses
+		"deleted", "canceled", "refetch_requested", "expired", "removed",
+		"host_vpp_software_installs.canceled",
 	} {
 		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
 		query = strings.ReplaceAll(query, col+" = 0", col+" = false")
@@ -219,6 +226,13 @@ func rebindQuery(query string) string {
 		re := regexp.MustCompile(`INTERVAL\s+(\d+)\s+` + unit)
 		query = re.ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
 	}
+	// Resolve ambiguous column references in ON CONFLICT DO UPDATE SET clauses.
+	// PG considers bare column names ambiguous between the target table and EXCLUDED.
+	// Qualify them with the target table name extracted from INSERT INTO <table>.
+	if strings.Contains(query, "ON CONFLICT") && strings.Contains(query, "EXCLUDED.") {
+		query = resolveOnConflictAmbiguity(query)
+	}
+
 	if !strings.Contains(query, "?") {
 		if hasInsertIgnore {
 			query = strings.TrimRight(query, " \t\n\r;") + " ON CONFLICT DO NOTHING"
@@ -728,6 +742,96 @@ func rewriteField(query string) string {
 	return query[:idx] + b.String() + query[i:]
 }
 
+// resolveOnConflictAmbiguity fixes ambiguous column references in ON CONFLICT DO UPDATE SET.
+// In PG, bare column names in SET value expressions are ambiguous between the target table
+// and EXCLUDED. This function qualifies bare column references with the target table name.
+func resolveOnConflictAmbiguity(query string) string {
+	// Extract target table name from INSERT INTO <table>
+	insertRe := regexp.MustCompile(`(?i)INSERT\s+INTO\s+"?(\w+)"?`)
+	m := insertRe.FindStringSubmatch(query)
+	if m == nil {
+		return query
+	}
+	tableName := m[1]
+
+	// Find the ON CONFLICT DO UPDATE SET portion
+	upperQuery := strings.ToUpper(query)
+	setMarker := "DO UPDATE SET"
+	setIdx := strings.Index(upperQuery, setMarker)
+	if setIdx == -1 {
+		return query
+	}
+	setStart := setIdx + len(setMarker)
+	setClause := query[setStart:]
+
+	// Collect ALL column names that appear in the SET clause (both as targets and in EXCLUDED).
+	// Any of these could be ambiguous when used bare in expressions.
+	excludedRe := regexp.MustCompile(`EXCLUDED\.(\w+)`)
+	matches := excludedRe.FindAllStringSubmatch(setClause, -1)
+	// Also find SET targets (col = ...) — these columns might appear bare in other expressions
+	setTargetRe := regexp.MustCompile(`(?:^|,)\s*(\w+)\s*=`)
+	targetMatches := setTargetRe.FindAllStringSubmatch(setClause, -1)
+	cols := make(map[string]bool)
+	for _, m := range matches {
+		cols[m[1]] = true
+	}
+	for _, m := range targetMatches {
+		cols[m[1]] = true
+	}
+	if len(cols) == 0 {
+		return query
+	}
+
+	// For each ambiguous column, qualify bare occurrences with the table name.
+	// We need to avoid qualifying:
+	// 1. References already qualified (preceded by '.')
+	// 2. The SET target on the left side of '='
+	// 3. The column name in EXCLUDED.col
+	for col := range cols {
+		bareRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(col) + `\b`)
+		var result strings.Builder
+		remaining := setClause
+		for {
+			loc := bareRe.FindStringIndex(remaining)
+			if loc == nil {
+				result.WriteString(remaining)
+				break
+			}
+			result.WriteString(remaining[:loc[0]])
+			matched := remaining[loc[0]:loc[1]]
+
+			// Check if preceded by dot (already qualified: EXCLUDED.col or table.col)
+			shouldQualify := true
+			if loc[0] > 0 && remaining[loc[0]-1] == '.' {
+				shouldQualify = false
+			}
+
+			// Check if it's a SET target: preceded by comma+whitespace, SET, or start
+			if shouldQualify {
+				before := strings.TrimRight(remaining[:loc[0]], " \t\n\r")
+				if len(before) == 0 {
+					shouldQualify = false // first SET target
+				} else {
+					lastChar := before[len(before)-1]
+					if lastChar == ',' {
+						shouldQualify = false // after comma = new SET target
+					}
+				}
+			}
+
+			if shouldQualify {
+				result.WriteString(`"` + tableName + `".` + matched)
+			} else {
+				result.WriteString(matched)
+			}
+			remaining = remaining[loc[1]:]
+		}
+		setClause = result.String()
+	}
+
+	return query[:setStart] + setClause
+}
+
 // rewriteHex rewrites MySQL HEX(expr) → PG encode(expr, 'hex')
 func rewriteHex(query string) string {
 	// Only match standalone HEX( not UNHEX(
@@ -834,20 +938,49 @@ func splitTopLevel(s string, delim byte) []string {
 
 // rewriteOnDuplicateKey rewrites MySQL ON DUPLICATE KEY UPDATE → PG ON CONFLICT DO UPDATE SET
 // This handles cases not going through the dialect helper.
+// knownPrimaryKeys maps table names to their primary key columns for ON CONFLICT resolution.
+var knownPrimaryKeys = map[string]string{
+	"host_dep_assignments":          "host_id",
+	"host_mdm_idp_accounts":         "host_uuid",
+	"host_mdm_apple_declarations":   "host_uuid,declaration_uuid",
+	"mdm_declaration_labels":        "apple_declaration_uuid,label_name",
+	"scim_user_group":               "scim_user_id,group_id",
+	"host_munki_issues":             "host_id,munki_issue_id",
+	"host_munki_info":               "host_id",
+	"cron_stats":                    "id",
+	"nano_command_results":          "id,command_uuid",
+	"host_mdm_apple_bootstrap_packages": "host_uuid",
+}
+
 func rewriteOnDuplicateKey(query string) string {
+	upperQuery := strings.ToUpper(query)
 	const marker = "ON DUPLICATE KEY UPDATE"
-	idx := strings.Index(strings.ToUpper(query), marker)
+	idx := strings.Index(upperQuery, marker)
 	if idx == -1 {
 		return query
 	}
 	updateClause := strings.TrimSpace(query[idx+len(marker):])
 	// Rewrite VALUES(col) → EXCLUDED.col
-	re := regexp.MustCompile(`VALUES\((\w+)\)`)
+	re := regexp.MustCompile(`(?i)VALUES\(` + "`?" + `(\w+)` + "`?" + `\)`)
 	updateClause = re.ReplaceAllString(updateClause, "EXCLUDED.$1")
-	// Try to infer conflict target from the INSERT columns
-	// Look for INSERT INTO table (col1, col2, ...) or just use DO UPDATE SET
-	// For simplicity, use ON CONFLICT DO UPDATE SET (without explicit target = needs unique index)
-	query = query[:idx] + "ON CONFLICT DO UPDATE SET " + updateClause
+
+	// Extract table name from INSERT INTO <table>
+	tableRe := regexp.MustCompile(`(?i)INSERT\s+INTO\s+` + "`?" + `(\w+)` + "`?")
+	m := tableRe.FindStringSubmatch(query)
+	conflictTarget := ""
+	if m != nil {
+		tableName := strings.ToLower(m[1])
+		if pk, ok := knownPrimaryKeys[tableName]; ok {
+			conflictTarget = pk
+		}
+	}
+
+	if conflictTarget != "" {
+		query = query[:idx] + "ON CONFLICT (" + conflictTarget + ") DO UPDATE SET " + updateClause
+	} else {
+		// Fallback: no conflict target — PG will error but at least the syntax is close
+		query = query[:idx] + "ON CONFLICT DO UPDATE SET " + updateClause
+	}
 	return query
 }
 

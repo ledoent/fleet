@@ -202,7 +202,7 @@ func (ds *Datastore) ApplyLabelSpecsWithAuthor(ctx context.Context, specs []*fle
 			author_id,
 			team_id
 		) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ? )
-		` + ds.dialect.OnDuplicateKey("id", `
+		` + ds.dialect.OnDuplicateKey("name", `
 			name = VALUES(name),
 			description = VALUES(description),
 			query = VALUES(query),

@@ -7326,7 +7326,7 @@ func (ds *Datastore) SetHostsRecoveryLockPasswords(ctx context.Context, password
 			status = VALUES(status),
 			operation_type = VALUES(operation_type),
 			error_message = NULL,
-			deleted = 0
+			deleted = FALSE
 	`)
 
 	placeholders := strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?),", len(passwords)), ",")
