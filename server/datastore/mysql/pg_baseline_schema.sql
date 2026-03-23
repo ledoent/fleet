@@ -32,6 +32,26 @@ CREATE TABLE IF NOT EXISTS "activities" (
   PRIMARY KEY ("id")
 );
 
+CREATE TABLE IF NOT EXISTS "activity_past" (
+  "id" int  NOT NULL GENERATED ALWAYS AS IDENTITY,
+  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "user_id" int  DEFAULT NULL,
+  "user_name" varchar(255) DEFAULT NULL,
+  "activity_type" varchar(255) NOT NULL,
+  "details" jsonb DEFAULT NULL,
+  "streamed" boolean NOT NULL DEFAULT FALSE,
+  "user_email" varchar(255) NOT NULL DEFAULT '',
+  "fleet_initiated" boolean NOT NULL DEFAULT FALSE,
+  "host_only" boolean NOT NULL DEFAULT FALSE,
+  PRIMARY KEY ("id")
+);
+
+CREATE TABLE IF NOT EXISTS "activity_host_past" (
+  "host_id" int  NOT NULL,
+  "activity_id" int  NOT NULL,
+  PRIMARY KEY ("host_id","activity_id")
+);
+
 CREATE TABLE IF NOT EXISTS "aggregated_stats" (
   "id" bigint  NOT NULL,
   "type" varchar(255) NOT NULL,
@@ -1098,11 +1118,9 @@ CREATE TABLE IF NOT EXISTS "mdm_android_configuration_profiles" (
   "team_id" int  NOT NULL DEFAULT '0',
   "name" varchar(255) NOT NULL,
   "raw_json" jsonb NOT NULL,
-  "GENERATED ALWAYS AS IDENTITY" bigint GENERATED ALWAYS AS IDENTITY,
   "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "uploaded_at" timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY ("profile_uuid"),
-  CONSTRAINT UNIQUE (),
   CONSTRAINT "idx_mdm_android_configuration_profiles_team_id_name" UNIQUE ("team_id","name")
 );
 
@@ -1150,14 +1168,12 @@ CREATE TABLE IF NOT EXISTS "mdm_apple_declarations" (
   "raw_json" text NOT NULL,
   "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "uploaded_at" timestamp NULL DEFAULT NULL,
-  "GENERATED ALWAYS AS IDENTITY" bigint GENERATED ALWAYS AS IDENTITY,
   "secrets_updated_at" timestamp DEFAULT NULL,
   "token" bytea,
   "scope" text NOT NULL DEFAULT 'System',
   PRIMARY KEY ("declaration_uuid"),
   CONSTRAINT "idx_mdm_apple_declaration_team_identifier" UNIQUE ("team_id","identifier"),
-  CONSTRAINT "idx_mdm_apple_declaration_team_name" UNIQUE ("team_id","name"),
-  CONSTRAINT UNIQUE ()
+  CONSTRAINT "idx_mdm_apple_declaration_team_name" UNIQUE ("team_id","name")
 );
 
 CREATE TABLE IF NOT EXISTS "mdm_apple_declarative_requests" (
@@ -1309,12 +1325,10 @@ CREATE TABLE IF NOT EXISTS "mdm_windows_configuration_profiles" (
   "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "uploaded_at" timestamp NULL DEFAULT NULL,
   "profile_uuid" varchar(37) NOT NULL DEFAULT '',
-  "GENERATED ALWAYS AS IDENTITY" bigint GENERATED ALWAYS AS IDENTITY,
   "checksum" bytea,
   "secrets_updated_at" timestamp DEFAULT NULL,
   PRIMARY KEY ("profile_uuid"),
-  CONSTRAINT "idx_mdm_windows_configuration_profiles_team_id_name" UNIQUE ("team_id","name"),
-  CONSTRAINT UNIQUE ()
+  CONSTRAINT "idx_mdm_windows_configuration_profiles_team_id_name" UNIQUE ("team_id","name")
 );
 
 CREATE TABLE IF NOT EXISTS "mdm_windows_enrollments" (
@@ -1573,9 +1587,9 @@ CREATE TABLE IF NOT EXISTS "operating_system_version_vulnerabilities" (
   "resolved_in_version" varchar(255) DEFAULT NULL,
   "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ,
-  PRIMARY KEY ("id"),
-  CONSTRAINT "idx_os_version_vulnerabilities_unq_os_version_team_cve" UNIQUE ((COALESCE(cast("team_id" as signed),-(1))),"os_version_id","cve")
+  PRIMARY KEY ("id")
 );
+CREATE UNIQUE INDEX IF NOT EXISTS "idx_os_version_vulnerabilities_unq_os_version_team_cve" ON "operating_system_version_vulnerabilities" ((COALESCE("team_id",-1)),"os_version_id","cve");
 
 CREATE TABLE IF NOT EXISTS "operating_system_vulnerabilities" (
   "id" int  NOT NULL GENERATED ALWAYS AS IDENTITY,
@@ -1797,15 +1811,15 @@ CREATE TABLE IF NOT EXISTS "scheduled_queries" (
 CREATE TABLE IF NOT EXISTS "scheduled_query_stats" (
   "host_id" int  NOT NULL,
   "scheduled_query_id" int  NOT NULL,
-  "average_memory" bigint  NOT NULL,
+  "average_memory" bigint  NOT NULL DEFAULT 0,
   "denylisted" boolean DEFAULT NULL,
-  "executions" bigint  NOT NULL,
+  "executions" bigint  NOT NULL DEFAULT 0,
   "schedule_interval" int DEFAULT NULL,
   "last_executed" timestamp NULL DEFAULT NULL,
-  "output_size" bigint  NOT NULL,
-  "system_time" bigint  NOT NULL,
-  "user_time" bigint  NOT NULL,
-  "wall_time" bigint  NOT NULL,
+  "output_size" bigint  NOT NULL DEFAULT 0,
+  "system_time" bigint  NOT NULL DEFAULT 0,
+  "user_time" bigint  NOT NULL DEFAULT 0,
+  "wall_time" bigint  NOT NULL DEFAULT 0,
   "query_type" smallint NOT NULL DEFAULT '0',
   PRIMARY KEY ("host_id","scheduled_query_id","query_type")
 );
@@ -2055,6 +2069,7 @@ CREATE TABLE IF NOT EXISTS "software_installers" (
   "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ,
   "fleet_maintained_app_id" int  DEFAULT NULL,
   "install_during_setup" boolean NOT NULL DEFAULT FALSE,
+  "is_active" boolean NOT NULL DEFAULT TRUE,
   "upgrade_code" varchar(48) NOT NULL DEFAULT '',
   PRIMARY KEY ("id"),
   CONSTRAINT "idx_software_installers_team_id_title_id" UNIQUE ("global_or_team_id","title_id")
@@ -3129,68 +3144,185 @@ INSERT INTO migration_status_data (version_id, is_applied) VALUES (2021033013031
 INSERT INTO migration_status_data (version_id, is_applied) VALUES (20210806135609, true);
 INSERT INTO migration_status_data (version_id, is_applied) VALUES (20210819120215, true);
 INSERT INTO migration_status_data (version_id, is_applied) VALUES (20230525175650, true);
--- Manual fixes for 12 tables the converter can't handle
+-- Manual fixes for tables the converter can't handle
 DROP TABLE IF EXISTS "abm_tokens" CASCADE;
 CREATE TABLE "abm_tokens" (
   "id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   "organization_name" varchar(255) NOT NULL,
-  "token_encrypted" bytea NOT NULL,
-  "macos_default_team_id" integer, "ios_default_team_id" integer, "ipados_default_team_id" integer,
+  "apple_id" varchar(255) NOT NULL,
   "terms_expired" boolean NOT NULL DEFAULT FALSE,
-  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT "abm_tokens_idx_abm_tokens_organization_name" UNIQUE ("organization_name"));
+  "renew_at" timestamp NOT NULL,
+  "token" bytea NOT NULL,
+  "macos_default_team_id" integer DEFAULT NULL,
+  "ios_default_team_id" integer DEFAULT NULL,
+  "ipados_default_team_id" integer DEFAULT NULL,
+  "created_at" timestamp DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" timestamp DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "idx_abm_tokens_organization_name" UNIQUE ("organization_name")
+);
 
 DROP TABLE IF EXISTS "carve_metadata" CASCADE;
-CREATE TABLE "carve_metadata" ("id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  "host_id" integer NOT NULL, "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "name" varchar(255) DEFAULT '', "block_count" integer NOT NULL DEFAULT 0,
-  "block_size" integer NOT NULL DEFAULT 0, "carve_size" bigint NOT NULL DEFAULT 0,
-  "carve_id" varchar(255) NOT NULL, "request_id" varchar(255) NOT NULL,
-  "session_id" varchar(255) NOT NULL, "expired" boolean DEFAULT FALSE,
-  "max_block" integer NOT NULL DEFAULT -1, "error" text);
+CREATE TABLE "carve_metadata" (
+  "id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  "host_id" integer NOT NULL,
+  "created_at" timestamp DEFAULT CURRENT_TIMESTAMP,
+  "name" varchar(255) DEFAULT NULL,
+  "block_count" integer NOT NULL,
+  "block_size" integer NOT NULL,
+  "carve_size" bigint NOT NULL,
+  "carve_id" varchar(64) NOT NULL,
+  "request_id" varchar(64) NOT NULL,
+  "session_id" varchar(255) NOT NULL,
+  "expired" smallint DEFAULT 0,
+  "max_block" integer DEFAULT -1,
+  "error" text,
+  CONSTRAINT "idx_session_id" UNIQUE ("session_id"),
+  CONSTRAINT "idx_name" UNIQUE ("name")
+);
 
 DROP TABLE IF EXISTS "host_mdm_apple_bootstrap_packages" CASCADE;
-CREATE TABLE "host_mdm_apple_bootstrap_packages" ("host_uuid" varchar(255) NOT NULL PRIMARY KEY,
-  "command_uuid" varchar(255), "skipped" boolean DEFAULT FALSE);
+CREATE TABLE "host_mdm_apple_bootstrap_packages" (
+  "host_uuid" varchar(127) NOT NULL PRIMARY KEY,
+  "command_uuid" varchar(127) DEFAULT NULL,
+  "skipped" boolean NOT NULL DEFAULT FALSE,
+  CONSTRAINT "ck_skipped_or_commanduuid" CHECK (("skipped" = FALSE) = ("command_uuid" IS NOT NULL))
+);
 
 DROP TABLE IF EXISTS "host_mdm_windows_profiles" CASCADE;
-CREATE TABLE "host_mdm_windows_profiles" ("host_uuid" varchar(255) NOT NULL, "profile_uuid" varchar(37) NOT NULL,
-  "profile_name" varchar(255) NOT NULL DEFAULT '', "status" text, "operation_type" text,
-  "detail" text NOT NULL DEFAULT '', "command_uuid" varchar(255) NOT NULL DEFAULT '',
-  "retries" smallint NOT NULL DEFAULT 0, PRIMARY KEY ("host_uuid","profile_uuid"));
+CREATE TABLE "host_mdm_windows_profiles" (
+  "host_uuid" varchar(255) NOT NULL,
+  "status" varchar(20) DEFAULT NULL,
+  "operation_type" varchar(20) DEFAULT NULL,
+  "detail" text,
+  "command_uuid" varchar(127) NOT NULL,
+  "profile_name" varchar(255) NOT NULL DEFAULT '',
+  "retries" smallint NOT NULL DEFAULT 0,
+  "profile_uuid" varchar(37) NOT NULL DEFAULT '',
+  "checksum" bytea NOT NULL DEFAULT '\x00000000000000000000000000000000',
+  "secrets_updated_at" timestamp DEFAULT NULL,
+  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY ("host_uuid","profile_uuid")
+);
 
 DROP TABLE IF EXISTS "mdm_android_configuration_profiles" CASCADE;
-CREATE TABLE "mdm_android_configuration_profiles" ("name" varchar(255) NOT NULL, "team_id" integer,
-  "raw_json" text NOT NULL, "profile_uuid" varchar(37) NOT NULL DEFAULT '' PRIMARY KEY,
-  "uploaded_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, "secrets_updated_at" timestamp, "token" bytea);
+CREATE TABLE "mdm_android_configuration_profiles" (
+  "profile_uuid" varchar(37) NOT NULL DEFAULT '' PRIMARY KEY,
+  "team_id" integer NOT NULL DEFAULT 0,
+  "name" varchar(255) NOT NULL,
+  "raw_json" jsonb NOT NULL,
+  "auto_increment" bigint GENERATED ALWAYS AS IDENTITY,
+  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "uploaded_at" timestamp DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "idx_mdm_android_auto_increment" UNIQUE ("auto_increment"),
+  CONSTRAINT "idx_mdm_android_configuration_profiles_team_id_name" UNIQUE ("team_id","name")
+);
 
 DROP TABLE IF EXISTS "mdm_apple_declarations" CASCADE;
-CREATE TABLE "mdm_apple_declarations" ("declaration_uuid" varchar(37) NOT NULL PRIMARY KEY,
-  "team_id" integer, "identifier" varchar(256) NOT NULL DEFAULT '', "name" varchar(256) NOT NULL DEFAULT '',
-  "raw_json" text NOT NULL, "checksum" bytea NOT NULL,
-  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, "uploaded_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE "mdm_apple_declarations" (
+  "declaration_uuid" varchar(37) NOT NULL DEFAULT '' PRIMARY KEY,
+  "team_id" integer NOT NULL DEFAULT 0,
+  "identifier" varchar(255) NOT NULL,
+  "name" varchar(255) NOT NULL,
+  "raw_json" text NOT NULL,
+  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "uploaded_at" timestamp DEFAULT NULL,
+  "auto_increment" bigint GENERATED ALWAYS AS IDENTITY,
+  "secrets_updated_at" timestamp DEFAULT NULL,
+  "token" bytea,
+  "scope" text NOT NULL DEFAULT 'System',
+  CONSTRAINT "idx_mdm_apple_declaration_team_identifier" UNIQUE ("team_id","identifier"),
+  CONSTRAINT "idx_mdm_apple_declaration_team_name" UNIQUE ("team_id","name"),
+  CONSTRAINT "idx_mdm_apple_declarations_auto_increment" UNIQUE ("auto_increment")
+);
 
 DROP TABLE IF EXISTS "mdm_apple_enrollment_profiles" CASCADE;
-CREATE TABLE "mdm_apple_enrollment_profiles" ("id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  "token" bytea, "type" text NOT NULL DEFAULT 'automatic', "dep_profile" jsonb,
-  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE "mdm_apple_enrollment_profiles" (
+  "id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  "token" varchar(36) DEFAULT NULL,
+  "type" varchar(10) NOT NULL DEFAULT 'automatic',
+  "dep_profile" jsonb DEFAULT NULL,
+  "created_at" timestamp DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" timestamp DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "idx_enrollment_profiles_type" UNIQUE ("type"),
+  CONSTRAINT "idx_enrollment_profiles_token" UNIQUE ("token")
+);
 
 DROP TABLE IF EXISTS "mdm_configuration_profile_labels" CASCADE;
-CREATE TABLE "mdm_configuration_profile_labels" ("id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  "apple_profile_uuid" varchar(37), "windows_profile_uuid" varchar(37), "declaration_uuid" varchar(37),
-  "label_name" varchar(255) NOT NULL DEFAULT '', "label_id" integer,
-  "exclude" boolean NOT NULL DEFAULT FALSE, "require_all" boolean NOT NULL DEFAULT FALSE);
+CREATE TABLE "mdm_configuration_profile_labels" (
+  "id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  "apple_profile_uuid" varchar(37) DEFAULT NULL,
+  "windows_profile_uuid" varchar(37) DEFAULT NULL,
+  "label_name" varchar(255) NOT NULL,
+  "label_id" integer DEFAULT NULL,
+  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "exclude" boolean NOT NULL DEFAULT FALSE,
+  "require_all" boolean NOT NULL DEFAULT FALSE,
+  "android_profile_uuid" varchar(37) DEFAULT NULL,
+  CONSTRAINT "idx_mdm_configuration_profile_labels_apple_label_name" UNIQUE ("apple_profile_uuid","label_name"),
+  CONSTRAINT "idx_mdm_configuration_profile_labels_windows_label_name" UNIQUE ("windows_profile_uuid","label_name"),
+  CONSTRAINT "idx_mdm_configuration_profile_labels_android_label_name" UNIQUE ("android_profile_uuid","label_name")
+);
 
 DROP TABLE IF EXISTS "mdm_windows_configuration_profiles" CASCADE;
-CREATE TABLE "mdm_windows_configuration_profiles" ("profile_uuid" varchar(37) NOT NULL DEFAULT '' PRIMARY KEY,
-  "team_id" integer, "name" varchar(255) NOT NULL DEFAULT '', "syncml" text NOT NULL,
-  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, "uploaded_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "secrets_updated_at" timestamp, "checksum" bytea);
+CREATE TABLE "mdm_windows_configuration_profiles" (
+  "profile_uuid" varchar(37) NOT NULL DEFAULT '' PRIMARY KEY,
+  "team_id" integer NOT NULL DEFAULT 0,
+  "name" varchar(255) NOT NULL,
+  "syncml" bytea NOT NULL,
+  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "uploaded_at" timestamp DEFAULT NULL,
+  "auto_increment" bigint GENERATED ALWAYS AS IDENTITY,
+  "checksum" bytea,
+  "secrets_updated_at" timestamp DEFAULT NULL,
+  CONSTRAINT "idx_mdm_windows_configuration_profiles_team_id_name" UNIQUE ("team_id","name"),
+  CONSTRAINT "idx_mdm_win_config_auto_increment" UNIQUE ("auto_increment")
+);
 
 DROP TABLE IF EXISTS "operating_system_version_vulnerabilities" CASCADE;
-CREATE TABLE "operating_system_version_vulnerabilities" ("id" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  "os_version_id" integer NOT NULL, "cve" varchar(255) NOT NULL, "source" smallint DEFAULT 0,
-  "resolved_in_version" varchar(255), "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, "team_id" integer NOT NULL DEFAULT 0);
+CREATE TABLE "operating_system_version_vulnerabilities" (
+  "id" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  "os_version_id" integer NOT NULL,
+  "cve" varchar(255) NOT NULL,
+  "team_id" integer DEFAULT NULL,
+  "source" smallint DEFAULT 0,
+  "resolved_in_version" varchar(255) DEFAULT NULL,
+  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX "idx_os_version_vulnerabilities_unq_os_version_team_cve2" ON "operating_system_version_vulnerabilities" ((COALESCE("team_id",-1)),"os_version_id","cve");
 
--- policy_stats already created above with inherited_team_id_char generated column
+SELECT 1;
+
+CREATE TABLE IF NOT EXISTS "host_recovery_key_passwords" (
+  "host_uuid" varchar(255) NOT NULL,
+  "encrypted_password" bytea NOT NULL,
+  "status" varchar(20) DEFAULT NULL,
+  "operation_type" varchar(20) NOT NULL,
+  "error_message" text,
+  "deleted" boolean NOT NULL DEFAULT FALSE,
+  "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "pending_encrypted_password" bytea,
+  "pending_error_message" text,
+  PRIMARY KEY ("host_uuid")
+);
+
+CREATE OR REPLACE VIEW "nano_view_queue" AS
+SELECT
+  q.id AS id,
+  q.created_at AS created_at,
+  q.active AS active,
+  q.priority AS priority,
+  c.command_uuid AS command_uuid,
+  c.request_type AS request_type,
+  c.command AS command,
+  r.updated_at AS result_updated_at,
+  r.status AS status,
+  r.result AS result
+FROM
+  nano_enrollment_queue q
+  JOIN nano_commands c ON q.command_uuid = c.command_uuid
+  LEFT JOIN nano_command_results r ON r.command_uuid = q.command_uuid AND r.id = q.id
+ORDER BY q.priority DESC, q.created_at;

@@ -576,22 +576,25 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 		('iOS', 'SELECT 1', 1, 0),
 		('iPadOS', 'SELECT 1', 1, 0),
 		('Fedora Linux', 'SELECT 1', 1, 0)
-		ON CONFLICT DO NOTHING`); err != nil {
+		ON CONFLICT (name) DO NOTHING`); err != nil {
 		t.Logf("PG seed data: labels insert error: %v", err)
 	}
 	// Insert mdm delivery status and operation type seed data
-	_, _ = testDB.Exec(`INSERT INTO mdm_delivery_status (status) VALUES ('failed'), ('applied'), ('pending'), ('verified'), ('verifying') ON CONFLICT DO NOTHING`)
-	_, _ = testDB.Exec(`INSERT INTO mdm_operation_types (operation_type) VALUES ('install'), ('remove') ON CONFLICT DO NOTHING`)
+	_, _ = testDB.Exec(`INSERT INTO mdm_delivery_status (status) VALUES ('failed'), ('applied'), ('pending'), ('verified'), ('verifying') ON CONFLICT (status) DO NOTHING`)
+	_, _ = testDB.Exec(`INSERT INTO mdm_operation_types (operation_type) VALUES ('install'), ('remove') ON CONFLICT (operation_type) DO NOTHING`)
 
+	logger := slog.New(slog.DiscardHandler)
 	ds := &Datastore{
-		primary:   testDB,
-		replica:   testDB,
-		logger:    slog.New(slog.DiscardHandler),
-		clock:     clock.C,
-		dialect:   postgresDialect{},
-		writeCh:   make(chan itemToWrite),
-		stmtCache: make(map[string]*sqlx.Stmt),
+		primary:          testDB,
+		replica:          testDB,
+		logger:           logger,
+		clock:            clock.C,
+		dialect:          postgresDialect{},
+		writeCh:          make(chan itemToWrite),
+		serverPrivateKey: "test-private-key-for-pg-tests!!!", // 32 bytes for AES-256
+		stmtCache:        make(map[string]*sqlx.Stmt),
 	}
+	ds.Datastore = NewAndroidDatastore(logger, testDB, testDB, postgresDialect{})
 	t.Cleanup(func() { ds.Close() })
 
 	go ds.writeChanLoop()
@@ -622,6 +625,7 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 	nonEmptyTables := map[string]bool{
 		"app_config_json":                  true,
 		"fleet_variables":                  true,
+		"labels":                           true,
 		"mdm_apple_declaration_categories": true,
 		"mdm_delivery_status":              true,
 		"mdm_operation_types":              true,

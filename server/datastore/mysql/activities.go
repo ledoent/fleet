@@ -146,7 +146,7 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 				'software_title', COALESCE(st.name, ua.payload->>'$.software_title_name', ''),
 				'script_execution_id', ua.execution_id,
 				'status', 'pending_uninstall',
-				'self_service', COALESCE(ua.payload->'$.self_service', FALSE) IS TRUE,
+				'self_service', COALESCE(ua.payload->>'$.self_service', '0') = '1',
 				'source', COALESCE(st.source, ua.payload->>'$.source'),
 				'policy_id', siua.policy_id,
 				'policy_name', p.name
@@ -809,10 +809,10 @@ func (ds *Datastore) GetHostUpcomingActivityMeta(ctx context.Context, hostID uin
 		ua.activated_at,
 		ua.activity_type,
 		CASE
-			WHEN hma.lock_ref = :execution_id THEN :lock_action
-			WHEN hma.unlock_ref = :execution_id THEN :unlock_action
-			WHEN hma.wipe_ref = :execution_id THEN :wipe_action
-			ELSE :none_action
+			WHEN hma.lock_ref = :execution_id THEN CAST(:lock_action AS UNSIGNED)
+			WHEN hma.unlock_ref = :execution_id THEN CAST(:unlock_action AS UNSIGNED)
+			WHEN hma.wipe_ref = :execution_id THEN CAST(:wipe_action AS UNSIGNED)
+			ELSE CAST(:none_action AS UNSIGNED)
 		END AS well_known_action
 	FROM
 		upcoming_activities ua
@@ -1070,9 +1070,9 @@ SELECT
 	sua.script_id,
 	sua.policy_id,
 	ua.user_id,
-	COALESCE(ua.payload->'$.sync_request', 0),
+	COALESCE(ua.payload->>'$.sync_request', '0') = '1',
 	sua.setup_experience_script_id,
-	COALESCE(ua.payload->'$.is_internal', 0)
+	COALESCE(ua.payload->>'$.is_internal', '0') = '1'
 FROM
 	upcoming_activities ua
 	INNER JOIN script_upcoming_activities sua
@@ -1108,7 +1108,7 @@ SELECT
 	ua.host_id,
 	siua.software_installer_id,
 	ua.user_id,
-	COALESCE(ua.payload->'$.self_service', 0),
+	COALESCE(ua.payload->>'$.self_service', '0') = '1',
 	siua.policy_id,
 	COALESCE(si.filename, ua.payload->>'$.installer_filename', '[deleted installer]'),
 	COALESCE(si.version, ua.payload->>'$.version', 'unknown'),
@@ -1120,7 +1120,7 @@ SELECT
 	-- the number of prior tries. +1 makes this the next attempt in sequence:
 	-- first install = 1, first retry = 2, second retry = 3, etc.
 	CASE
-		WHEN siua.policy_id IS NULL AND COALESCE(ua.payload->'$.with_retries', 0) = 1 THEN (
+		WHEN siua.policy_id IS NULL AND COALESCE(ua.payload->>'$.with_retries', '0') = '1' THEN (
 			SELECT COUNT(*) + 1
 			FROM host_software_installs hsi2
 			WHERE hsi2.host_id = ua.host_id
@@ -1255,7 +1255,7 @@ SELECT
 	ua.execution_id,
 	ua.user_id,
 	ua.payload->>'$.associated_event_id',
-	COALESCE(ua.payload->'$.self_service', 0),
+	COALESCE(ua.payload->>'$.self_service', '0') = '1',
 	vaua.policy_id
 FROM
 	upcoming_activities ua
@@ -1291,7 +1291,7 @@ SELECT
 	ua.execution_id,
 	ua.user_id,
 	iha.platform,
-	COALESCE(ua.payload->'$.self_service', 0)
+	COALESCE(ua.payload->>'$.self_service', '0') = '1'
 FROM
 	upcoming_activities ua
 	INNER JOIN in_house_app_upcoming_activities ihua
