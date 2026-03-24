@@ -256,7 +256,18 @@ func rebindQuery(query string) string {
 	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
 		re := regexp.MustCompile(`INTERVAL\s+(\d+)\s+` + unit)
 		query = re.ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
+		// INTERVAL ? SECOND → ? * INTERVAL '1 second' (placeholder form)
+		rePlaceholder := regexp.MustCompile(`INTERVAL\s+(\?)\s+` + unit)
+		query = rePlaceholder.ReplaceAllString(query, "? * INTERVAL '1 "+strings.ToLower(unit)+"'")
 	}
+	// MySQL allows LIMIT on UPDATE/DELETE; PG does not.
+	// Strip trailing LIMIT N from UPDATE and DELETE statements (not subqueries).
+	uq := strings.ToUpper(strings.TrimLeft(query, " \t\n"))
+	if strings.HasPrefix(uq, "UPDATE") || strings.HasPrefix(uq, "DELETE") {
+		re := regexp.MustCompile(`(?i)\s+LIMIT\s+\d+\s*$`)
+		query = re.ReplaceAllString(query, "")
+	}
+
 	// Resolve ambiguous column references in ON CONFLICT DO UPDATE SET clauses.
 	// Only apply when complex expressions (CASE WHEN, COALESCE) are in the SET clause.
 	if idx := strings.Index(query, "DO UPDATE SET"); idx >= 0 {
