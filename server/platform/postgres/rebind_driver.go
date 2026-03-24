@@ -141,6 +141,8 @@ func rebindQuery(query string) string {
 	if strings.Contains(query, "GROUP_CONCAT") || strings.Contains(query, "group_concat") {
 		query = rewriteGroupConcat(query)
 	}
+	// FOR UPDATE with LEFT JOIN: PG doesn't allow FOR UPDATE on nullable side of outer join.
+	// This needs per-query fixes in the source code.
 	// MySQL SEPARATOR in GROUP_CONCAT → already handled by dialect, but catch raw usage
 	if strings.Contains(query, "separator") || strings.Contains(query, "SEPARATOR") {
 		re := regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
@@ -157,6 +159,8 @@ func rebindQuery(query string) string {
 	if strings.Contains(query, "UPDATE") && strings.Contains(query, "JOIN") && strings.Contains(query, "SET") {
 		query = rewriteUpdateJoin(query)
 	}
+	// Note: PG doesn't allow alias-qualified columns in UPDATE SET clause.
+	// This needs per-query fixes in the source code (e.g., cron_stats.go).
 	// MySQL IF(cond, true_val, false_val) → PG CASE WHEN cond THEN true_val ELSE false_val END
 	query = rewriteIF(query)
 	// MySQL FIELD(x, 'a', 'b', ...) → PG CASE x WHEN 'a' THEN 1 WHEN 'b' THEN 2 ... ELSE 0 END
@@ -191,11 +195,19 @@ func rebindQuery(query string) string {
 		// nano/mdm boolean columns
 		"hm.enrolled", "hmdm.enrolled", "nq.active", "nvq.active",
 		"nano_enrollment_queue.active", "ne.enrolled_from_migration",
-		"ba.canceled",
-		// Unqualified boolean columns in SET/WHERE clauses (only specific ones that are always boolean)
-		"deleted", "canceled", "refetch_requested", "expired",
-		"enrolled_from_migration",
+		"ba.canceled", "ba2.canceled",
+		// MDM profile label exclude/require_all columns (various aliases)
+		"mcpl.exclude", "mel.exclude", "sil.exclude", "sil.require_all",
+		"vatl.exclude", "vatl.require_all", "ihl.exclude", "ihl.require_all",
+		// Additional qualified boolean columns
+		"neq.active", "e.enabled", "p.conditional_access_enabled", "p.critical",
+		"hvsi.canceled", "hvsi2.canceled", "hvsi.removed", "hvsi2.removed",
+		"hihsi.canceled", "hihsi.removed", "hihsi2.canceled", "hihsi2.removed",
 		"host_vpp_software_installs.canceled",
+		// Unqualified boolean columns (safe — always boolean in Fleet schema)
+		"deleted", "canceled", "refetch_requested", "expired",
+		"enrolled_from_migration", "enrolled", "enabled", "active",
+		"resync", "terms_expired",
 	} {
 		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
 		query = strings.ReplaceAll(query, col+" = 0", col+" = false")
@@ -236,8 +248,7 @@ func rebindQuery(query string) string {
 		query = re.ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
 	}
 	// Resolve ambiguous column references in ON CONFLICT DO UPDATE SET clauses.
-	// PG considers bare column names in SET expressions ambiguous between target table and EXCLUDED.
-	// Only apply when there are complex expressions (CASE WHEN, COALESCE) after DO UPDATE SET.
+	// Only apply when complex expressions (CASE WHEN, COALESCE) are in the SET clause.
 	if idx := strings.Index(query, "DO UPDATE SET"); idx >= 0 {
 		setClause := query[idx:]
 		if strings.Contains(setClause, "CASE WHEN") || strings.Contains(setClause, "COALESCE") {
@@ -758,7 +769,8 @@ func rewriteField(query string) string {
 
 // resolveOnConflictAmbiguity fixes ambiguous column references in ON CONFLICT DO UPDATE SET.
 // In PG, bare column names in SET value expressions are ambiguous between the target table
-// and EXCLUDED. This function qualifies bare column references with the target table name.
+// and EXCLUDED. This function parses each SET assignment and qualifies bare column references
+// in the VALUE expressions (right side of =) with the target table name.
 func resolveOnConflictAmbiguity(query string) string {
 	// Extract target table name from INSERT INTO <table>
 	insertRe := regexp.MustCompile(`(?i)INSERT\s+INTO\s+"?(\w+)"?`)
@@ -778,72 +790,56 @@ func resolveOnConflictAmbiguity(query string) string {
 	setStart := setIdx + len(setMarker)
 	setClause := query[setStart:]
 
-	// Collect ALL column names that appear in the SET clause (both as targets and in EXCLUDED).
-	// Any of these could be ambiguous when used bare in expressions.
+	// Collect column names from EXCLUDED references — these are the ambiguous ones
 	excludedRe := regexp.MustCompile(`EXCLUDED\.(\w+)`)
 	matches := excludedRe.FindAllStringSubmatch(setClause, -1)
-	// Also find SET targets (col = ...) — these columns might appear bare in other expressions
-	setTargetRe := regexp.MustCompile(`(?:^|,)\s*(\w+)\s*=`)
-	targetMatches := setTargetRe.FindAllStringSubmatch(setClause, -1)
+	if len(matches) == 0 {
+		return query
+	}
 	cols := make(map[string]bool)
 	for _, m := range matches {
 		cols[m[1]] = true
 	}
-	for _, m := range targetMatches {
+	// Also add SET target names
+	setTargetRe := regexp.MustCompile(`(?:^|,)\s*(\w+)\s*=`)
+	for _, m := range setTargetRe.FindAllStringSubmatch(setClause, -1) {
 		cols[m[1]] = true
 	}
-	if len(cols) == 0 {
-		return query
-	}
 
-	// For each ambiguous column, qualify bare occurrences with the table name.
-	// We need to avoid qualifying:
-	// 1. References already qualified (preceded by '.')
-	// 2. The SET target on the left side of '='
-	// 3. The column name in EXCLUDED.col
-	for col := range cols {
-		bareRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(col) + `\b`)
-		var result strings.Builder
-		remaining := setClause
-		for {
-			loc := bareRe.FindStringIndex(remaining)
-			if loc == nil {
-				result.WriteString(remaining)
-				break
-			}
-			result.WriteString(remaining[:loc[0]])
-			matched := remaining[loc[0]:loc[1]]
-
-			// Check if preceded by dot (already qualified: EXCLUDED.col or table.col)
-			shouldQualify := true
-			if loc[0] > 0 && remaining[loc[0]-1] == '.' {
-				shouldQualify = false
-			}
-
-			// Check if it's a SET target: preceded by comma+whitespace, SET, or start
-			if shouldQualify {
-				before := strings.TrimRight(remaining[:loc[0]], " \t\n\r")
-				if len(before) == 0 {
-					shouldQualify = false // first SET target
-				} else {
-					lastChar := before[len(before)-1]
-					if lastChar == ',' {
-						shouldQualify = false // after comma = new SET target
-					}
-				}
-			}
-
-			if shouldQualify {
-				result.WriteString(tableName + "." + matched)
-			} else {
-				result.WriteString(matched)
-			}
-			remaining = remaining[loc[1]:]
+	// Split the SET clause into individual assignments by top-level commas.
+	// Then for each assignment, split on the first '=' to get target and value.
+	// Only qualify bare column refs in the value part.
+	assignments := splitTopLevel(setClause, ',')
+	var result strings.Builder
+	for i, assignment := range assignments {
+		if i > 0 {
+			result.WriteByte(',')
 		}
-		setClause = result.String()
+		eqIdx := strings.Index(assignment, "=")
+		if eqIdx == -1 {
+			result.WriteString(assignment)
+			continue
+		}
+		target := assignment[:eqIdx+1] // includes the '='
+		value := assignment[eqIdx+1:]
+
+		// Qualify bare column names in the value part
+		for col := range cols {
+			bareRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(col) + `\b`)
+			value = bareRe.ReplaceAllStringFunc(value, func(match string) string {
+				// Find position in value to check preceding char
+				idx := strings.Index(value, match)
+				if idx > 0 && value[idx-1] == '.' {
+					return match // already qualified
+				}
+				return tableName + "." + match
+			})
+		}
+		result.WriteString(target)
+		result.WriteString(value)
 	}
 
-	return query[:setStart] + setClause
+	return query[:setStart] + result.String()
 }
 
 // rewriteHex rewrites MySQL HEX(expr) → PG encode(expr, 'hex')
@@ -954,16 +950,26 @@ func splitTopLevel(s string, delim byte) []string {
 // This handles cases not going through the dialect helper.
 // knownPrimaryKeys maps table names to their primary key columns for ON CONFLICT resolution.
 var knownPrimaryKeys = map[string]string{
-	"host_dep_assignments":          "host_id",
-	"host_mdm_idp_accounts":         "host_uuid",
-	"host_mdm_apple_declarations":   "host_uuid,declaration_uuid",
-	"mdm_declaration_labels":        "apple_declaration_uuid,label_name",
-	"scim_user_group":               "scim_user_id,group_id",
-	"host_munki_issues":             "host_id,munki_issue_id",
-	"host_munki_info":               "host_id",
-	"cron_stats":                    "id",
-	"nano_command_results":          "id,command_uuid",
-	"host_mdm_apple_bootstrap_packages": "host_uuid",
+	"host_dep_assignments":               "host_id",
+	"host_mdm_idp_accounts":              "host_uuid",
+	"host_mdm_apple_declarations":        "host_uuid,declaration_uuid",
+	"mdm_declaration_labels":             "apple_declaration_uuid,label_name",
+	"scim_user_group":                    "scim_user_id,group_id",
+	"host_munki_issues":                  "host_id,munki_issue_id",
+	"host_munki_info":                    "host_id",
+	"cron_stats":                         "id",
+	"nano_command_results":               "id,command_uuid",
+	"host_mdm_apple_bootstrap_packages":  "host_uuid",
+	"mdm_configuration_profile_labels":   "id",
+	"host_conditional_access":            "host_id",
+	"host_mdm":                           "host_id",
+	"host_display_names":                 "host_id",
+	"host_emails":                        "id",
+	"label_membership":                   "host_id,label_id",
+	"host_software":                      "host_id,software_id",
+	"software_host_counts":               "software_id,team_id",
+	"nano_enrollment_queue":              "id,command_uuid",
+	"host_mdm_windows_profiles":          "host_uuid,profile_uuid",
 }
 
 func rewriteOnDuplicateKey(query string) string {
@@ -1060,4 +1066,33 @@ func rewriteUpdateJoin(query string) string {
 
 	return fmt.Sprintf("UPDATE %s %s SET %s FROM %s %s WHERE %s",
 		table1, alias1, setClause, table2, alias2, onCondition)
+}
+
+// stripUpdateSetAlias removes table alias qualifiers from UPDATE SET clauses.
+// PG doesn't allow alias-qualified columns in SET: UPDATE t1 a SET a.col = ? → SET col = ?
+func stripUpdateSetAlias(query string) string {
+	// Find UPDATE <table> <alias> ... SET <assignments>
+	re := regexp.MustCompile(`(?i)UPDATE\s+"?(\w+)"?\s+(\w+)\s+`)
+	m := re.FindStringSubmatch(query)
+	if m == nil {
+		return query
+	}
+	alias := m[2]
+	// Don't strip if "alias" is actually a keyword like SET, JOIN, etc.
+	upper := strings.ToUpper(alias)
+	if upper == "SET" || upper == "JOIN" || upper == "INNER" || upper == "LEFT" || upper == "WHERE" {
+		return query
+	}
+	// In the SET clause, replace alias.col = with col =
+	// Only replace in the SET portion (after SET keyword)
+	setIdx := strings.Index(strings.ToUpper(query), " SET ")
+	if setIdx == -1 {
+		return query
+	}
+	prefix := query[:setIdx+5] // includes " SET "
+	rest := query[setIdx+5:]
+	// Replace alias.col patterns in the SET clause
+	aliasRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(alias) + `\.(\w+)`)
+	rest = aliasRe.ReplaceAllString(rest, "$1")
+	return prefix + rest
 }

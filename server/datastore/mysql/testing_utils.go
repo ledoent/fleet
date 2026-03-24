@@ -564,14 +564,18 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 	// Insert required seed data (app_config_json needs at least one row)
 	_, _ = testDB.Exec(`INSERT INTO app_config_json (id, json_value) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING`)
 	// Insert built-in labels that migrations would normally create
-	// Seed built-in labels matching what MySQL schema.sql creates via migrations.
-	// These must match exactly to avoid conflicts with test-created labels.
-	if _, err := testDB.Exec(`INSERT INTO labels (name, description, query, label_type, label_membership_type) VALUES
-		('macOS 14+ (Sonoma+)', 'macOS hosts with version 14 and above', 'select 1 from os_version where platform = ''darwin'' and major >= 14;', 1, 0),
-		('iOS', 'All iOS hosts', '', 1, 1),
-		('iPadOS', 'All iPadOS hosts', '', 1, 1),
-		('Fedora Linux', 'All Fedora hosts', 'select 1 from os_version where name = ''Fedora Linux'';', 1, 0),
-		('Android', 'All Android hosts', '', 1, 1)
+	if _, err := testDB.Exec(`INSERT INTO labels (name, query, label_type, label_membership_type) VALUES
+		('All Hosts', 'SELECT 1', 1, 0),
+		('macOS', 'SELECT 1', 1, 0),
+		('Ubuntu Linux', 'SELECT 1', 1, 0),
+		('CentOS Linux', 'SELECT 1', 1, 0),
+		('Windows', 'SELECT 1', 1, 0),
+		('Red Hat Linux', 'SELECT 1', 1, 0),
+		('All Linux', 'SELECT 1', 1, 0),
+		('chrome', 'SELECT 1', 1, 0),
+		('iOS', 'SELECT 1', 1, 0),
+		('iPadOS', 'SELECT 1', 1, 0),
+		('Fedora Linux', 'SELECT 1', 1, 0)
 		ON CONFLICT (name) DO NOTHING`); err != nil {
 		t.Logf("PG seed data: labels insert error: %v", err)
 	}
@@ -621,6 +625,7 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 	nonEmptyTables := map[string]bool{
 		"app_config_json":                  true,
 		"fleet_variables":                  true,
+		"labels":                           true,
 		"mdm_apple_declaration_categories": true,
 		"mdm_delivery_status":              true,
 		"mdm_operation_types":              true,
@@ -628,10 +633,6 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 		"migration_status_data":            true,
 		"osquery_options":                  true,
 		"software_categories":              true,
-	}
-	if _, ok := ds.dialect.(mysqlDialect); ok {
-		// MySQL seeds labels via schema.sql and they must persist
-		nonEmptyTables["labels"] = true
 	}
 
 	if _, ok := ds.dialect.(postgresDialect); ok {
@@ -663,14 +664,6 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 				// Ignore errors for tables that don't exist
 			}
 		}
-		// Re-seed labels that may have been truncated (matching MySQL schema.sql built-in labels)
-		_, _ = db.ExecContext(ctx, `INSERT INTO labels (name, description, query, label_type, label_membership_type) VALUES
-			('macOS 14+ (Sonoma+)', 'macOS hosts with version 14 and above', 'select 1 from os_version where platform = ''darwin'' and major >= 14;', 1, 0),
-			('iOS', 'All iOS hosts', '', 1, 1),
-			('iPadOS', 'All iPadOS hosts', '', 1, 1),
-			('Fedora Linux', 'All Fedora hosts', 'select 1 from os_version where name = ''Fedora Linux'';', 1, 0),
-			('Android', 'All Android hosts', '', 1, 1)
-			ON CONFLICT (name) DO NOTHING`)
 		return
 	}
 
