@@ -153,6 +153,10 @@ func rebindQuery(query string) string {
 	// MySQL DELETE FROM t USING t INNER JOIN → PG DELETE FROM t USING (remove duplicate table)
 	// MySQL requires naming the target table again in USING; PG forbids it.
 	query = rewriteDeleteUsing(query)
+	// MySQL UPDATE t1 JOIN t2 ON ... SET ... → PG UPDATE t1 SET ... FROM t2 WHERE ...
+	if strings.Contains(query, "UPDATE") && strings.Contains(query, "JOIN") && strings.Contains(query, "SET") {
+		query = rewriteUpdateJoin(query)
+	}
 	// MySQL IF(cond, true_val, false_val) → PG CASE WHEN cond THEN true_val ELSE false_val END
 	query = rewriteIF(query)
 	// MySQL FIELD(x, 'a', 'b', ...) → PG CASE x WHEN 'a' THEN 1 WHEN 'b' THEN 2 ... ELSE 0 END
@@ -184,8 +188,13 @@ func rebindQuery(query string) string {
 		"abt.terms_expired", "n.token_update_tally", "ne.token_update_tally",
 		"n.enrolled", "q.active", "cve_meta.published",
 		"hrkp.deleted", "rkp.deleted",
-		// Unqualified boolean columns in SET/WHERE clauses
-		"deleted", "canceled", "refetch_requested", "expired", "removed",
+		// nano/mdm boolean columns
+		"hm.enrolled", "hmdm.enrolled", "nq.active", "nvq.active",
+		"nano_enrollment_queue.active", "ne.enrolled_from_migration",
+		"ba.canceled",
+		// Unqualified boolean columns in SET/WHERE clauses (only specific ones that are always boolean)
+		"deleted", "canceled", "refetch_requested", "expired",
+		"enrolled_from_migration",
 		"host_vpp_software_installs.canceled",
 	} {
 		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
@@ -227,10 +236,15 @@ func rebindQuery(query string) string {
 		query = re.ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
 	}
 	// Resolve ambiguous column references in ON CONFLICT DO UPDATE SET clauses.
-	// Only apply when the query has CASE/IF expressions in the ON CONFLICT SET clause,
-	// since simple "col = EXCLUDED.col" assignments aren't ambiguous.
-	if strings.Contains(query, "ON CONFLICT") && strings.Contains(query, "EXCLUDED.") && (strings.Contains(query, "CASE WHEN") || strings.Contains(query, "COALESCE")) {
-		query = resolveOnConflictAmbiguity(query)
+	// PG considers bare column names in SET expressions ambiguous between target table and EXCLUDED.
+	// Only apply when there are complex expressions (CASE WHEN, COALESCE) after DO UPDATE SET.
+	if idx := strings.Index(query, "DO UPDATE SET"); idx >= 0 {
+		setClause := query[idx:]
+		if strings.Contains(setClause, "CASE WHEN") || strings.Contains(setClause, "COALESCE") {
+			if strings.Contains(query, "EXCLUDED.") {
+				query = resolveOnConflictAmbiguity(query)
+			}
+		}
 	}
 
 	if !strings.Contains(query, "?") {
@@ -1027,4 +1041,23 @@ func rewriteGroupConcat(query string) string {
 		query = query[:loc[0]] + replacement + query[i:]
 	}
 	return query
+}
+
+// rewriteUpdateJoin rewrites MySQL UPDATE t1 JOIN t2 ON cond SET ... → PG UPDATE t1 SET ... FROM t2 WHERE cond
+func rewriteUpdateJoin(query string) string {
+	// Pattern: UPDATE <table1> <alias1> JOIN <table2> <alias2> ON <condition> SET <assignments>
+	re := regexp.MustCompile(`(?is)UPDATE\s+(\S+)\s+(\w+)\s+JOIN\s+(\S+)\s+(\w+)\s+ON\s+(.+?)\s+SET\s+(.+)`)
+	m := re.FindStringSubmatch(query)
+	if m == nil {
+		return query
+	}
+	table1 := m[1]
+	alias1 := m[2]
+	table2 := m[3]
+	alias2 := m[4]
+	onCondition := strings.TrimSpace(m[5])
+	setClause := strings.TrimSpace(m[6])
+
+	return fmt.Sprintf("UPDATE %s %s SET %s FROM %s %s WHERE %s",
+		table1, alias1, setClause, table2, alias2, onCondition)
 }
