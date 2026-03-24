@@ -212,10 +212,14 @@ func rebindQuery(query string) string {
 		"host_vpp_software_installs.canceled",
 		"host_mdm.enrolled",
 		"q.automations_enabled", "nq.automations_enabled",
+		"hmdm.is_server", "hm.installed_from_dep", "q.discard_data",
+		"hmabp.skipped", "hm.is_personal_enrollment",
 		// Unqualified boolean columns (safe — always boolean in Fleet schema)
 		"deleted", "canceled", "refetch_requested", "expired",
 		"enrolled_from_migration", "enrolled", "enabled", "active",
-		"resync", "terms_expired",
+		"resync", "terms_expired", "sync_request",
+		"discard_data", "is_server", "is_kernel", "encrypted",
+		"skipped", "installed_from_dep", "is_personal_enrollment",
 	} {
 		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
 		query = strings.ReplaceAll(query, col+" = 0", col+" = false")
