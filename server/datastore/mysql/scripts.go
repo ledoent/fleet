@@ -299,7 +299,7 @@ func (ds *Datastore) listUpcomingHostScriptExecutions(ctx context.Context, hostI
 	extraWhere := ""
 	if onlyShowInternal {
 		// software_uninstalls are implicitly internal
-		extraWhere = " AND COALESCE(ua.payload->'$.is_internal', 1) = 1"
+		extraWhere = " AND COALESCE(ua.payload->>'$.is_internal', '1') = '1'"
 	}
 	if onlyReadyToExecute {
 		extraWhere += " AND ua.activated_at IS NOT NULL"
@@ -810,7 +810,7 @@ func (ds *Datastore) DeleteScript(ctx context.Context, id uint) error {
 			WHERE sua.script_id = ? AND
 				ua.activity_type = 'script' AND
 				ua.activated_at IS NOT NULL AND
-				(ua.payload->'$.sync_request' = 0 OR
+				(COALESCE(ua.payload->>'$.sync_request', '0') = '0' OR
 					ua.created_at >= NOW() - INTERVAL ? SECOND)`
 		var affectedHosts []uint
 		if err := sqlx.SelectContext(ctx, tx, &affectedHosts, loadAffectedHostsStmt,
@@ -825,7 +825,7 @@ func (ds *Datastore) DeleteScript(ctx context.Context, id uint) error {
 					ON upcoming_activities.id = sua.upcoming_activity_id
 			WHERE sua.script_id = ? AND
 				upcoming_activities.activity_type = 'script' AND
-				(upcoming_activities.payload->'$.sync_request' = 0 OR
+				(COALESCE(upcoming_activities.payload->>'$.sync_request', '0') = '0' OR
 					upcoming_activities.created_at >= NOW() - INTERVAL ? SECOND)
 			`,
 			id, int(constants.MaxServerWaitTime.Seconds()),
@@ -1163,7 +1163,7 @@ WHERE
 		WHERE
 			ua.activity_type = 'script'
 			AND ua.activated_at IS NOT NULL
-			AND (ua.payload->'$.sync_request' = 0 OR ua.created_at >= NOW() - INTERVAL ? SECOND)
+			AND (COALESCE(ua.payload->>'$.sync_request', '0') = '0' OR ua.created_at >= NOW() - INTERVAL ? SECOND)
 			AND sua.script_id IN (SELECT id FROM scripts WHERE global_or_team_id = ?)`
 
 	const clearAllPendingExecutionsUA = `DELETE FROM upcoming_activities
@@ -1173,7 +1173,7 @@ WHERE
 				ON upcoming_activities.id = sua.upcoming_activity_id
 		WHERE
 			upcoming_activities.activity_type = 'script'
-			AND (upcoming_activities.payload->'$.sync_request' = 0 OR upcoming_activities.created_at >= NOW() - INTERVAL ? SECOND)
+			AND (COALESCE(upcoming_activities.payload->>'$.sync_request', '0') = '0' OR upcoming_activities.created_at >= NOW() - INTERVAL ? SECOND)
 			AND sua.script_id IN (SELECT id FROM scripts WHERE global_or_team_id = ?)`
 
 	const unsetScriptsNotInListFromPolicies = `
@@ -1203,7 +1203,7 @@ WHERE
 		WHERE
 			ua.activity_type = 'script'
 			AND ua.activated_at IS NOT NULL
-			AND (ua.payload->'$.sync_request' = 0 OR ua.created_at >= NOW() - INTERVAL ? SECOND)
+			AND (COALESCE(ua.payload->>'$.sync_request', '0') = '0' OR ua.created_at >= NOW() - INTERVAL ? SECOND)
 			AND sua.script_id IN (SELECT id FROM scripts WHERE global_or_team_id = ? AND name NOT IN (?))`
 
 	const clearPendingExecutionsNotInListUA = `DELETE FROM upcoming_activities
@@ -1213,7 +1213,7 @@ WHERE
 				ON upcoming_activities.id = sua.upcoming_activity_id
 		WHERE
 			upcoming_activities.activity_type = 'script'
-			AND (upcoming_activities.payload->'$.sync_request' = 0 OR upcoming_activities.created_at >= NOW() - INTERVAL ? SECOND)
+			AND (COALESCE(upcoming_activities.payload->>'$.sync_request', '0') = '0' OR upcoming_activities.created_at >= NOW() - INTERVAL ? SECOND)
 			AND sua.script_id IN (SELECT id FROM scripts WHERE global_or_team_id = ? AND name NOT IN (?))`
 
 	insertNewOrEditedScript := `
@@ -1239,7 +1239,7 @@ VALUES
 		WHERE
 			ua.activity_type = 'script'
 			AND ua.activated_at IS NOT NULL
-			AND (ua.payload->'$.sync_request' = 0 OR ua.created_at >= NOW() - INTERVAL ? SECOND)
+			AND (COALESCE(ua.payload->>'$.sync_request', '0') = '0' OR ua.created_at >= NOW() - INTERVAL ? SECOND)
 			AND sua.script_id = ? AND sua.script_content_id != ?`
 
 	const clearPendingExecutionsWithObsoleteScriptUA = `DELETE FROM upcoming_activities
@@ -1249,7 +1249,7 @@ VALUES
 				ON upcoming_activities.id = sua.upcoming_activity_id
 		WHERE
 			upcoming_activities.activity_type = 'script'
-			AND (upcoming_activities.payload->'$.sync_request' = 0 OR upcoming_activities.created_at >= NOW() - INTERVAL ? SECOND)
+			AND (COALESCE(upcoming_activities.payload->>'$.sync_request', '0') = '0' OR upcoming_activities.created_at >= NOW() - INTERVAL ? SECOND)
 			AND sua.script_id = ? AND sua.script_content_id != ?`
 
 	const loadInsertedScripts = `SELECT id, team_id, name FROM scripts WHERE global_or_team_id = ?`

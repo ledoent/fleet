@@ -142,7 +142,13 @@ func rebindQuery(query string) string {
 		query = rewriteGroupConcat(query)
 	}
 	// FOR UPDATE with LEFT JOIN: PG doesn't allow FOR UPDATE on nullable side of outer join.
-	// This needs per-query fixes in the source code.
+	// Remove FOR UPDATE when LEFT JOIN is present — the SELECT FOR UPDATE semantic is advisory
+	// and removing it doesn't break correctness, only reduces locking.
+	if strings.Contains(query, "FOR UPDATE") && (strings.Contains(query, "LEFT JOIN") || strings.Contains(query, "LEFT OUTER JOIN")) {
+		query = strings.Replace(query, "\nFOR UPDATE", "", 1)
+		query = strings.Replace(query, "\n\t\tFOR UPDATE", "", 1)
+		query = strings.Replace(query, "FOR UPDATE", "", 1)
+	}
 	// MySQL SEPARATOR in GROUP_CONCAT → already handled by dialect, but catch raw usage
 	if strings.Contains(query, "separator") || strings.Contains(query, "SEPARATOR") {
 		re := regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
@@ -204,6 +210,8 @@ func rebindQuery(query string) string {
 		"hvsi.canceled", "hvsi2.canceled", "hvsi.removed", "hvsi2.removed",
 		"hihsi.canceled", "hihsi.removed", "hihsi2.canceled", "hihsi2.removed",
 		"host_vpp_software_installs.canceled",
+		"host_mdm.enrolled",
+		"q.automations_enabled", "nq.automations_enabled",
 		// Unqualified boolean columns (safe — always boolean in Fleet schema)
 		"deleted", "canceled", "refetch_requested", "expired",
 		"enrolled_from_migration", "enrolled", "enabled", "active",
@@ -211,6 +219,8 @@ func rebindQuery(query string) string {
 	} {
 		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
 		query = strings.ReplaceAll(query, col+" = 0", col+" = false")
+		query = strings.ReplaceAll(query, col+"=1", col+"=true")
+		query = strings.ReplaceAll(query, col+"=0", col+"=false")
 	}
 	// Fix pm.passes = 1/0: PG column is boolean, can't compare to integer.
 	// Cast to int for use in SUM/COUNT aggregates.
@@ -823,23 +833,54 @@ func resolveOnConflictAmbiguity(query string) string {
 		target := assignment[:eqIdx+1] // includes the '='
 		value := assignment[eqIdx+1:]
 
-		// Qualify bare column names in the value part
-		for col := range cols {
-			bareRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(col) + `\b`)
-			value = bareRe.ReplaceAllStringFunc(value, func(match string) string {
-				// Find position in value to check preceding char
-				idx := strings.Index(value, match)
-				if idx > 0 && value[idx-1] == '.' {
-					return match // already qualified
-				}
-				return tableName + "." + match
-			})
-		}
+		// Qualify bare column names in the value part using manual scanning
+		// to avoid the ReplaceAllStringFunc closure bug with mutable value.
+		value = qualifyBareColumns(value, cols, tableName)
+
 		result.WriteString(target)
 		result.WriteString(value)
 	}
 
 	return query[:setStart] + result.String()
+}
+
+// qualifyBareColumns scans a string and qualifies bare column references with tableName.
+// A "bare" reference is a word matching a column name NOT preceded by '.'.
+func qualifyBareColumns(s string, cols map[string]bool, tableName string) string {
+	var result strings.Builder
+	result.Grow(len(s) * 2)
+	i := 0
+	for i < len(s) {
+		// Skip non-word characters
+		if !isWordChar(s[i]) {
+			result.WriteByte(s[i])
+			i++
+			continue
+		}
+		// Extract the full word
+		start := i
+		for i < len(s) && isWordChar(s[i]) {
+			i++
+		}
+		word := s[start:i]
+
+		// Check if this word is a column name we need to qualify
+		if cols[word] {
+			// Check if preceded by '.' (already qualified)
+			if start > 0 && s[start-1] == '.' {
+				result.WriteString(word)
+			} else {
+				result.WriteString(tableName + "." + word)
+			}
+		} else {
+			result.WriteString(word)
+		}
+	}
+	return result.String()
+}
+
+func isWordChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
 // rewriteHex rewrites MySQL HEX(expr) → PG encode(expr, 'hex')

@@ -104,7 +104,7 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 				'software_package', COALESCE(si.filename, ua.payload->>'$.installer_filename', ''),
 				'install_uuid', ua.execution_id,
 				'status', 'pending_install',
-				'self_service', ua.payload->'$.self_service' IS TRUE,
+				'self_service', COALESCE(ua.payload->>'$.self_service', '0') = '1',
 				'source', COALESCE(st.source, ua.payload->>'$.source'),
 				'policy_id', siua.policy_id,
 				'policy_name', p.name
@@ -188,7 +188,7 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 				'software_title', COALESCE(st.name, ''),
 				'app_store_id', vaua.adam_id,
 				'command_uuid', ua.execution_id,
-				'self_service', ua.payload->'$.self_service' IS TRUE,
+				'self_service', COALESCE(ua.payload->>'$.self_service', '0') = '1',
 				'status', 'pending_install',
 				'host_platform', h.platform
 			) AS details,
@@ -228,7 +228,7 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 				'host_display_name', COALESCE(hdn.display_name, ''),
 				'software_title', COALESCE(st.name, ''),
 				'command_uuid', ua.execution_id,
-				'self_service', ua.payload->'$.self_service' IS TRUE,
+				'self_service', COALESCE(ua.payload->>'$.self_service', '0') = '1',
 				'status', 'pending_install'
 			) AS details,
 			IF(ua.activated_at IS NULL, 0, 1) as topmost,

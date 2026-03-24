@@ -73,9 +73,9 @@ func (postgresDialect) GroupConcat(expr, separator string) string {
 	return fmt.Sprintf("STRING_AGG(%s::text, '%s')", expr, separator)
 }
 
-// JSONAgg builds: json_agg(<expr>)
+// JSONAgg builds: jsonb_agg(<expr>) — uses jsonb_agg for PG jsonb compatibility
 func (postgresDialect) JSONAgg(expr string) string {
-	return fmt.Sprintf("json_agg(%s)", expr)
+	return fmt.Sprintf("jsonb_agg(%s)", expr)
 }
 
 // mysqlPathToPGChain converts a MySQL JSON path ($.key1.key2) to a chain of

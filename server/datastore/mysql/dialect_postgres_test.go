@@ -64,7 +64,7 @@ func TestPostgresDialectSQL(t *testing.T) {
 	})
 
 	t.Run("JSONAgg", func(t *testing.T) {
-		assert.Equal(t, "json_agg(x)", d.JSONAgg("x"))
+		assert.Equal(t, "jsonb_agg(x)", d.JSONAgg("x"))
 	})
 
 	t.Run("GoquDialect", func(t *testing.T) {
