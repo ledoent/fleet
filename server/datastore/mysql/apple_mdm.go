@@ -7425,15 +7425,15 @@ func (ds *Datastore) GetHostsForRecoveryLockAction(ctx context.Context) ([]strin
 		  AND hm.enrolled = 1
 		  AND (
 		      -- Team hosts: check team config
-		      (h.team_id IS NOT NULL AND %s = true)
+		      (h.team_id IS NOT NULL AND %s = 'true')
 		      OR
 		      -- No-team hosts: check appconfig
-		      (h.team_id IS NULL AND %s = true)
+		      (h.team_id IS NULL AND %s = 'true')
 		  )
 		  AND (rkp.host_uuid IS NULL OR rkp.status IS NULL)
 		LIMIT 500
-	`, ds.dialect.JSONExtract("t.config", "$.mdm.enable_recovery_lock_password"),
-		ds.dialect.JSONExtract("ac.json_value", "$.mdm.enable_recovery_lock_password"))
+	`, ds.dialect.JSONUnquoteExtract("t.config", "$.mdm.enable_recovery_lock_password"),
+		ds.dialect.JSONUnquoteExtract("ac.json_value", "$.mdm.enable_recovery_lock_password"))
 
 	var hostUUIDs []string
 	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &hostUUIDs, stmt); err != nil {
@@ -7575,15 +7575,15 @@ func (ds *Datastore) ClaimHostsForRecoveryLockClear(ctx context.Context) ([]stri
 		      (rkp.operation_type = '%s' AND rkp.status IS NULL)
 		  )
 		  AND (
-		      (h.team_id IS NOT NULL AND %s = false)
+		      (h.team_id IS NOT NULL AND %s != 'true')
 		      OR
-		      (h.team_id IS NULL AND %s = false)
+		      (h.team_id IS NULL AND %s != 'true')
 		  )
 		LIMIT 500
 		FOR UPDATE
 	`, fleet.MDMOperationTypeInstall, fleet.MDMDeliveryVerified, fleet.MDMOperationTypeRemove,
-		ds.dialect.JSONExtract("t.config", "$.mdm.enable_recovery_lock_password"),
-		ds.dialect.JSONExtract("ac.json_value", "$.mdm.enable_recovery_lock_password"))
+		ds.dialect.JSONUnquoteExtract("t.config", "$.mdm.enable_recovery_lock_password"),
+		ds.dialect.JSONUnquoteExtract("ac.json_value", "$.mdm.enable_recovery_lock_password"))
 
 	// Update all claimed hosts to remove/pending
 	updateStmt := fmt.Sprintf(`

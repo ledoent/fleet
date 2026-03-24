@@ -60,7 +60,7 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 				'script_name', COALESCE(ses.name, scr.name, ''),
 				'script_execution_id', ua.execution_id,
 				'batch_execution_id', bahr.batch_execution_id,
-				'async', NOT ua.payload->'$.sync_request',
+				'async', COALESCE(ua.payload->>'$.sync_request', '0') != '1',
 				'policy_id', sua.policy_id,
 				'policy_name', p.name
 			) as details,
