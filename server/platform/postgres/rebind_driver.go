@@ -1,3 +1,8 @@
+// Package postgres provides a MySQL-to-PostgreSQL SQL rebind driver for Fleet.
+// It wraps pgx/v5 to automatically translate MySQL-dialect SQL to PostgreSQL,
+// including placeholder conversion (? → $N), function rewrites (IF → CASE WHEN,
+// JSON_OBJECT → jsonb_build_object, etc.), and type fixes (boolean = integer).
+// Register with: sql.Register("pgx-rebind", &rebindDriver{})
 package postgres
 
 import (
@@ -10,6 +15,38 @@ import (
 
 	"github.com/jackc/pgx/v5/stdlib"
 )
+
+// Pre-compiled regexes used in rebindQuery to avoid per-query compilation overhead.
+var (
+	reUUIDBinUpper     = regexp.MustCompile(`UUID_TO_BIN\(UUID\(\),\s*true\)`)
+	reUUIDBinLower     = regexp.MustCompile(`UUID_TO_BIN\(uuid\(\),\s*true\)`)
+	reUUIDBinTrue      = regexp.MustCompile(`UUID_TO_BIN\(([^,)]+),\s*true\)`)
+	reUUIDBin          = regexp.MustCompile(`UUID_TO_BIN\(([^,)]+)\)`)
+	reUUID             = regexp.MustCompile(`(?i)\bUUID\(\)`)
+	reBinToUUIDTrue    = regexp.MustCompile(`BIN_TO_UUID\(([^,)]+),\s*true\)`)
+	reBinToUUID        = regexp.MustCompile(`BIN_TO_UUID\(([^,)]+)\)`)
+	reTimeDiff         = regexp.MustCompile(`TIMEDIFF\(([^,]+),\s*([^)]+)\)`)
+	reTimeToSec        = regexp.MustCompile(`TIME_TO_SEC\(([^)]+)\)`)
+	reFromDual         = regexp.MustCompile(`(?i)\s+FROM\s+DUAL\b`)
+	reSeparator        = regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
+	reTimestamp        = regexp.MustCompile(`\bTIMESTAMP\(([^)]+)\)`)
+	reMaxDenylisted    = regexp.MustCompile(`MAX\(([^)]*\.denylisted)\)`)
+	reLimitTrailing    = regexp.MustCompile(`(?i)\s+LIMIT\s+\d+\s*$`)
+	reJSONExtractFunc  = regexp.MustCompile(`JSON_EXTRACT\((\w+),\s*(\?|'[^']*')\)`)
+	reJSONPath         = regexp.MustCompile(`->>?'\$\.`)
+	reTimestampDiff    = regexp.MustCompile(`(?i)TIMESTAMPDIFF\(\s*SECOND\s*,\s*(.+?)\s*,\s*(.+?)\s*\)`)
+
+	// Per-unit INTERVAL regexes (SECOND, MINUTE, HOUR, DAY)
+	reIntervalLiteral     = map[string]*regexp.Regexp{}
+	reIntervalPlaceholder = map[string]*regexp.Regexp{}
+)
+
+func init() {
+	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
+		reIntervalLiteral[unit] = regexp.MustCompile(`INTERVAL\s+(\d+)\s+` + unit)
+		reIntervalPlaceholder[unit] = regexp.MustCompile(`INTERVAL\s+(\?)\s+` + unit)
+	}
+}
 
 func init() {
 	// Register "pgx-rebind" as a wrapper driver that auto-rewrites ? → $N.
@@ -79,6 +116,12 @@ func rebindQuery(query string) string {
 	query = strings.ReplaceAll(query, "CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP")
 	// MD5() → md5() (PG uses lowercase)
 	query = strings.ReplaceAll(query, "MD5(", "md5(")
+	// JSON_EXTRACT(col, expr) → (col->regexp_replace(expr, '^\$\.?"?', ''))
+	// MySQL JSON_EXTRACT uses $.path syntax; PG -> operator uses plain key names.
+	// The regexp_replace strips the $. prefix and optional quotes at runtime.
+	if strings.Contains(query, "JSON_EXTRACT(") {
+		query = rewriteJSONExtractFunc(query)
+	}
 	// JSON_OBJECT → jsonb_build_object, then cast placeholder args to text
 	// (PG's jsonb_build_object has VARIADIC "any" so it can't infer $N types)
 	query = strings.ReplaceAll(query, "JSON_OBJECT(", "jsonb_build_object(")
@@ -94,36 +137,36 @@ func rebindQuery(query string) string {
 	// IFNULL(a, b) → COALESCE(a, b) — MySQL's IFNULL is PG's COALESCE
 	query = strings.ReplaceAll(query, "IFNULL(", "COALESCE(")
 	// UUID_TO_BIN(UUID(), true) → gen_random_uuid() (must come before UUID() replacement)
-	query = regexp.MustCompile(`UUID_TO_BIN\(UUID\(\),\s*true\)`).ReplaceAllString(query, "gen_random_uuid()")
-	query = regexp.MustCompile(`UUID_TO_BIN\(uuid\(\),\s*true\)`).ReplaceAllString(query, "gen_random_uuid()")
-	query = regexp.MustCompile(`UUID_TO_BIN\(([^,)]+),\s*true\)`).ReplaceAllString(query, "($1)::uuid")
-	query = regexp.MustCompile(`UUID_TO_BIN\(([^,)]+)\)`).ReplaceAllString(query, "($1)::uuid")
+	query = reUUIDBinUpper.ReplaceAllString(query, "gen_random_uuid()")
+	query = reUUIDBinLower.ReplaceAllString(query, "gen_random_uuid()")
+	query = reUUIDBinTrue.ReplaceAllString(query, "($1)::uuid")
+	query = reUUIDBin.ReplaceAllString(query, "($1)::uuid")
 	// CONVERT(uuid() USING utf8mb4) → gen_random_uuid()::text (MySQL charset conversion)
 	query = strings.ReplaceAll(query, "CONVERT(uuid() USING utf8mb4)", "gen_random_uuid()::text")
 	query = strings.ReplaceAll(query, "CONVERT(UUID() USING utf8mb4)", "gen_random_uuid()::text")
 	// Standalone UUID() → gen_random_uuid()::text (use word boundary to avoid matching gen_random_uuid)
-	query = regexp.MustCompile(`(?i)\bUUID\(\)`).ReplaceAllStringFunc(query, func(m string) string {
+	query = reUUID.ReplaceAllStringFunc(query, func(m string) string {
 		return "gen_random_uuid()::text"
 	})
 	// BIN_TO_UUID(expr, true) → encode(expr, 'hex') reformatted as UUID text
 	// Simpler: BIN_TO_UUID(col, true) → col::text for uuid columns
-	query = regexp.MustCompile(`BIN_TO_UUID\(([^,)]+),\s*true\)`).ReplaceAllString(query, "($1)::text")
-	query = regexp.MustCompile(`BIN_TO_UUID\(([^,)]+)\)`).ReplaceAllString(query, "($1)::text")
+	query = reBinToUUIDTrue.ReplaceAllString(query, "($1)::text")
+	query = reBinToUUID.ReplaceAllString(query, "($1)::text")
 	// HEX(expr) → encode(expr::bytea, 'hex') — MySQL HEX function
 	query = rewriteHex(query)
 	// JSON_SET(col, path, val) → jsonb_set(col, path_array, val)
 	query = rewriteJSONSet(query)
 	// TIMEDIFF(a, b) → (a - b)
-	query = regexp.MustCompile(`TIMEDIFF\(([^,]+),\s*([^)]+)\)`).ReplaceAllString(query, "($1 - $2)")
+	query = reTimeDiff.ReplaceAllString(query, "($1 - $2)")
 	// TIME_TO_SEC(interval) → EXTRACT(EPOCH FROM interval)
-	query = regexp.MustCompile(`TIME_TO_SEC\(([^)]+)\)`).ReplaceAllString(query, "EXTRACT(EPOCH FROM $1)")
+	query = reTimeToSec.ReplaceAllString(query, "EXTRACT(EPOCH FROM $1)")
 	// ON DUPLICATE KEY UPDATE → rewrite to ON CONFLICT DO UPDATE SET for raw SQL
 	// that doesn't go through dialect helpers.
 	if strings.Contains(query, "ON DUPLICATE KEY UPDATE") {
 		query = rewriteOnDuplicateKey(query)
 	}
 	// FROM DUAL → removed (PG doesn't need FROM DUAL for SELECT without a table)
-	query = regexp.MustCompile(`(?i)\s+FROM\s+DUAL\b`).ReplaceAllString(query, "")
+	query = reFromDual.ReplaceAllString(query, "")
 	// STRAIGHT_JOIN → JOIN (MySQL optimizer hint, not supported by PG)
 	query = strings.ReplaceAll(query, "STRAIGHT_JOIN", "JOIN")
 	// MySQL SET FOREIGN_KEY_CHECKS / innodb / sql_mode commands → no-op for PG
@@ -151,8 +194,7 @@ func rebindQuery(query string) string {
 	}
 	// MySQL SEPARATOR in GROUP_CONCAT → already handled by dialect, but catch raw usage
 	if strings.Contains(query, "separator") || strings.Contains(query, "SEPARATOR") {
-		re := regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
-		query = re.ReplaceAllString(query, "")
+		query = reSeparator.ReplaceAllString(query, "")
 	}
 	// MySQL JSON path operators: col->'$.key' → col->'key', col->>'$.key' → col->>'key'
 	query = rewriteJSONPath(query)
@@ -176,7 +218,7 @@ func rebindQuery(query string) string {
 	query = rewriteTimestampDiff(query)
 	// TIMESTAMP(x) → x::timestamp (PG cast syntax)
 	// MySQL TIMESTAMP(?) converts a value to timestamp type
-	query = regexp.MustCompile(`\bTIMESTAMP\(([^)]+)\)`).ReplaceAllString(query, "($1)::timestamp")
+	query = reTimestamp.ReplaceAllString(query, "($1)::timestamp")
 	// CAST(... AS UNSIGNED) → CAST(... AS integer) (MySQL unsigned → PG integer)
 	query = strings.ReplaceAll(query, "AS UNSIGNED)", "AS integer)")
 	// CAST(... AS SIGNED INT) / CAST(... AS SIGNED) → CAST(... AS integer)
@@ -186,7 +228,7 @@ func rebindQuery(query string) string {
 	query = strings.ReplaceAll(query, "CAST(TRUE AS JSON)", "TRUE")
 	query = strings.ReplaceAll(query, "CAST(FALSE AS JSON)", "FALSE")
 	// MAX(boolean_col) → BOOL_OR(boolean_col) for PG
-	query = regexp.MustCompile(`MAX\(([^)]*\.denylisted)\)`).ReplaceAllString(query, "BOOL_OR($1)")
+	query = reMaxDenylisted.ReplaceAllString(query, "BOOL_OR($1)")
 	// Fix CASE type mismatch: ELSE hdek.decryptable (boolean) mixed with THEN -1 (integer)
 	// Cast boolean to integer in CASE branches
 	query = strings.ReplaceAll(query, "ELSE hdek.decryptable", "ELSE CAST(hdek.decryptable AS integer)")
@@ -258,18 +300,13 @@ func rebindQuery(query string) string {
 	// Replace INTERVAL N SECOND (without DATE_ADD) → INTERVAL 'N seconds'
 	// e.g., "INTERVAL 5 MINUTE" → "INTERVAL '5 minutes'"
 	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
-		re := regexp.MustCompile(`INTERVAL\s+(\d+)\s+` + unit)
-		query = re.ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
-		// INTERVAL ? SECOND → ? * INTERVAL '1 second' (placeholder form)
-		rePlaceholder := regexp.MustCompile(`INTERVAL\s+(\?)\s+` + unit)
-		query = rePlaceholder.ReplaceAllString(query, "? * INTERVAL '1 "+strings.ToLower(unit)+"'")
+		query = reIntervalLiteral[unit].ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
+		query = reIntervalPlaceholder[unit].ReplaceAllString(query, "? * INTERVAL '1 "+strings.ToLower(unit)+"'")
 	}
 	// MySQL allows LIMIT on UPDATE/DELETE; PG does not.
-	// Strip trailing LIMIT N from UPDATE and DELETE statements (not subqueries).
 	uq := strings.ToUpper(strings.TrimLeft(query, " \t\n"))
 	if strings.HasPrefix(uq, "UPDATE") || strings.HasPrefix(uq, "DELETE") {
-		re := regexp.MustCompile(`(?i)\s+LIMIT\s+\d+\s*$`)
-		query = re.ReplaceAllString(query, "")
+		query = reLimitTrailing.ReplaceAllString(query, "")
 	}
 
 	// Resolve ambiguous column references in ON CONFLICT DO UPDATE SET clauses.
@@ -455,8 +492,7 @@ func rewriteDeleteUsing(query string) string {
 
 // rewriteTimestampDiff converts MySQL TIMESTAMPDIFF(SECOND, x, y) → PG EXTRACT(EPOCH FROM (y - x)).
 func rewriteTimestampDiff(query string) string {
-	re := regexp.MustCompile(`(?i)TIMESTAMPDIFF\(\s*SECOND\s*,\s*(.+?)\s*,\s*(.+?)\s*\)`)
-	if !re.MatchString(query) {
+	if !reTimestampDiff.MatchString(query) {
 		return query
 	}
 	// Use paren-balanced parsing for complex arguments
@@ -642,6 +678,29 @@ func castPlaceholdersInArg(arg string) string {
 	return arg
 }
 
+// rewriteJSONExtractFunc converts MySQL JSON_EXTRACT(col, path) → PG (col->path_key).
+// For parameterized paths (JSON_EXTRACT(col, ?)), wraps with regexp_replace to strip
+// the MySQL $. prefix and optional quotes at runtime.
+func rewriteJSONExtractFunc(query string) string {
+	// Match JSON_EXTRACT(identifier, ?) or JSON_EXTRACT(identifier, 'literal')
+	return reJSONExtractFunc.ReplaceAllStringFunc(query, func(match string) string {
+		m := reJSONExtractFunc.FindStringSubmatch(match)
+		if m == nil {
+			return match
+		}
+		col, pathExpr := m[1], m[2]
+		if pathExpr == "?" {
+			// Parameterized path: strip $. prefix and quotes at runtime
+			return fmt.Sprintf("(%s->regexp_replace(?::text, '^\\$\\.\"?([^\"]*)\"?$', '\\1'))", col)
+		}
+		// Literal path: strip $. prefix inline
+		path := strings.TrimPrefix(pathExpr, "'$.")
+		path = strings.TrimSuffix(path, "'")
+		path = strings.Trim(path, `"`)
+		return fmt.Sprintf("(%s->'%s')", col, path)
+	})
+}
+
 // rewriteJSONPath converts MySQL JSON path operator syntax to PG.
 // MySQL: col->'$.key' → PG: col->'key'
 // MySQL: col->>'$.key' → PG: col->>'key'
@@ -649,8 +708,7 @@ func castPlaceholdersInArg(arg string) string {
 func rewriteJSONPath(query string) string {
 	// Match ->'$.key' and ->>'$.key' patterns, strip the $.
 	// ->> must be checked first (longer match)
-	re := regexp.MustCompile(`->>?'\$\.`)
-	query = re.ReplaceAllStringFunc(query, func(match string) string {
+	query = reJSONPath.ReplaceAllStringFunc(query, func(match string) string {
 		return strings.Replace(match, "$.", "", 1)
 	})
 	return query
@@ -1124,31 +1182,3 @@ func rewriteUpdateJoin(query string) string {
 		table1, alias1, setClause, table2, alias2, onCondition)
 }
 
-// stripUpdateSetAlias removes table alias qualifiers from UPDATE SET clauses.
-// PG doesn't allow alias-qualified columns in SET: UPDATE t1 a SET a.col = ? → SET col = ?
-func stripUpdateSetAlias(query string) string {
-	// Find UPDATE <table> <alias> ... SET <assignments>
-	re := regexp.MustCompile(`(?i)UPDATE\s+"?(\w+)"?\s+(\w+)\s+`)
-	m := re.FindStringSubmatch(query)
-	if m == nil {
-		return query
-	}
-	alias := m[2]
-	// Don't strip if "alias" is actually a keyword like SET, JOIN, etc.
-	upper := strings.ToUpper(alias)
-	if upper == "SET" || upper == "JOIN" || upper == "INNER" || upper == "LEFT" || upper == "WHERE" {
-		return query
-	}
-	// In the SET clause, replace alias.col = with col =
-	// Only replace in the SET portion (after SET keyword)
-	setIdx := strings.Index(strings.ToUpper(query), " SET ")
-	if setIdx == -1 {
-		return query
-	}
-	prefix := query[:setIdx+5] // includes " SET "
-	rest := query[setIdx+5:]
-	// Replace alias.col patterns in the SET clause
-	aliasRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(alias) + `\.(\w+)`)
-	rest = aliasRe.ReplaceAllString(rest, "$1")
-	return prefix + rest
-}
