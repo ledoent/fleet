@@ -171,4 +171,3 @@ func (postgresDialect) IsReadOnly(err error) bool { return pg.IsReadOnly(err) }
 func (postgresDialect) IsBadConnection(err error) bool { return pg.IsBadConnection(err) }
 
 func (postgresDialect) ReturningID() string { return " RETURNING id" }
-

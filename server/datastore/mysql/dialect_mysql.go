@@ -98,4 +98,3 @@ func (mysqlDialect) IsBadConnection(err error) bool {
 }
 
 func (mysqlDialect) ReturningID() string { return "" }
-

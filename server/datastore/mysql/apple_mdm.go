@@ -937,7 +937,7 @@ func (ds *Datastore) NewMDMAppleEnrollmentProfile(
 INSERT INTO
     mdm_apple_enrollment_profiles (token, type, dep_profile)
 VALUES (?, ?, ?)
-` + ds.dialect.OnDuplicateKey("id", `
+`+ds.dialect.OnDuplicateKey("id", `
     token = VALUES(token),
     type = VALUES(type),
     dep_profile = VALUES(dep_profile)
