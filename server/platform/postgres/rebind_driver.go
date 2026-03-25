@@ -262,6 +262,7 @@ func rebindQuery(query string) string {
 		"resync", "terms_expired", "sync_request",
 		"discard_data", "is_server", "is_kernel", "encrypted",
 		"skipped", "installed_from_dep", "is_personal_enrollment",
+		"saved", "q.saved",
 	} {
 		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
 		query = strings.ReplaceAll(query, col+" = 0", col+" = false")

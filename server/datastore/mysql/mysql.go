@@ -884,14 +884,23 @@ func (ds *Datastore) HealthCheck() error {
 	// Check that the primary is reachable and not in read-only mode.
 	// After an AWS Aurora failover the old writer is demoted to a reader;
 	// detecting this lets the health check fail so the orchestrator can restart Fleet.
-	var readOnly int
-	if err := ds.primary.QueryRowContext(context.Background(), "SELECT @@read_only").Scan(&readOnly); err != nil {
-		return err
-	}
-	if readOnly == 1 {
-		// Intentionally return an error so that the health check endpoint returns a 500,
-		// signaling the orchestrator (ECS, Kubernetes) to restart Fleet with fresh DB connections.
-		return errors.New("primary database is read-only, possible failover detected")
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		// PG: check if the server is in recovery (read-only replica)
+		var inRecovery bool
+		if err := ds.primary.QueryRowContext(context.Background(), "SELECT pg_is_in_recovery()").Scan(&inRecovery); err != nil {
+			return err
+		}
+		if inRecovery {
+			return errors.New("primary database is in recovery (read-only), possible failover detected")
+		}
+	} else {
+		var readOnly int
+		if err := ds.primary.QueryRowContext(context.Background(), "SELECT @@read_only").Scan(&readOnly); err != nil {
+			return err
+		}
+		if readOnly == 1 {
+			return errors.New("primary database is read-only, possible failover detected")
+		}
 	}
 
 	if ds.readReplicaConfig != nil {
