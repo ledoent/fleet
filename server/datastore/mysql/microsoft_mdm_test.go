@@ -23,7 +23,7 @@ import (
 )
 
 func TestMDMWindows(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
@@ -3314,7 +3314,7 @@ func testSetMDMWindowsProfilesWithVariables(t *testing.T, ds *Datastore) {
 	}
 
 	// both profiles have no variable
-	_, err := batchSetProfileVariableAssociationsDB(ctx, ds.writer(ctx), []fleet.MDMProfileUUIDFleetVariables{
+	_, err := batchSetProfileVariableAssociationsDB(ctx, ds.writer(ctx), ds.dialect, []fleet.MDMProfileUUIDFleetVariables{
 		{ProfileUUID: globalProfiles[0], FleetVariables: nil},
 		{ProfileUUID: globalProfiles[1], FleetVariables: nil},
 	}, "windows")
@@ -3324,7 +3324,7 @@ func testSetMDMWindowsProfilesWithVariables(t *testing.T, ds *Datastore) {
 	checkProfileVariables(globalProfiles[1], 0, nil)
 
 	// add some variables
-	_, err = batchSetProfileVariableAssociationsDB(ctx, ds.writer(ctx), []fleet.MDMProfileUUIDFleetVariables{
+	_, err = batchSetProfileVariableAssociationsDB(ctx, ds.writer(ctx), ds.dialect, []fleet.MDMProfileUUIDFleetVariables{
 		{ProfileUUID: globalProfiles[0], FleetVariables: []fleet.FleetVarName{fleet.FleetVarHostEndUserIDPUsername, fleet.FleetVarName(string(fleet.FleetVarDigiCertDataPrefix) + "ZZZ")}},
 		{ProfileUUID: globalProfiles[1], FleetVariables: []fleet.FleetVarName{fleet.FleetVarHostEndUserIDPGroups}},
 	}, "windows")

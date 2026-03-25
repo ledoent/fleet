@@ -249,6 +249,7 @@ func mockDatastore(t *testing.T) (sqlmock.Sqlmock, *Datastore) {
 		primary: dbmock,
 		replica: dbmock,
 		logger:  slog.New(slog.DiscardHandler),
+		dialect: mysqlDialect{},
 	}
 
 	return mock, ds
@@ -1093,7 +1094,7 @@ func TestCompareVersions(t *testing.T) {
 }
 
 func TestDebugs(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	status, err := ds.InnoDBStatus(context.Background())
 	require.NoError(t, err)
@@ -1105,7 +1106,7 @@ func TestDebugs(t *testing.T) {
 }
 
 func TestWantedModesEnabled(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	var sqlMode string
 	err := ds.writer(context.Background()).GetContext(context.Background(), &sqlMode, `SELECT @@SQL_MODE`)
