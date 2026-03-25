@@ -41,6 +41,7 @@ type EnrollmentToken struct {
 	EnrollmentToken  string `json:"android_enrollment_token"`
 	EnrollmentURL    string `json:"android_enrollment_url"`
 	EnrollmentQRCode string `json:"android_enrollment_qr_code"`
+	EnrollmentMode   string `json:"android_enrollment_mode,omitempty"`
 }
 
 type Device struct {
