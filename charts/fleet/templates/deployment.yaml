@@ -188,7 +188,11 @@ spec:
                 name: {{ .Values.fleet.license.secretName }}
           {{- end }}
           ## END FLEET SECTION
-          ## BEGIN MYSQL SECTION
+          ## BEGIN DATABASE SECTION
+          {{- if .Values.database.driver }}
+          - name: FLEET_MYSQL_DRIVER
+            value: "{{ .Values.database.driver }}"
+          {{- end }}
           - name: FLEET_MYSQL_ADDRESS
             value: "{{ .Values.database.address }}"
           - name: FLEET_MYSQL_DATABASE
@@ -224,7 +228,7 @@ spec:
           - name: FLEET_MYSQL_TLS_SERVER_NAME
             value: "{{ .Values.database.tls.serverName }}"
           {{- end }}
-          ## END MYSQL SECTION
+          ## END DATABASE SECTION
           ## BEGIN MYSQL READ REPLICA SECTION
           {{- if .Values.database_read_replica }}
           {{- if .Values.database_read_replica.address }}

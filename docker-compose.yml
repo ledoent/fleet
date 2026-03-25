@@ -81,6 +81,38 @@ services:
       - /var/lib/mysql:rw,noexec,nosuid
       - /tmpfs
 
+  # PostgreSQL test instance for POSTGRES_TEST=1 integration tests.
+  # Usage: docker compose up -d postgres_test
+  # Then:  POSTGRES_TEST=1 go test ./server/datastore/mysql/...
+  postgres_test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: insecure
+      POSTGRES_DB: fleet
+    ports:
+      - "${FLEET_POSTGRES_TEST_PORT:-5434}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data:rw,noexec,nosuid
+    command: [
+        "postgres",
+        "-c", "fsync=off",
+        "-c", "full_page_writes=off",
+        "-c", "synchronous_commit=off",
+    ]
+
+  # PostgreSQL development instance.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: insecure
+      POSTGRES_DB: fleet
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-persistent-volume:/var/lib/postgresql/data
+
   # Unauthenticated SMTP server.
   mailhog:
     image: mailhog/mailhog:latest
@@ -170,4 +202,5 @@ services:
 
 volumes:
   mysql-persistent-volume:
+  postgres-persistent-volume:
   data-s3:

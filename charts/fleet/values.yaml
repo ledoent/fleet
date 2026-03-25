@@ -221,9 +221,13 @@ osquery:
       resultTopic: ""
 
 ## Section: database
-# All of the connection settings for MySQL
+# All of the connection settings for the primary database.
+# Supports MySQL (default) and PostgreSQL (experimental).
 database:
-  # Name of the Secret resource containing MySQL password and TLS secrets
+  # Driver selects the database backend: "mysql" (default) or "postgres".
+  # PostgreSQL support is experimental for self-hosted deployments.
+  driver: mysql
+  # Name of the Secret resource containing database password and TLS secrets
   secretName: mysql
   address: 127.0.0.1:3306
   database: fleet
@@ -321,6 +325,12 @@ environments:
 #       key: secret-key-name
 
 mysql:
+  enabled: false
+
+# PostgreSQL subchart (experimental). Enable when database.driver is "postgres"
+# and you want Helm to provision a PG instance. For production, use a managed
+# PostgreSQL service (e.g., AWS RDS, GCP Cloud SQL) and set database.address.
+postgresql:
   enabled: false
 
 redis:
