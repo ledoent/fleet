@@ -31,6 +31,7 @@ permissions:
 
 jobs:
   trivy:
+    if: github.repository == 'fleetdm/fleet'
     permissions:
       id-token: write # for aws-actions/configure-aws-credentials
       contents: read # for actions/checkout to fetch code

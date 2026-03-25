@@ -793,7 +793,6 @@ VALUES
 	self_service = VALUES(self_service),
 	install_during_setup = COALESCE(?, install_during_setup)`)
 
-
 	var globalOrTmID uint
 	if teamID != nil {
 		globalOrTmID = *teamID

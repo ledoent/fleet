@@ -99,7 +99,7 @@ func (c *Client) AddDualDialectMigration(upMySQL, downMySQL, upPG, downPG func(*
 		Version:     v,
 		Next:        -1,
 		Previous:    -1,
-		Source:       filename,
+		Source:      filename,
 		UpFnMySQL:   upMySQL,
 		DownFnMySQL: downMySQL,
 		UpFnPG:      upPG,

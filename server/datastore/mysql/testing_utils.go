@@ -18,8 +18,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -544,7 +544,9 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 			errCount++
 			if errCount <= 3 {
 				first := stmt
-				if len(first) > 100 { first = first[:100] }
+				if len(first) > 100 {
+					first = first[:100]
+				}
 				t.Logf("PG schema warning (%d): %v [%s]", errCount, err, first)
 			}
 		}
@@ -625,12 +627,10 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 	nonEmptyTables := map[string]bool{
 		"app_config_json":                  true,
 		"fleet_variables":                  true,
-		"labels":                           true,
 		"mdm_apple_declaration_categories": true,
 		"mdm_delivery_status":              true,
 		"mdm_operation_types":              true,
 		"migration_status_tables":          true,
-		"migration_status_data":            true,
 		"osquery_options":                  true,
 		"software_categories":              true,
 	}
@@ -654,15 +654,17 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 					tables = append(tables, tbl)
 				}
 			}
+			if err := rows.Err(); err != nil {
+				t.Logf("PG truncate: rows iteration: %v", err)
+			}
 		}
 
 		for _, tbl := range tables {
 			if nonEmptyTables[tbl] {
 				continue
 			}
-			if _, err := db.ExecContext(ctx, `TRUNCATE TABLE "`+tbl+`" CASCADE`); err != nil {
-				// Ignore errors for tables that don't exist
-			}
+			_, _ = db.ExecContext(ctx, `TRUNCATE TABLE "`+tbl+`" CASCADE`)
+
 		}
 		return
 	}

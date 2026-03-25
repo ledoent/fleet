@@ -206,7 +206,7 @@ func (ds *Datastore) ClearPendingEscrow(ctx context.Context, hostID uint) error 
 func (ds *Datastore) ReportEscrowError(ctx context.Context, hostID uint, errorMessage string) error {
 	_, err := ds.writer(ctx).ExecContext(ctx, `
 INSERT INTO host_disk_encryption_keys
-  (host_id, base64_encrypted, client_error) VALUES (?, '', ?) ` + ds.dialect.OnDuplicateKey("host_id", `client_error = VALUES(client_error)`) + `
+  (host_id, base64_encrypted, client_error) VALUES (?, '', ?) `+ds.dialect.OnDuplicateKey("host_id", `client_error = VALUES(client_error)`)+`
 `, hostID, errorMessage)
 	return err
 }
@@ -214,7 +214,7 @@ INSERT INTO host_disk_encryption_keys
 func (ds *Datastore) QueueEscrow(ctx context.Context, hostID uint) error {
 	_, err := ds.writer(ctx).ExecContext(ctx, `
 INSERT INTO host_disk_encryption_keys
-  (host_id, base64_encrypted, reset_requested) VALUES (?, '', TRUE) ` + ds.dialect.OnDuplicateKey("host_id", `reset_requested = TRUE`) + `
+  (host_id, base64_encrypted, reset_requested) VALUES (?, '', TRUE) `+ds.dialect.OnDuplicateKey("host_id", `reset_requested = TRUE`)+`
 `, hostID)
 	return err
 }

@@ -32,8 +32,8 @@ import (
 	nano_push "github.com/fleetdm/fleet/v4/server/mdm/nanomdm/push"
 	scep_depot "github.com/fleetdm/fleet/v4/server/mdm/scep/depot"
 	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
-	"github.com/go-sql-driver/mysql"
 	_ "github.com/fleetdm/fleet/v4/server/platform/postgres" // register pgx-rebind driver for PostgreSQL
+	"github.com/go-sql-driver/mysql"
 	"github.com/hashicorp/go-multierror"
 	"github.com/jmoiron/sqlx"
 	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
@@ -1508,17 +1508,3 @@ func batchProcessDB[T any](
 	return nil
 }
 
-// jsonObjectFunc returns the SQL function name for building JSON objects.
-// MySQL: JSON_OBJECT, PostgreSQL: jsonb_build_object
-func (ds *Datastore) jsonObjectFunc() string {
-	if ds.dialect.ReturningID() != "" {
-		return "jsonb_build_object"
-	}
-	return "JSON_OBJECT"
-}
-
-// resolveJSONFunc replaces %JSON_OBJECT% placeholder with the dialect-specific
-// JSON object builder function name.
-func (ds *Datastore) resolveJSONFunc(sql string) string {
-	return strings.ReplaceAll(sql, "%JSON_OBJECT%", ds.jsonObjectFunc())
-}

@@ -75,12 +75,7 @@ func IsBadConnection(err error) bool {
 		return errors.Is(se.Err, syscall.ECONNRESET) || errors.Is(se.Err, syscall.EPIPE)
 	}
 
-	var netErr *net.OpError
-	if errors.As(err, &netErr) {
-		return true
-	}
-
-	return false
+	return errors.As(err, &netErr)
 }
 
 // hasErrorCode checks if the error (or any wrapped error) contains the given
@@ -97,7 +92,7 @@ func hasErrorCode(err error, code string) bool {
 	}
 	var pgxErr pgxError
 	if errors.As(err, &pgxErr) {
-		return string(pgxErr.Code()) == code
+		return pgxErr.Code() == code
 	}
 
 	// Check for lib/pq-style error (has Code field via the pq.Error type).
