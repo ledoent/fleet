@@ -350,9 +350,9 @@ INSERT INTO software_installers (
 			true,
 		}
 
-		res, err := tx.ExecContext(ctx, stmt, args...)
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, stmt, args...)
 		if err != nil {
-			if IsDuplicate(err) {
+			if ds.dialect.IsDuplicate(err) {
 				// already exists for this team/no team
 				teamName, err := ds.getTeamName(ctx, payload.TeamID)
 				if err != nil {
@@ -363,10 +363,9 @@ INSERT INTO software_installers (
 			return err
 		}
 
-		id, _ := res.LastInsertId()
 		installerID = uint(id) //nolint:gosec // dismiss G115
 
-		if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, installerID, *payload.ValidatedLabels, softwareTypeInstaller); err != nil {
+		if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, ds.dialect, installerID, *payload.ValidatedLabels, softwareTypeInstaller); err != nil {
 			return ctxerr.Wrap(ctx, err, "upsert software installer labels")
 		}
 
@@ -485,7 +484,7 @@ func (ds *Datastore) createAutomaticPolicy(ctx context.Context, tx sqlx.ExtConte
 		SoftwareInstallerID: softwareInstallerID,
 		VPPAppsTeamsID:      vppAppsTeamsID,
 		Type:                fleet.PolicyTypeDynamic,
-	})
+	}, ds.dialect)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "create automatic policy query")
 	}
@@ -578,7 +577,7 @@ func (ds *Datastore) addSoftwareTitleToMatchingSoftware(ctx context.Context, tit
 	args = append(args, whereArgs...)
 	updateSoftwareStmt := fmt.Sprintf(`
 		    UPDATE software s
-		    SET s.title_id = ?
+		    SET title_id = ?
 		    %s`, whereClause)
 	_, err := ds.writer(ctx).ExecContext(ctx, updateSoftwareStmt, args...)
 	return ctxerr.Wrap(ctx, err, "adding fk reference in software to software_titles")
@@ -594,7 +593,7 @@ const (
 
 // setOrUpdateSoftwareInstallerLabelsDB sets or updates the label associations for the specified software
 // installer. If no labels are provided, it will remove all label associations with the software installer.
-func setOrUpdateSoftwareInstallerLabelsDB(ctx context.Context, tx sqlx.ExtContext, installerID uint, labels fleet.LabelIdentsWithScope, softwareType softwareType) error {
+func setOrUpdateSoftwareInstallerLabelsDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, installerID uint, labels fleet.LabelIdentsWithScope, softwareType softwareType) error {
 	labelIds := make([]uint, 0, len(labels.ByName))
 	for _, label := range labels.ByName {
 		labelIds = append(labelIds, label.LabelID)
@@ -635,7 +634,7 @@ func setOrUpdateSoftwareInstallerLabelsDB(ctx context.Context, tx sqlx.ExtContex
 		}
 
 		stmt := `INSERT INTO %[1]s_labels (%[1]s_id, label_id, exclude, require_all) VALUES %s
-							ON DUPLICATE KEY UPDATE exclude = VALUES(exclude), require_all = VALUES(require_all)`
+							` + dialect.OnDuplicateKey("id", "exclude = VALUES(exclude), require_all = VALUES(require_all)")
 		var placeholders string
 		var insertArgs []interface{}
 		for _, lid := range labelIds {
@@ -731,7 +730,7 @@ func (ds *Datastore) SaveInstallerUpdates(ctx context.Context, payload *fleet.Up
 		}
 
 		if payload.ValidatedLabels != nil {
-			if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, payload.InstallerID, *payload.ValidatedLabels, softwareTypeInstaller); err != nil {
+			if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, ds.dialect, payload.InstallerID, *payload.ValidatedLabels, softwareTypeInstaller); err != nil {
 				return ctxerr.Wrap(ctx, err, "upsert software installer labels")
 			}
 		}
@@ -743,7 +742,7 @@ func (ds *Datastore) SaveInstallerUpdates(ctx context.Context, payload *fleet.Up
 		}
 
 		if payload.DisplayName != nil {
-			if err := updateSoftwareTitleDisplayName(ctx, tx, payload.TeamID, payload.TitleID, *payload.DisplayName); err != nil {
+			if err := updateSoftwareTitleDisplayName(ctx, tx, ds.dialect, payload.TeamID, payload.TitleID, *payload.DisplayName); err != nil {
 				return ctxerr.Wrap(ctx, err, "update software title display name")
 			}
 		}
@@ -1161,7 +1160,7 @@ func (ds *Datastore) DeleteSoftwareInstaller(ctx context.Context, id uint) error
 		// allow delete only if install_during_setup is false
 		res, err := tx.ExecContext(ctx, `DELETE FROM software_installers WHERE id = ? AND install_during_setup = 0`, id)
 		if err != nil {
-			if isMySQLForeignKey(err) {
+			if ds.dialect.IsForeignKey(err) {
 				// Check if the software installer is referenced by a policy automation.
 				var count int
 				if err := sqlx.GetContext(ctx, tx, &count, `SELECT COUNT(*) FROM policies WHERE software_installer_id = ?`, id); err != nil {
@@ -1283,12 +1282,12 @@ INSERT INTO upcoming_activities
 VALUES
 	(?, ?, ?, ?, 'software_install', ?,
 		JSON_OBJECT(
-			'self_service', ?,
+			'self_service', CAST(? AS UNSIGNED),
 			'installer_filename', ?,
 			'version', ?,
 			'software_title_name', ?,
 			'source', ?,
-			'with_retries', ?,
+			'with_retries', CAST(? AS UNSIGNED),
 			'user', (SELECT JSON_OBJECT('name', name, 'email', email, 'gravatar_url', gravatar_url) FROM users WHERE id = ?)
 		)
 	)`
@@ -1336,26 +1335,33 @@ VALUES
 	}
 	execID := uuid.NewString()
 
+	// Convert booleans to int for JSON_OBJECT compatibility with PG's jsonb_build_object.
+	selfServiceInt := 0
+	if opts.SelfService {
+		selfServiceInt = 1
+	}
+	withRetriesInt := 0
+	if opts.WithRetries {
+		withRetriesInt = 1
+	}
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		res, err := tx.ExecContext(ctx, insertUAStmt,
+		activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertUAStmt,
 			hostID,
 			opts.Priority(),
 			userID,
 			opts.IsFleetInitiated(),
 			execID,
-			opts.SelfService,
+			selfServiceInt,
 			installerDetails.Filename,
 			installerDetails.Version,
 			installerDetails.TitleName,
 			installerDetails.Source,
-			opts.WithRetries,
+			withRetriesInt,
 			userID,
 		)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "insert software install request")
 		}
-
-		activityID, _ := res.LastInsertId()
 		_, err = tx.ExecContext(ctx, insertSIUAStmt,
 			activityID,
 			softwareInstallerID,
@@ -1474,7 +1480,7 @@ VALUES
 			'software_title_name', ?,
 			'source', ?,
 			'user', (SELECT JSON_OBJECT('name', name, 'email', email, 'gravatar_url', gravatar_url) FROM users WHERE id = ?),
-			'self_service', ?
+			'self_service', CAST(? AS UNSIGNED)
 		)
 	)`
 
@@ -1515,8 +1521,12 @@ VALUES
 		userID = &ctxUser.ID
 	}
 
+	selfServiceInt := 0
+	if selfService {
+		selfServiceInt = 1
+	}
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		res, err := tx.ExecContext(ctx, insertUAStmt,
+		activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertUAStmt,
 			hostID,
 			0, // Uninstalls are never used in setup experience, so always default priority
 			userID,
@@ -1525,13 +1535,11 @@ VALUES
 			installerDetails.TitleName,
 			installerDetails.Source,
 			userID,
-			selfService,
+			selfServiceInt,
 		)
 		if err != nil {
 			return err
 		}
-
-		activityID, _ := res.LastInsertId()
 		_, err = tx.ExecContext(ctx, insertSIUAStmt,
 			activityID,
 			softwareInstallerID,
@@ -2063,17 +2071,17 @@ func (ds *Datastore) CleanupUnusedSoftwareInstallers(ctx context.Context, softwa
 const maxCachedFMAVersions = 2
 
 func (ds *Datastore) BatchSetSoftwareInstallers(ctx context.Context, tmID *uint, installers []*fleet.UploadSoftwareInstallerPayload) error {
-	const upsertSoftwareTitles = `
+	upsertSoftwareTitles := `
 INSERT INTO software_titles
   (name, source, extension_for, bundle_identifier, upgrade_code)
 VALUES
   %s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("id", `
   name = VALUES(name),
   source = VALUES(source),
   extension_for = VALUES(extension_for),
   bundle_identifier = VALUES(bundle_identifier)
-`
+`)
 
 	const loadSoftwareTitles = `
 SELECT
@@ -2280,7 +2288,7 @@ WHERE
 	title_id = ?
 `
 
-	const insertNewOrEditedInstaller = `
+	insertNewOrEditedInstaller := `
 INSERT INTO software_installers (
 	team_id,
 	global_or_team_id,
@@ -2308,7 +2316,7 @@ INSERT INTO software_installers (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
   (SELECT name FROM users WHERE id = ?), (SELECT email FROM users WHERE id = ?), ?, ?, COALESCE(?, false), ?, ?
 )
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("id", `
   install_script_content_id = VALUES(install_script_content_id),
   uninstall_script_content_id = VALUES(uninstall_script_content_id),
   post_install_script_content_id = VALUES(post_install_script_content_id),
@@ -2326,7 +2334,7 @@ ON DUPLICATE KEY UPDATE
   url = VALUES(url),
   install_during_setup = COALESCE(?, install_during_setup),
   is_active = VALUES(is_active)
-`
+`)
 
 	const updateInstaller = `
 UPDATE
@@ -2368,7 +2376,7 @@ WHERE
 	software_installer_id = ?
 `
 
-	const upsertInstallerLabels = `
+	upsertInstallerLabels := `
 INSERT INTO
 	software_installer_labels (
 		software_installer_id,
@@ -2378,10 +2386,10 @@ INSERT INTO
 	)
 VALUES
 	%s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("id", `
 	exclude = VALUES(exclude),
 	require_all = VALUES(require_all)
-`
+`)
 
 	const loadExistingInstallerLabels = `
 SELECT
@@ -2409,8 +2417,7 @@ WHERE
 	software_category_id NOT IN (?)
 `
 
-	const upsertInstallerCategories = `
-INSERT IGNORE INTO
+	const upsertInstallerCategoriesSuffix = `
 	software_installer_software_categories (
 		software_installer_id,
 		software_category_id
@@ -2672,26 +2679,23 @@ WHERE
 				return ctxerr.Errorf(ctx, "labels have not been validated for installer with name %s", installer.Filename)
 			}
 
-			isRes, err := insertScriptContents(ctx, tx, installer.InstallScript)
+			installScriptID, err := insertScriptContents(ctx, tx, ds.dialect, installer.InstallScript)
 			if err != nil {
 				return ctxerr.Wrapf(ctx, err, "inserting install script contents for software installer with name %q", installer.Filename)
 			}
-			installScriptID, _ := isRes.LastInsertId()
 
-			uisRes, err := insertScriptContents(ctx, tx, installer.UninstallScript)
+			uninstallScriptID, err := insertScriptContents(ctx, tx, ds.dialect, installer.UninstallScript)
 			if err != nil {
 				return ctxerr.Wrapf(ctx, err, "inserting uninstall script contents for software installer with name %q", installer.Filename)
 			}
-			uninstallScriptID, _ := uisRes.LastInsertId()
 
 			var postInstallScriptID *int64
 			if installer.PostInstallScript != "" {
-				pisRes, err := insertScriptContents(ctx, tx, installer.PostInstallScript)
+				insertID, err := insertScriptContents(ctx, tx, ds.dialect, installer.PostInstallScript)
 				if err != nil {
 					return ctxerr.Wrapf(ctx, err, "inserting post-install script contents for software installer with name %q", installer.Filename)
 				}
 
-				insertID, _ := pisRes.LastInsertId()
 				postInstallScriptID = &insertID
 			}
 
@@ -3022,7 +3026,7 @@ WHERE
 					upsertCategoriesArgs = append(upsertCategoriesArgs, installerID, catID)
 				}
 				upsertCategoriesValues := strings.TrimSuffix(strings.Repeat("(?,?),", len(installer.CategoryIDs)), ",")
-				_, err = tx.ExecContext(ctx, fmt.Sprintf(upsertInstallerCategories, upsertCategoriesValues), upsertCategoriesArgs...)
+				_, err = tx.ExecContext(ctx, ds.dialect.InsertIgnoreInto()+fmt.Sprintf(upsertInstallerCategoriesSuffix, upsertCategoriesValues)+ds.dialect.OnConflictDoNothing("software_installer_id,software_category_id"), upsertCategoriesArgs...)
 				if err != nil {
 					return ctxerr.Wrapf(ctx, err, "insert new/edited categories for installer with name %q", installer.Filename)
 				}
@@ -3031,7 +3035,7 @@ WHERE
 			// update display name for the software title if it needs to be updated or inserted
 			// no deletions will happen, display names will be set to empty if needed
 			if name, ok := displayNameIDMap[titleID]; (ok && name != installer.DisplayName) || (!ok && installer.DisplayName != "") {
-				if err := updateSoftwareTitleDisplayName(ctx, tx, tmID, titleID, installer.DisplayName); err != nil {
+				if err := updateSoftwareTitleDisplayName(ctx, tx, ds.dialect, tmID, titleID, installer.DisplayName); err != nil {
 					return ctxerr.Wrapf(ctx, err, "update software title display name for installer with name %q", installer.Filename)
 				}
 			}

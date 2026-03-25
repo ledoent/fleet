@@ -53,13 +53,9 @@ UNION
 func (ds *Datastore) InsertCronStats(ctx context.Context, statsType fleet.CronStatsType, name string, instance string, status fleet.CronStatsStatus) (int, error) {
 	stmt := `INSERT INTO cron_stats (stats_type, name, instance, status) VALUES (?, ?, ?, ?)`
 
-	res, err := ds.writer(ctx).ExecContext(ctx, stmt, statsType, name, instance, status)
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), stmt, statsType, name, instance, status)
 	if err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "insert cron stats")
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, ctxerr.Wrap(ctx, err, "insert cron stats last insert id")
 	}
 
 	return int(id), nil

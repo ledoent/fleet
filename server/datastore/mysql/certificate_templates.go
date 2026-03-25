@@ -180,7 +180,7 @@ func (ds *Datastore) GetCertificateTemplatesByTeamID(ctx context.Context, teamID
 }
 
 func (ds *Datastore) CreateCertificateTemplate(ctx context.Context, certificateTemplate *fleet.CertificateTemplate) (*fleet.CertificateTemplateResponse, error) {
-	result, err := ds.writer(ctx).ExecContext(ctx, `
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), `
 		INSERT INTO certificate_templates (
 			name,
 			team_id,
@@ -189,15 +189,10 @@ func (ds *Datastore) CreateCertificateTemplate(ctx context.Context, certificateT
 		) VALUES (?, ?, ?, ?)
 	`, certificateTemplate.Name, certificateTemplate.TeamID, certificateTemplate.CertificateAuthorityID, certificateTemplate.SubjectName)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return nil, ctxerr.Wrap(ctx, alreadyExists("CertificateTemplate", certificateTemplate.Name), "inserting certificate_template")
 		}
 		return nil, ctxerr.Wrap(ctx, err, "inserting certificate_template")
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting last insert id for certificate_template")
 	}
 
 	return &fleet.CertificateTemplateResponse{
@@ -236,17 +231,17 @@ func (ds *Datastore) BatchUpsertCertificateTemplates(ctx context.Context, certif
 		return nil, nil
 	}
 
-	const sqlInsertCertificate = `
+	sqlInsertCertificate := `
 		INSERT INTO certificate_templates (
 			name,
 			team_id,
 			certificate_authority_id,
 			subject_name
 		) VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("id", `
 			name = VALUES(name),
 			team_id = VALUES(team_id)
-	`
+	`)
 
 	teamsModifiedSet := make(map[uint]struct{})
 	for _, cert := range certificateTemplates {
@@ -350,7 +345,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForExistingHosts(
 			(hosts.team_id = ? OR (? = 0 AND hosts.team_id IS NULL)) AND
 			hosts.platform = '%s' AND
 			host_mdm.enrolled = 1
-		ON DUPLICATE KEY UPDATE host_uuid = host_uuid
+		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `host_uuid = VALUES(host_uuid)`)+`
 	`, fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall, fleet.AndroidPlatform)
 	result, err := ds.writer(ctx).ExecContext(ctx, stmt, certificateTemplateID, teamID, teamID)
 	if err != nil {
@@ -385,12 +380,12 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForNewHost(
 			UUID_TO_BIN(UUID(), true)
 		FROM certificate_templates
 		WHERE team_id = ?
-		ON DUPLICATE KEY UPDATE
+		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `
 		    -- allow 'remove' to transition to 'pending install', generating new uuid
 			uuid = IF(operation_type = '%s', UUID_TO_BIN(UUID(), true), uuid),
 			status = IF(operation_type = '%s', '%s', status),
 			operation_type = IF(operation_type = '%s', '%s', operation_type)
-	`, fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall,
+	`), fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall,
 		fleet.MDMOperationTypeRemove,
 		fleet.MDMOperationTypeRemove, fleet.CertificateTemplatePending,
 		fleet.MDMOperationTypeRemove, fleet.MDMOperationTypeInstall)

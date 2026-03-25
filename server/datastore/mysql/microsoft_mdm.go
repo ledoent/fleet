@@ -128,7 +128,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 			credentials_acknowledged)
 		VALUES
 			(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("id", `
 			mdm_device_id         = VALUES(mdm_device_id),
 			device_state          = VALUES(device_state),
 			device_type           = VALUES(device_type),
@@ -141,7 +141,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 			host_uuid             = VALUES(host_uuid),
 			credentials_hash      = VALUES(credentials_hash),
 			credentials_acknowledged = VALUES(credentials_acknowledged)
-	`
+	`)
 	_, err := ds.writer(ctx).ExecContext(
 		ctx,
 		stmt,
@@ -159,7 +159,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 		device.CredentialsHash,
 		device.CredentialsAcknowledged)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return ctxerr.Wrap(ctx, alreadyExists("MDMWindowsEnrolledDevice", device.MDMHardwareID))
 		}
 		return ctxerr.Wrap(ctx, err, "inserting MDMWindowsEnrolledDevice")
@@ -246,7 +246,7 @@ func (ds *Datastore) mdmWindowsInsertCommandForHostsDB(ctx context.Context, tx s
 		VALUES (?, ?, ?)
   `
 	if _, err := tx.ExecContext(ctx, stmt, cmd.CommandUUID, cmd.RawCommand, cmd.TargetLocURI); err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return ctxerr.Wrap(ctx, alreadyExists("MDMWindowsCommand", cmd.CommandUUID))
 		}
 		return ctxerr.Wrap(ctx, err, "inserting MDMWindowsCommand")
@@ -268,7 +268,7 @@ VALUES ((SELECT id FROM mdm_windows_enrollments WHERE host_uuid = ? OR mdm_devic
 `
 
 	if _, err := tx.ExecContext(ctx, stmt, hostUUIDOrDeviceID, hostUUIDOrDeviceID, commandUUID); err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return ctxerr.Wrap(ctx, alreadyExists("MDMWindowsCommandQueue", commandUUID))
 		}
 		return ctxerr.Wrap(ctx, err, "inserting MDMWindowsCommandQueue", "host_uuid_or_device_id", hostUUIDOrDeviceID, "command_uuid", commandUUID)
@@ -331,11 +331,10 @@ func (ds *Datastore) MDMWindowsSaveResponse(ctx context.Context, deviceID string
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		// store the full response
 		const saveFullRespStmt = `INSERT INTO windows_mdm_responses (enrollment_id, raw_response) VALUES (?, ?)`
-		sqlResult, err := tx.ExecContext(ctx, saveFullRespStmt, enrolledDevice.ID, enrichedSyncML.Raw)
+		responseID, err := insertAndGetIDTx(ctx, tx, ds.dialect, saveFullRespStmt, enrolledDevice.ID, enrichedSyncML.Raw)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "saving full response")
 		}
-		responseID, _ := sqlResult.LastInsertId()
 
 		// find commands we sent that match the UUID responses we've got
 		findCommandsStmt := `SELECT command_uuid, raw_command, target_loc_uri FROM windows_mdm_commands WHERE command_uuid IN (?)`
@@ -423,19 +422,19 @@ func (ds *Datastore) MDMWindowsSaveResponse(ctx context.Context, deviceID string
 			}
 		}
 
-		if err := updateMDMWindowsHostProfileStatusFromResponseDB(ctx, tx, potentialProfilePayloads); err != nil {
+		if err := updateMDMWindowsHostProfileStatusFromResponseDB(ctx, tx, ds.dialect, potentialProfilePayloads); err != nil {
 			return ctxerr.Wrap(ctx, err, "updating host profile status")
 		}
 
 		// store the command results
-		const insertResultsStmt = `
+		insertResultsStmt := `
 INSERT INTO windows_mdm_command_results
     (enrollment_id, command_uuid, raw_result, response_id, status_code)
 VALUES %s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("enrollment_id,command_uuid", `
     raw_result = COALESCE(VALUES(raw_result), raw_result),
     status_code = COALESCE(VALUES(status_code), status_code)
-`
+`)
 		stmt = fmt.Sprintf(insertResultsStmt, strings.TrimSuffix(sb.String(), ","))
 		if _, err = tx.ExecContext(ctx, stmt, args...); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting command results")
@@ -476,6 +475,7 @@ ON DUPLICATE KEY UPDATE
 func updateMDMWindowsHostProfileStatusFromResponseDB(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	payloads []*fleet.MDMWindowsProfilePayload,
 ) error {
 	if len(payloads) == 0 {
@@ -486,15 +486,15 @@ func updateMDMWindowsHostProfileStatusFromResponseDB(
 	// should be inserted from a device MDM response, so we first check for
 	// matching entries and then perform the INSERT ... ON DUPLICATE KEY to
 	// update their detail and status.
-	const updateHostProfilesStmt = `
+	updateHostProfilesStmt := `
 		INSERT INTO host_mdm_windows_profiles
 			(host_uuid, profile_uuid, detail, status, retries, command_uuid, checksum)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE
+		` + dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 			checksum = VALUES(checksum),
 			detail = VALUES(detail),
 			status = VALUES(status),
-			retries = VALUES(retries)`
+			retries = VALUES(retries)`)
 
 	// MySQL will use the `host_uuid` part of the primary key as a first
 	// pass, and then filter that subset by `command_uuid`.
@@ -1712,13 +1712,13 @@ func (ds *Datastore) BulkUpsertMDMWindowsHostProfiles(ctx context.Context, paylo
 	      checksum
             )
             VALUES %s
-	    ON DUPLICATE KEY UPDATE
+	    `+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
               status = VALUES(status),
               operation_type = VALUES(operation_type),
               detail = VALUES(detail),
               profile_name = VALUES(profile_name),
               checksum = VALUES(checksum),
-              command_uuid = VALUES(command_uuid)`,
+              command_uuid = VALUES(command_uuid)`),
 			strings.TrimSuffix(valuePart, ","),
 		)
 
@@ -1885,7 +1885,7 @@ INSERT INTO
 		res, err := tx.ExecContext(ctx, insertProfileStmt, profileUUID, teamID, cp.Name, cp.SyncML, cp.Name, teamID, cp.Name, teamID, cp.Name, teamID)
 		if err != nil {
 			switch {
-			case IsDuplicate(err):
+			case ds.dialect.IsDuplicate(err):
 				return &existsError{
 					ResourceType: "MDMWindowsConfigProfile.Name",
 					Identifier:   cp.Name,
@@ -1928,7 +1928,7 @@ INSERT INTO
 		if len(labels) == 0 {
 			profsWithoutLabel = append(profsWithoutLabel, profileUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profsWithoutLabel, "windows"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profsWithoutLabel, "windows"); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting windows profile label associations")
 		}
 
@@ -1940,7 +1940,7 @@ INSERT INTO
 					FleetVariables: usesFleetVars,
 				},
 			}
-			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, profilesVarsToUpsert, "windows"); err != nil {
+			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, profilesVarsToUpsert, "windows"); err != nil {
 				return ctxerr.Wrap(ctx, err, "inserting windows profile variable associations")
 			}
 		}
@@ -1973,10 +1973,10 @@ INSERT INTO
 		SELECT 1 FROM mdm_android_configuration_profiles WHERE name = ? AND team_id = ?
 	)
 )
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("profile_uuid", `
 	uploaded_at = IF(syncml = VALUES(syncml), uploaded_at, CURRENT_TIMESTAMP()),
 	syncml = VALUES(syncml)
-`
+`)
 
 	var teamID uint
 	if cp.TeamID != nil {
@@ -1986,7 +1986,7 @@ ON DUPLICATE KEY UPDATE
 	res, err := ds.writer(ctx).ExecContext(ctx, stmt, profileUUID, teamID, cp.Name, cp.SyncML, cp.Name, teamID, cp.Name, teamID, cp.Name, teamID)
 	if err != nil {
 		switch {
-		case IsDuplicate(err):
+		case ds.dialect.IsDuplicate(err):
 			return &existsError{
 				ResourceType: "MDMWindowsConfigProfile.Name",
 				Identifier:   cp.Name,
@@ -2064,7 +2064,7 @@ WHERE
 `
 
 	// For Windows profiles, if team_id and name are the same, we do an update. Otherwise, we do an insert.
-	const insertNewOrEditedProfile = `
+	insertNewOrEditedProfile := `
 INSERT INTO
   mdm_windows_configuration_profiles (
     profile_uuid, team_id, name, syncml, uploaded_at
@@ -2072,11 +2072,11 @@ INSERT INTO
 VALUES
   -- see https://stackoverflow.com/a/51393124/1094941
   ( CONCAT('` + fleet.MDMWindowsProfileUUIDPrefix + `', CONVERT(UUID() USING utf8mb4)), ?, ?, ?, CURRENT_TIMESTAMP() )
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("profile_uuid", `
   uploaded_at = IF(syncml = VALUES(syncml) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP()),
   name = VALUES(name),
   syncml = VALUES(syncml)
-`
+`)
 
 	// use a profile team id of 0 if no-team
 	var profTeamID uint
@@ -2298,13 +2298,13 @@ func (ds *Datastore) bulkSetPendingMDMWindowsHostProfilesDB(
 					checksum
 				)
 				VALUES %s
-				ON DUPLICATE KEY UPDATE
+				`+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 					operation_type = VALUES(operation_type),
 					status = NULL,
 					command_uuid = VALUES(command_uuid),
 					detail = '',
 					checksum = VALUES(checksum)
-			`, strings.TrimSuffix(valuePart, ","))
+			`), strings.TrimSuffix(valuePart, ","))
 
 		_, err := tx.ExecContext(ctx, baseStmt, args...)
 		if err != nil {
@@ -2397,8 +2397,8 @@ func (ds *Datastore) WipeHostViaWindowsMDM(ctx context.Context, host *fleet.Host
 				fleet_platform
 			)
 			VALUES (?, ?, ?)
-			ON DUPLICATE KEY UPDATE
-				wipe_ref   = VALUES(wipe_ref)`
+			` + ds.dialect.OnDuplicateKey("host_id", `
+				wipe_ref   = VALUES(wipe_ref)`)
 
 		if _, err := tx.ExecContext(ctx, stmt, host.ID, cmd.CommandUUID, host.FleetPlatform()); err != nil {
 			return ctxerr.Wrap(ctx, err, "modifying host_mdm_actions for wipe_ref")

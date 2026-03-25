@@ -56,7 +56,7 @@ func (ds *Datastore) UpdateHostOperatingSystem(ctx context.Context, hostID uint,
 		if err != nil {
 			return err
 		}
-		return upsertHostOperatingSystemDB(ctx, tx, hostID, os.ID)
+		return upsertHostOperatingSystemDB(ctx, tx, ds.dialect, hostID, os.ID)
 	})
 }
 
@@ -174,13 +174,13 @@ func isHostOperatingSystemUpdateNeeded(ctx context.Context, qc sqlx.QueryerConte
 
 // upsertHostOperatingSystemDB upserts the host operating system table
 // with the operating system id for the given host ID
-func upsertHostOperatingSystemDB(ctx context.Context, tx sqlx.ExtContext, hostID uint, osID uint) error {
+func upsertHostOperatingSystemDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hostID uint, osID uint) error {
 	// We do not use the `UPDATE` then `INSERT` pattern here because it causes a deadlock when multiple hosts are enrolled concurrently.
 	// This method will rarely be called -- only when the host_operating_system needs to be updated.
 	_, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO host_operating_system (host_id, os_id) VALUES (?, ?)
-				ON DUPLICATE KEY UPDATE os_id = VALUES(os_id)`, hostID, osID,
+				`+dialect.OnDuplicateKey("host_id", "os_id = VALUES(os_id)"), hostID, osID,
 	)
 	return err
 }
