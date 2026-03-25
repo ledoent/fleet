@@ -10,7 +10,7 @@ COPY . .
 RUN NODE_ENV=production yarn run webpack --progress
 
 # Stage 2: Build Go binary
-FROM golang:1.25.7-bookworm AS backend
+FROM golang:1.26.1-bookworm AS backend
 RUN apt-get update && apt-get install -y --no-install-recommends gcc
 WORKDIR /build
 COPY --from=frontend /build .
