@@ -29,7 +29,7 @@ import (
 
 type softwareSummary struct {
 	ID               uint    `db:"id"`
-	Checksum         string  `db:"checksum"`
+	Checksum         []byte  `db:"checksum"`
 	Name             string  `db:"name"`
 	TitleID          *uint   `db:"title_id"`
 	BundleIdentifier *string `db:"bundle_identifier"`
@@ -605,9 +605,9 @@ func (ds *Datastore) getExistingSoftware(
 	}
 
 	if len(newChecksumsToSoftware) > 0 {
-		sliceOfNewSWChecksums := make([]string, 0, len(newChecksumsToSoftware))
+		sliceOfNewSWChecksums := make([][]byte, 0, len(newChecksumsToSoftware))
 		for checksum := range newChecksumsToSoftware {
-			sliceOfNewSWChecksums = append(sliceOfNewSWChecksums, checksum)
+			sliceOfNewSWChecksums = append(sliceOfNewSWChecksums, []byte(checksum))
 		}
 		// We use the replica DB for retrieval to minimize the traffic to the writer DB.
 		// It is OK if the software is not found in the replica DB, because we will then attempt to insert it in the writer DB.
@@ -617,14 +617,14 @@ func (ds *Datastore) getExistingSoftware(
 		}
 
 		for _, currentSoftwareSummary := range currentSoftwareSummaries {
-			_, ok := newChecksumsToSoftware[currentSoftwareSummary.Checksum]
+			_, ok := newChecksumsToSoftware[string(currentSoftwareSummary.Checksum)]
 			if !ok {
 				// This should never happen. If it does, we have a bug.
 				return nil, nil, nil, ctxerr.New(
-					ctx, fmt.Sprintf("current software: software not found for checksum %s", hex.EncodeToString([]byte(currentSoftwareSummary.Checksum))),
+					ctx, fmt.Sprintf("current software: software not found for checksum %s", hex.EncodeToString(currentSoftwareSummary.Checksum)),
 				)
 			}
-			delete(setOfNewSWChecksums, currentSoftwareSummary.Checksum)
+			delete(setOfNewSWChecksums, string(currentSoftwareSummary.Checksum))
 		}
 	}
 
@@ -878,7 +878,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 
 	existingSet := make(map[string]struct{}, len(existingSoftwareSummaries))
 	for _, es := range existingSoftwareSummaries {
-		existingSet[es.Checksum] = struct{}{}
+		existingSet[string(es.Checksum)] = struct{}{}
 	}
 
 	for checksum, sw := range incomingSoftwareByChecksum {
@@ -1002,7 +1002,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				// Insert software titles
 				const numberOfArgsPerSoftwareTitles = 7
 				titlesValues := strings.TrimSuffix(strings.Repeat("(?,?,?,?,?,?,?),", len(uniqueTitlesToInsert)), ",")
-				titlesStmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+" software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES %s"+ds.dialect.OnConflictDoNothing("name,source,extension_for"), titlesValues)
+				titlesStmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+" software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES %s"+ds.dialect.OnConflictDoNothing("unique_identifier,source,extension_for"), titlesValues)
 				titlesArgs := make([]any, 0, len(uniqueTitlesToInsert)*numberOfArgsPerSoftwareTitles)
 
 				for _, title := range uniqueTitlesToInsert {
@@ -1169,7 +1169,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 					checksum,
 					application_id,
 					upgrade_code
-				) VALUES %s`+ds.dialect.OnConflictDoNothing("name,version,source,extension_for,bundle_identifier"),
+				) VALUES %s`+ds.dialect.OnConflictDoNothing("checksum"),
 				values,
 			)
 
@@ -1188,7 +1188,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				}
 				args = append(
 					args, sw.Name, sw.Version, sw.Source, sw.Release, sw.Vendor, sw.Arch,
-					sw.BundleIdentifier, sw.ExtensionID, sw.ExtensionFor, titleID, checksum, sw.ApplicationID, sw.UpgradeCode,
+					sw.BundleIdentifier, sw.ExtensionID, sw.ExtensionFor, titleID, []byte(checksum), sw.ApplicationID, sw.UpgradeCode,
 				)
 			}
 
@@ -1228,9 +1228,9 @@ func (ds *Datastore) linkSoftwareToHost(
 	var insertedSoftware []fleet.Software
 
 	// Build map of all checksums we need to link
-	allChecksums := make([]string, 0, len(softwareChecksums))
+	allChecksums := make([][]byte, 0, len(softwareChecksums))
 	for checksum := range softwareChecksums {
-		allChecksums = append(allChecksums, checksum)
+		allChecksums = append(allChecksums, []byte(checksum))
 	}
 
 	// Get all software IDs (they should exist from pre-insertion).
@@ -1244,7 +1244,7 @@ func (ds *Datastore) linkSoftwareToHost(
 	// Build ID map
 	softwareSummaryByChecksum := make(map[string]softwareSummary)
 	for _, s := range allSoftwareSummaries {
-		softwareSummaryByChecksum[s.Checksum] = s
+		softwareSummaryByChecksum[string(s.Checksum)] = s
 	}
 
 	// Link software to host
@@ -1418,7 +1418,7 @@ func (ds *Datastore) reconcileExistingTitleEmptyWindowsUpgradeCodes(
 	return nil
 }
 
-func getExistingSoftwareSummariesByChecksums(ctx context.Context, tx sqlx.QueryerContext, checksums []string) ([]softwareSummary, error) {
+func getExistingSoftwareSummariesByChecksums(ctx context.Context, tx sqlx.QueryerContext, checksums [][]byte) ([]softwareSummary, error) {
 	if len(checksums) == 0 {
 		return []softwareSummary{}, nil
 	}

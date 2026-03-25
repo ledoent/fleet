@@ -1238,8 +1238,8 @@ func (ds *Datastore) ListHosts(ctx context.Context, filter fleet.TeamFilter, opt
 		sql += `, (SELECT JSON_OBJECT(
 			`
 		for _, field := range opt.AdditionalFilters {
-			sql += `?, JSON_EXTRACT(additional, ?), `
-			params = append(params, field, fmt.Sprintf(`$."%s"`, field))
+			sql += `?, ` + ds.dialect.JSONExtract("additional", fmt.Sprintf(`$."%s"`, field)) + `, `
+			params = append(params, field)
 		}
 		sql = sql[:len(sql)-2]
 		sql += `

@@ -1639,8 +1639,8 @@ CREATE TABLE IF NOT EXISTS "packs" (
   "updated_at" timestamp NULL DEFAULT CURRENT_TIMESTAMP ,
   "disabled" boolean NOT NULL DEFAULT FALSE,
   "name" varchar(255) NOT NULL,
-  "description" varchar(255) DEFAULT NULL,
-  "platform" varchar(255) DEFAULT NULL,
+  "description" varchar(255) NOT NULL DEFAULT '',
+  "platform" varchar(255) NOT NULL DEFAULT '',
   "pack_type" varchar(255) DEFAULT NULL,
   PRIMARY KEY ("id"),
   CONSTRAINT "idx_pack_unique_name" UNIQUE ("name")

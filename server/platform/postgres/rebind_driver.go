@@ -209,7 +209,7 @@ func rebindQuery(query string) string {
 		"neq.active", "e.enabled", "p.conditional_access_enabled", "p.critical",
 		"hvsi.canceled", "hvsi2.canceled", "hvsi.removed", "hvsi2.removed",
 		"hihsi.canceled", "hihsi.removed", "hihsi2.canceled", "hihsi2.removed",
-		"host_vpp_software_installs.canceled",
+		"host_vpp_software_installs.canceled", "host_vpp_software_installs.removed",
 		"host_mdm.enrolled",
 		"q.automations_enabled", "nq.automations_enabled",
 		"hmdm.is_server", "hm.installed_from_dep", "q.discard_data",
