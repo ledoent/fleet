@@ -4,6 +4,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -593,11 +594,43 @@ func setupIAMAuthIfNeeded(conf *config.MysqlConfig, opts *common_mysql.DBOptions
 }
 
 func (ds *Datastore) MigrateTables(ctx context.Context) error {
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		return ds.migratePGBaseline(ctx)
+	}
 	return tables.MigrationClient.Up(ds.writer(ctx).DB, "")
 }
 
 func (ds *Datastore) MigrateData(ctx context.Context) error {
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		// PG baseline schema includes all data migrations (label seeds, etc.)
+		return nil
+	}
 	return data.MigrationClient.Up(ds.writer(ctx).DB, "")
+}
+
+//go:embed pg_baseline_schema.sql
+var pgBaselineSchemaSQL string
+
+// migratePGBaseline applies the PG baseline schema for fresh PostgreSQL databases.
+// It checks if tables already exist and skips if so.
+func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
+	var exists bool
+	err := ds.writer(ctx).GetContext(ctx, &exists,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hosts')`)
+	if err != nil {
+		return fmt.Errorf("checking PG schema: %w", err)
+	}
+	if exists {
+		ds.logger.InfoContext(ctx, "PostgreSQL schema already exists, skipping baseline")
+		return nil
+	}
+	ds.logger.InfoContext(ctx, "Applying PostgreSQL baseline schema")
+	_, err = ds.writer(ctx).ExecContext(ctx, pgBaselineSchemaSQL)
+	if err != nil {
+		return fmt.Errorf("applying PG baseline schema: %w", err)
+	}
+	ds.logger.InfoContext(ctx, "PostgreSQL baseline schema applied successfully")
+	return nil
 }
 
 // loadMigrations manually loads the applied migrations in ascending
@@ -637,6 +670,20 @@ func (ds *Datastore) loadMigrations(
 //
 // It assumes some deployments may have performed migrations out of order.
 func (ds *Datastore) MigrationStatus(ctx context.Context) (*fleet.MigrationStatus, error) {
+	// For PostgreSQL, the baseline schema is applied atomically — either it's all there or not.
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		var exists bool
+		err := ds.primary.GetContext(ctx, &exists,
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hosts')`)
+		if err != nil {
+			return nil, fmt.Errorf("checking PG schema: %w", err)
+		}
+		if exists {
+			return &fleet.MigrationStatus{StatusCode: fleet.AllMigrationsCompleted}, nil
+		}
+		return &fleet.MigrationStatus{StatusCode: fleet.NoMigrationsCompleted}, nil
+	}
+
 	if tables.MigrationClient.Migrations == nil || data.MigrationClient.Migrations == nil {
 		return nil, errors.New("unexpected nil migrations list")
 	}
