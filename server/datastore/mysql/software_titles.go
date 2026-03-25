@@ -1081,7 +1081,7 @@ SELECT
 	s.title_id,
 	s.id, s.version,
 	%s -- placeholder for optional host_counts
-	CONCAT('[', GROUP_CONCAT(JSON_QUOTE(scve.cve) SEPARATOR ','), ']') as vulnerabilities
+	CONCAT('[', ` + ds.dialect.GroupConcat("JSON_QUOTE(scve.cve)", ",") + `, ']') as vulnerabilities
 FROM software s
 LEFT JOIN software_host_counts shc ON shc.software_id = s.id AND %s
 LEFT JOIN software_cve scve ON shc.software_id = scve.software_id
@@ -1158,17 +1158,16 @@ func (ds *Datastore) SyncHostsSoftwareTitles(ctx context.Context, updatedAt time
 			WHERE h.team_id IS NULL AND hs.software_id > 0
 			GROUP BY st.id`
 
-		insertStmt = `
+		valuesPart = `(?, ?, ?, ?, ?),`
+	)
+
+	insertStmt := `
             INSERT INTO ` + swapTable + `
                 (software_title_id, hosts_count, team_id, global_stats, updated_at)
             VALUES
                 %s
-            ON DUPLICATE KEY UPDATE
-                hosts_count = VALUES(hosts_count),
-                updated_at = VALUES(updated_at)`
-
-		valuesPart = `(?, ?, ?, ?, ?),`
-	)
+            ` + ds.dialect.OnDuplicateKey("software_id,team_id", `hosts_count = VALUES(hosts_count),
+                updated_at = VALUES(updated_at)`)
 
 	// Create a fresh swap table to populate with new counts. If a previous run left a partial swap table, drop it first.
 	w := ds.writer(ctx)
@@ -1279,11 +1278,9 @@ func (ds *Datastore) UpdateSoftwareTitleAutoUpdateConfig(ctx context.Context, ti
 INSERT INTO software_update_schedules
 	(title_id, team_id, enabled, start_time, end_time)
 VALUES (?, ?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-	enabled = VALUES(enabled),
+` + ds.dialect.OnDuplicateKey("id", `enabled = VALUES(enabled),
 	start_time = IF(VALUES(start_time) = '', start_time, VALUES(start_time)),
-	end_time = IF(VALUES(end_time) = '', end_time, VALUES(end_time))
-`
+	end_time = IF(VALUES(end_time) = '', end_time, VALUES(end_time))`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, titleID, teamID, config.AutoUpdateEnabled, startTime, endTime)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "updating software title auto update config")

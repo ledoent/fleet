@@ -266,9 +266,10 @@ func testEnqueueDeviceLockCommandRaceCondition(t *testing.T, ds *Datastore) {
 
 	// Create NanoMDMStorage
 	storage := &NanoMDMStorage{
-		db:     ds.writer(ctx),
-		logger: slog.New(slog.DiscardHandler),
-		ds:     ds,
+		db:      ds.writer(ctx),
+		logger:  slog.New(slog.DiscardHandler),
+		ds:      ds,
+		dialect: ds.dialect,
 	}
 
 	// Number of concurrent lock attempts

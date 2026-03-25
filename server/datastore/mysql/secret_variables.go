@@ -103,17 +103,16 @@ func (ds *Datastore) CreateSecretVariable(ctx context.Context, name string, valu
 	if err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "encrypt secret value for insert with server private key")
 	}
-	res, err := ds.writer(ctx).ExecContext(ctx,
+	id_, err := ds.insertAndGetID(ctx, ds.writer(ctx),
 		`INSERT INTO secret_variables (name, value) VALUES (?, ?)`,
 		name, valueEncrypted,
 	)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return 0, ctxerr.Wrap(ctx, alreadyExists("name", name), "found duplicate")
 		}
 		return 0, ctxerr.Wrap(ctx, err, "insert secret variable")
 	}
-	id_, _ := res.LastInsertId()
 	return uint(id_), nil //nolint:gosec // dismiss G115
 }
 

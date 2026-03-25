@@ -33,9 +33,7 @@ func (ds *Datastore) NewTeam(ctx context.Context, team *fleet.Team) (*fleet.Team
       config
     ) VALUES (?, ?, ?, ?)
     `
-		result, err := tx.ExecContext(
-			ctx,
-			query,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, query,
 			team.Name,
 			team.Filename,
 			team.Description,
@@ -45,7 +43,6 @@ func (ds *Datastore) NewTeam(ctx context.Context, team *fleet.Team) (*fleet.Team
 			return ctxerr.Wrap(ctx, err, "insert team")
 		}
 
-		id, _ := result.LastInsertId()
 		team.ID = uint(id) //nolint:gosec // dismiss G115
 		team.CreatedAt = time.Now().UTC().Truncate(time.Second)
 
@@ -618,7 +615,7 @@ func (ds *Datastore) SaveDefaultTeamConfig(ctx context.Context, config *fleet.Te
 
 	_, err = ds.writer(ctx).ExecContext(ctx,
 		`INSERT INTO default_team_config_json(id, json_value) VALUES(1, ?)
-		 ON DUPLICATE KEY UPDATE json_value = VALUES(json_value)`,
+		 `+ds.dialect.OnDuplicateKey("id", `json_value = VALUES(json_value)`),
 		configBytes,
 	)
 	return ctxerr.Wrap(ctx, err, "save default team config")
