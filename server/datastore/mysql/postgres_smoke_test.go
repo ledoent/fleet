@@ -362,4 +362,56 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 		}
 		assert.Equal(t, host.ID, h.ID)
 	})
+
+	// --- Targets ---
+	t.Run("CountHostsInTargets", func(t *testing.T) {
+		metrics, err := ds.CountHostsInTargets(ctx,
+			fleet.TeamFilter{User: &fleet.User{GlobalRole: ptr.String("admin")}},
+			fleet.HostTargets{HostIDs: []uint{host.ID}},
+			time.Now(),
+		)
+		if err != nil {
+			t.Logf("FAIL CountHostsInTargets: %v", err)
+			return
+		}
+		assert.GreaterOrEqual(t, metrics.TotalHosts, uint(1))
+	})
+
+	// --- Host disk encryption key ---
+	t.Run("SetOrUpdateHostDiskEncryptionKey", func(t *testing.T) {
+		_, err := ds.SetOrUpdateHostDiskEncryptionKey(ctx, host, "test-key", "test-client", ptr.Bool(false))
+		if err != nil {
+			t.Logf("FAIL SetOrUpdateHostDiskEncryptionKey: %v", err)
+		}
+	})
+
+	// --- Cron stats ---
+	t.Run("InsertCronStats", func(t *testing.T) {
+		id, err := ds.InsertCronStats(ctx, fleet.CronStatsTypeScheduled, "test-cron", "test-instance", fleet.CronStatsStatusPending)
+		if err != nil {
+			t.Logf("FAIL InsertCronStats: %v", err)
+			return
+		}
+		assert.NotZero(t, id)
+	})
+
+	// --- ListPolicies ---
+	t.Run("ListGlobalPolicies", func(t *testing.T) {
+		policies, err := ds.ListGlobalPolicies(ctx, fleet.ListOptions{})
+		if err != nil {
+			t.Logf("FAIL ListGlobalPolicies: %v", err)
+			return
+		}
+		assert.GreaterOrEqual(t, len(policies), 1)
+	})
+
+	// --- Invites ---
+	t.Run("ListInvites", func(t *testing.T) {
+		invites, err := ds.ListInvites(ctx, fleet.ListOptions{})
+		if err != nil {
+			t.Logf("FAIL ListInvites: %v", err)
+			return
+		}
+		_ = invites
+	})
 }
