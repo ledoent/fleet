@@ -39,6 +39,9 @@ const (
 
 // MysqlConfig defines configs related to MySQL
 type MysqlConfig struct {
+	// Driver selects the database driver. Only "mysql" is valid in Phase 1.
+	// Future values: "postgres" (Phase 4+).
+	Driver           string `yaml:"driver"`
 	Protocol         string `yaml:"protocol"`
 	Address          string `yaml:"address"`
 	Username         string `yaml:"username"`
@@ -1128,6 +1131,8 @@ func (t *TLS) ToTLSConfig() (*tls.Config, error) {
 // filled into the FleetConfig struct
 func (man Manager) addConfigs() {
 	addMysqlConfig := func(prefix, defaultAddr, usageSuffix string) {
+		man.addConfigString(prefix+".driver", "",
+			"Database driver: mysql (default) or postgres"+usageSuffix)
 		man.addConfigString(prefix+".protocol", "tcp",
 			"MySQL server communication protocol (tcp,unix,...)"+usageSuffix)
 		man.addConfigString(prefix+".address", defaultAddr,
@@ -1637,6 +1642,7 @@ func (man Manager) LoadConfig() FleetConfig {
 
 	loadMysqlConfig := func(prefix string) MysqlConfig {
 		return MysqlConfig{
+			Driver:           man.getConfigString(prefix + ".driver"),
 			Protocol:         man.getConfigString(prefix + ".protocol"),
 			Address:          man.getConfigString(prefix + ".address"),
 			Username:         man.getConfigString(prefix + ".username"),

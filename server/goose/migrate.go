@@ -89,6 +89,25 @@ func AddMigration(up func(*sql.Tx) error, down func(*sql.Tx) error) {
 	globalGoose.Migrations = append(globalGoose.Migrations, migration)
 }
 
+// AddDualDialectMigration adds a migration with dialect-specific up/down functions.
+// Use this for migrations where MySQL and PostgreSQL need different DDL.
+// Pass nil for any function that should be a no-op for that dialect.
+func (c *Client) AddDualDialectMigration(upMySQL, downMySQL, upPG, downPG func(*sql.Tx) error) {
+	_, filename, _, _ := runtime.Caller(1)
+	v, _ := NumericComponent(filename)
+	migration := &Migration{
+		Version:     v,
+		Next:        -1,
+		Previous:    -1,
+		Source:      filename,
+		UpFnMySQL:   upMySQL,
+		DownFnMySQL: downMySQL,
+		UpFnPG:      upPG,
+		DownFnPG:    downPG,
+	}
+	c.Migrations = append(c.Migrations, migration)
+}
+
 // collect all the valid looking migration scripts in the
 // migrations folder and go func registry, and key them by version
 func (c *Client) collectMigrations(dirpath string, current, target int64) (Migrations, error) {
