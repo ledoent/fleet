@@ -513,6 +513,8 @@ type InsertSoftwareVulnerabilitiesFunc func(ctx context.Context, vulns []fleet.S
 
 type SoftwareByIDFunc func(ctx context.Context, id uint, teamID *uint, includeCVEScores bool, tmFilter *fleet.TeamFilter) (*fleet.Software, error)
 
+type SoftwareLiteByIDFunc func(ctx context.Context, id uint) (fleet.SoftwareLite, error)
+
 type ListSoftwareByHostIDShortFunc func(ctx context.Context, hostID uint) ([]fleet.Software, error)
 
 type SyncHostsSoftwareFunc func(ctx context.Context, updatedAt time.Time) error
@@ -577,7 +579,7 @@ type CheckConflictingInstallerExistsFunc func(ctx context.Context, teamID *uint,
 
 type CheckConflictingInHouseAppExistsFunc func(ctx context.Context, teamID *uint, bundleIdentifier string, platform string) (bool, error)
 
-type CheckAndroidWebAppNameExistsFunc func(ctx context.Context, name string) (bool, error)
+type CheckAndroidWebAppNameExistsOnTeamFunc func(ctx context.Context, teamID *uint, name string, excludeAdamID string) (bool, error)
 
 type GetHostOperatingSystemFunc func(ctx context.Context, hostID uint) (*fleet.OperatingSystem, error)
 
@@ -2577,6 +2579,9 @@ type DataStore struct {
 	SoftwareByIDFunc        SoftwareByIDFunc
 	SoftwareByIDFuncInvoked bool
 
+	SoftwareLiteByIDFunc        SoftwareLiteByIDFunc
+	SoftwareLiteByIDFuncInvoked bool
+
 	ListSoftwareByHostIDShortFunc        ListSoftwareByHostIDShortFunc
 	ListSoftwareByHostIDShortFuncInvoked bool
 
@@ -2673,8 +2678,8 @@ type DataStore struct {
 	CheckConflictingInHouseAppExistsFunc        CheckConflictingInHouseAppExistsFunc
 	CheckConflictingInHouseAppExistsFuncInvoked bool
 
-	CheckAndroidWebAppNameExistsFunc        CheckAndroidWebAppNameExistsFunc
-	CheckAndroidWebAppNameExistsFuncInvoked bool
+	CheckAndroidWebAppNameExistsOnTeamFunc        CheckAndroidWebAppNameExistsOnTeamFunc
+	CheckAndroidWebAppNameExistsOnTeamFuncInvoked bool
 
 	GetHostOperatingSystemFunc        GetHostOperatingSystemFunc
 	GetHostOperatingSystemFuncInvoked bool
@@ -6287,6 +6292,13 @@ func (s *DataStore) SoftwareByID(ctx context.Context, id uint, teamID *uint, inc
 	return s.SoftwareByIDFunc(ctx, id, teamID, includeCVEScores, tmFilter)
 }
 
+func (s *DataStore) SoftwareLiteByID(ctx context.Context, id uint) (fleet.SoftwareLite, error) {
+	s.mu.Lock()
+	s.SoftwareLiteByIDFuncInvoked = true
+	s.mu.Unlock()
+	return s.SoftwareLiteByIDFunc(ctx, id)
+}
+
 func (s *DataStore) ListSoftwareByHostIDShort(ctx context.Context, hostID uint) ([]fleet.Software, error) {
 	s.mu.Lock()
 	s.ListSoftwareByHostIDShortFuncInvoked = true
@@ -6511,11 +6523,11 @@ func (s *DataStore) CheckConflictingInHouseAppExists(ctx context.Context, teamID
 	return s.CheckConflictingInHouseAppExistsFunc(ctx, teamID, bundleIdentifier, platform)
 }
 
-func (s *DataStore) CheckAndroidWebAppNameExists(ctx context.Context, name string) (bool, error) {
+func (s *DataStore) CheckAndroidWebAppNameExistsOnTeam(ctx context.Context, teamID *uint, name string, excludeAdamID string) (bool, error) {
 	s.mu.Lock()
-	s.CheckAndroidWebAppNameExistsFuncInvoked = true
+	s.CheckAndroidWebAppNameExistsOnTeamFuncInvoked = true
 	s.mu.Unlock()
-	return s.CheckAndroidWebAppNameExistsFunc(ctx, name)
+	return s.CheckAndroidWebAppNameExistsOnTeamFunc(ctx, teamID, name, excludeAdamID)
 }
 
 func (s *DataStore) GetHostOperatingSystem(ctx context.Context, hostID uint) (*fleet.OperatingSystem, error) {
