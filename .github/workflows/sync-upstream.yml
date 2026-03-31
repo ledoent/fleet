@@ -1,0 +1,34 @@
+name: Sync upstream main
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.repository != 'fleetdm/fleet'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync from upstream
+        run: |
+          git remote add upstream https://github.com/fleetdm/fleet.git || true
+          git fetch upstream main
+          # Save this workflow file so it survives the force-reset to upstream
+          cp .github/workflows/sync-upstream.yml /tmp/sync-upstream.yml
+          git reset --hard upstream/main
+          # Re-add our workflow file on top of the upstream reset
+          mkdir -p .github/workflows
+          cp /tmp/sync-upstream.yml .github/workflows/sync-upstream.yml
+          git add .github/workflows/sync-upstream.yml
+          git diff --cached --quiet || git commit -m "ci: preserve upstream sync workflow"
+          git push --force-with-lease origin main
