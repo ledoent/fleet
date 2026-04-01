@@ -3331,7 +3331,7 @@ func testDeleteAllPolicyMemberships(t *testing.T, ds *Datastore) {
 	require.NoError(t, ds.writer(ctx).Get(&count, "select COUNT(*) from host_issues WHERE total_issues_count > 0"))
 	assert.Equal(t, 1, count)
 
-	err = deleteAllPolicyMemberships(ctx, ds.writer(ctx), host.ID)
+	err = deleteAllPolicyMemberships(ctx, ds.writer(ctx), ds.dialect, host.ID)
 	require.NoError(t, err)
 
 	err = ds.writer(ctx).Get(&count, "select COUNT(*) from policy_membership")
@@ -7165,7 +7165,7 @@ func testBatchedPolicyMembershipCleanup(t *testing.T, ds *Datastore) {
 
 	// Run the full cleanup function directly (simulates what ApplyPolicySpecs triggers when a
 	// query changes — shouldRemoveAllPolicyMemberships == true).
-	err = cleanupPolicyMembershipForPolicy(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID)
+	err = cleanupPolicyMembershipForPolicy(ctx, ds.reader(ctx), ds.writer(ctx), ds.dialect, pol.ID)
 	require.NoError(t, err)
 
 	// All policy_membership rows must be gone.
@@ -7237,7 +7237,7 @@ func testBatchedPolicyMembershipCleanupOnPolicyUpdate(t *testing.T, ds *Datastor
 	require.Equal(t, 6, count)
 
 	// Run the platform-aware cleanup (simulates CleanupPolicyMembership cron).
-	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform)
+	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform, ds.dialect)
 	require.NoError(t, err)
 
 	// Only the windows host should remain.
@@ -7302,7 +7302,7 @@ func testBatchedPolicyMembershipCleanupOnPolicyUpdate(t *testing.T, ds *Datastor
 
 	// Run cleanupPolicyMembershipOnPolicyUpdate with no platform restriction so
 	// only the label-based branch fires.
-	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), lblPol.ID, "" /* no platform filter */)
+	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), lblPol.ID, "" /* no platform filter */, ds.dialect)
 	require.NoError(t, err)
 
 	// Only the host that belongs to the include label should remain.
