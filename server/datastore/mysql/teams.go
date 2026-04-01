@@ -33,9 +33,7 @@ func (ds *Datastore) NewTeam(ctx context.Context, team *fleet.Team) (*fleet.Team
       config
     ) VALUES (?, ?, ?, ?)
     `
-		result, err := tx.ExecContext(
-			ctx,
-			query,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, query,
 			team.Name,
 			team.Filename,
 			team.Description,
@@ -45,7 +43,6 @@ func (ds *Datastore) NewTeam(ctx context.Context, team *fleet.Team) (*fleet.Team
 			return ctxerr.Wrap(ctx, err, "insert team")
 		}
 
-		id, _ := result.LastInsertId()
 		team.ID = uint(id) //nolint:gosec // dismiss G115
 		team.CreatedAt = time.Now().UTC().Truncate(time.Second)
 
@@ -134,6 +131,7 @@ var teamRefs = []string{
 	"mdm_windows_configuration_profiles",
 	"mdm_apple_declarations",
 	"mdm_android_configuration_profiles",
+	"android_app_configurations",
 	"certificate_templates",
 	"software_title_icons",
 	"software_title_display_names",
@@ -152,13 +150,6 @@ var teamLabelsRefs = []string{
 }
 
 func (ds *Datastore) DeleteTeam(ctx context.Context, tid uint) error {
-	// Enqueue <Delete> commands for Windows profiles. This must run
-	// first because the main transaction deletes the config profile rows
-	// (which contain the SyncML bytes needed to generate <Delete> commands).
-	if err := ds.enqueueWindowsDeleteCommandsForTeam(ctx, tid); err != nil {
-		return ctxerr.Wrapf(ctx, err, "enqueuing windows delete commands for team %d", tid)
-	}
-
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		// Delete team policies first, because policies can have associated installers and scripts
 		// which may be deleted on cascade before deleting the policies (which are also deleted on cascade).
@@ -212,34 +203,6 @@ func (ds *Datastore) DeleteTeam(ctx context.Context, tid uint) error {
 		}
 
 		return nil
-	})
-}
-
-// enqueueWindowsDeleteCommandsForTeam generates SyncML <Delete> commands for
-// Windows profiles assigned to the given team. Runs in its own transaction to
-// keep load out of the main DeleteTeam transaction.
-func (ds *Datastore) enqueueWindowsDeleteCommandsForTeam(ctx context.Context, tid uint) error {
-	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		var profRows []struct {
-			ProfileUUID string `db:"profile_uuid"`
-			SyncML      []byte `db:"syncml"`
-		}
-		if err := sqlx.SelectContext(ctx, tx, &profRows,
-			`SELECT profile_uuid, syncml FROM mdm_windows_configuration_profiles WHERE team_id = ?`, tid); err != nil {
-			return ctxerr.Wrapf(ctx, err, "loading windows profiles for team %d", tid)
-		}
-		if len(profRows) == 0 {
-			return nil
-		}
-
-		profileUUIDs := make([]string, 0, len(profRows))
-		profileContents := make(map[string][]byte, len(profRows))
-		for _, r := range profRows {
-			profileUUIDs = append(profileUUIDs, r.ProfileUUID)
-			profileContents[r.ProfileUUID] = r.SyncML
-		}
-
-		return ds.cancelWindowsHostInstallsForDeletedMDMProfiles(ctx, tx, profileUUIDs, profileContents)
 	})
 }
 
@@ -653,7 +616,7 @@ func (ds *Datastore) SaveDefaultTeamConfig(ctx context.Context, config *fleet.Te
 
 	_, err = ds.writer(ctx).ExecContext(ctx,
 		`INSERT INTO default_team_config_json(id, json_value) VALUES(1, ?)
-		 ON DUPLICATE KEY UPDATE json_value = VALUES(json_value)`,
+		 `+ds.dialect.OnDuplicateKey("id", `json_value = VALUES(json_value)`),
 		configBytes,
 	)
 	return ctxerr.Wrap(ctx, err, "save default team config")

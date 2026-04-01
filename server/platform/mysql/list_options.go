@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -124,7 +125,12 @@ func AppendListOptionsWithParamsSecure(sql string, params []any, opts ListOption
 		// Cursor value is always passed as string. MySQL automatically converts
 		// string to integer when comparing against integer columns.
 		// See: https://dev.mysql.com/doc/refman/8.0/en/type-conversion.html
-		params = append(params, cursor)
+		// PG does NOT auto-convert, so pass numeric cursors as int64.
+		var cursorParam any = cursor
+		if v, err := strconv.ParseInt(cursor, 10, 64); err == nil {
+			cursorParam = v
+		}
+		params = append(params, cursorParam)
 		direction := ">" // ASC
 		if opts.IsDescending() {
 			direction = "<" // DESC
@@ -188,7 +194,12 @@ func AppendListOptionsWithParams(sql string, params []any, opts ListOptions) (st
 		// Cursor value is always passed as string. MySQL automatically converts
 		// string to integer when comparing against integer columns.
 		// See: https://dev.mysql.com/doc/refman/8.0/en/type-conversion.html
-		params = append(params, cursor)
+		// PG does NOT auto-convert, so pass numeric cursors as int64.
+		var cursorParam any = cursor
+		if v, err := strconv.ParseInt(cursor, 10, 64); err == nil {
+			cursorParam = v
+		}
+		params = append(params, cursorParam)
 		direction := ">" // ASC
 		if opts.IsDescending() {
 			direction = "<" // DESC

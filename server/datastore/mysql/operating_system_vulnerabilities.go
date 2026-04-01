@@ -57,12 +57,14 @@ func (ds *Datastore) ListVulnsByOsNameAndVersion(ctx context.Context, name, vers
 	}
 
 	// Query with CVSS metadata
-	baseCTE := `
+	gcDistinctResolved := ds.dialect.GroupConcat("DISTINCT v.resolved_in_version", ",")
+	gcDistinctResolvedOsvv := ds.dialect.GroupConcat("DISTINCT osvv.resolved_in_version", ",")
+	baseCTE := fmt.Sprintf(`
 	WITH all_vulns AS (
 		SELECT
 			v.cve,
 			MIN(v.created_at) created_at,
-			GROUP_CONCAT(DISTINCT v.resolved_in_version SEPARATOR ',') resolved_in_version
+			%s resolved_in_version
 		FROM operating_system_vulnerabilities v
 		JOIN operating_systems os ON os.id = v.operating_system_id
 			AND os.name = ? AND os.version = ?
@@ -73,14 +75,14 @@ func (ds *Datastore) ListVulnsByOsNameAndVersion(ctx context.Context, name, vers
 		SELECT DISTINCT
 			osvv.cve,
 			MIN(osvv.created_at) created_at,
-			GROUP_CONCAT(DISTINCT osvv.resolved_in_version SEPARATOR ',') resolved_in_version
+			%s resolved_in_version
 		FROM
 			operating_system_version_vulnerabilities osvv
 			JOIN operating_systems os ON os.os_version_id = osvv.os_version_id
 		WHERE
 			os.name = ?
 			AND os.version = ?
-			` + linuxTeamFilter + `
+			`, gcDistinctResolved, gcDistinctResolvedOsvv) + linuxTeamFilter + `
 		GROUP BY osvv.cve
 	)
 	`
@@ -294,11 +296,11 @@ func (ds *Datastore) InsertOSVulnerabilities(ctx context.Context, vulnerabilitie
 		stmt := fmt.Sprintf(`
 			INSERT INTO operating_system_vulnerabilities (operating_system_id, cve, source, resolved_in_version)
 			VALUES %s
-			ON DUPLICATE KEY UPDATE
+			`+ds.dialect.OnDuplicateKey("id", `
 				source = VALUES(source),
 				resolved_in_version = VALUES(resolved_in_version),
 				updated_at = NOW()
-		`, values)
+		`), values)
 
 		var args []any
 		for _, v := range batch {
@@ -333,15 +335,27 @@ func (ds *Datastore) InsertOSVulnerability(ctx context.Context, v fleet.OSVulner
 			source,
 			resolved_in_version
 		) VALUES (?,?,?,?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("id", `
 			operating_system_id = VALUES(operating_system_id),
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			updated_at = NOW()
-	`
+	`)
 
 	args = append(args, v.OSID, v.CVE, s, v.ResolvedInVersion)
 
+	if ds.dialect.ReturningID() != "" {
+		// PostgreSQL: use RETURNING id and xmax to distinguish insert from update.
+		// xmax = 0 means the row was freshly inserted (not updated).
+		var id int64
+		var xmax uint32
+		err := ds.writer(ctx).QueryRowContext(ctx, sqlStmt+" RETURNING id, xmax", args...).Scan(&id, &xmax)
+		if err != nil {
+			return false, ctxerr.Wrap(ctx, err, "insert operating system vulnerability")
+		}
+		return xmax == 0, nil
+	}
+	// MySQL path
 	res, err := ds.writer(ctx).ExecContext(ctx, sqlStmt, args...)
 	if err != nil {
 		return false, ctxerr.Wrap(ctx, err, "insert operating system vulnerability")
@@ -350,7 +364,11 @@ func (ds *Datastore) InsertOSVulnerability(ctx context.Context, v fleet.OSVulner
 	// inserts affect one row, updates affect 0 or 2; we don't care which because timestamp may not change if we
 	// recently inserted the vuln and changed nothing else; see insertOnDuplicateDidInsertOrUpdate for context
 	affected, _ := res.RowsAffected()
-	lastID, _ := res.LastInsertId()
+	lastID, err := res.LastInsertId()
+	if err != nil {
+		// PG: no LastInsertId, use RowsAffected == 1 as insert indicator
+		return affected == 1, nil
+	}
 	return lastID != 0 && affected == 1, nil
 }
 
@@ -389,9 +407,11 @@ func (ds *Datastore) DeleteOutOfDateOSVulnerabilities(ctx context.Context, src f
 
 func (ds *Datastore) DeleteOrphanedOSVulnerabilities(ctx context.Context) error {
 	if _, err := ds.writer(ctx).ExecContext(ctx, `
-		DELETE osv FROM operating_system_vulnerabilities osv
-		LEFT JOIN host_operating_system hos ON hos.os_id = osv.operating_system_id
-		WHERE hos.host_id IS NULL
+		DELETE FROM operating_system_vulnerabilities
+		WHERE NOT EXISTS (
+			SELECT 1 FROM host_operating_system hos
+			WHERE hos.os_id = operating_system_vulnerabilities.operating_system_id
+		)
 	`); err != nil {
 		return ctxerr.Wrap(ctx, err, "deleting orphaned OS vulnerabilities")
 	}
@@ -603,12 +623,12 @@ func (ds *Datastore) refreshOSVersionVulnerabilities(ctx context.Context) error 
 		JOIN software_cve sc ON sc.software_id = khc.software_id
 		WHERE khc.hosts_count > 0
 		GROUP BY khc.team_id, khc.os_version_id, sc.cve
-		ON DUPLICATE KEY UPDATE
+		`+ds.dialect.OnDuplicateKey("id", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			created_at = VALUES(created_at),
 			updated_at = VALUES(updated_at)
-	`, updatedAt)
+	`), updatedAt)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "refresh per-team OS version vulnerabilities")
 	}
@@ -629,12 +649,12 @@ func (ds *Datastore) refreshOSVersionVulnerabilities(ctx context.Context) error 
 		JOIN software_cve sc ON sc.software_id = khc.software_id
 		WHERE khc.hosts_count > 0
 		GROUP BY khc.os_version_id, sc.cve
-		ON DUPLICATE KEY UPDATE
+		`+ds.dialect.OnDuplicateKey("id", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			created_at = VALUES(created_at),
 			updated_at = VALUES(updated_at)
-	`, updatedAt)
+	`), updatedAt)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "refresh all-teams OS version vulnerabilities")
 	}

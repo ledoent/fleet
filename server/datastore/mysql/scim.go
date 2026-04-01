@@ -32,8 +32,7 @@ func (ds *Datastore) CreateScimUser(ctx context.Context, user *fleet.ScimUser) (
 		INSERT INTO scim_users (
 			external_id, user_name, given_name, family_name, department, active
 		) VALUES (?, ?, ?, ?, ?, ?)`
-		result, err := tx.ExecContext(
-			ctx,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect,
 			insertUserQuery,
 			user.ExternalID,
 			user.UserName,
@@ -43,16 +42,12 @@ func (ds *Datastore) CreateScimUser(ctx context.Context, user *fleet.ScimUser) (
 			user.Active,
 		)
 		if err != nil {
-			if IsDuplicate(err) {
+			if ds.dialect.IsDuplicate(err) {
 				return ctxerr.Wrap(ctx, alreadyExists("ScimUser", user.UserName), "insert scim user")
 			}
 			return ctxerr.Wrap(ctx, err, "insert scim user")
 		}
 
-		id, err := result.LastInsertId()
-		if err != nil {
-			return ctxerr.Wrap(ctx, err, "insert scim user last insert id")
-		}
 		user.ID = uint(id) // nolint:gosec // dismiss G115
 		userID = user.ID
 
@@ -309,7 +304,7 @@ func (ds *Datastore) ReplaceScimUser(ctx context.Context, user *fleet.ScimUser) 
 			user.ID,
 		)
 		if err != nil {
-			if IsDuplicate(err) {
+			if ds.dialect.IsDuplicate(err) {
 				return ctxerr.Wrap(ctx, alreadyExists("ScimUser", user.UserName), "update scim user")
 			}
 			return ctxerr.Wrap(ctx, err, "update scim user")
@@ -651,8 +646,7 @@ func (ds *Datastore) CreateScimGroup(ctx context.Context, group *fleet.ScimGroup
 		INSERT INTO scim_groups (
 			external_id, display_name
 		) VALUES (?, ?)`
-		result, err := tx.ExecContext(
-			ctx,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect,
 			insertGroupQuery,
 			group.ExternalID,
 			group.DisplayName,
@@ -661,10 +655,6 @@ func (ds *Datastore) CreateScimGroup(ctx context.Context, group *fleet.ScimGroup
 			return ctxerr.Wrap(ctx, err, "insert scim group")
 		}
 
-		id, err := result.LastInsertId()
-		if err != nil {
-			return ctxerr.Wrap(ctx, err, "insert scim group last insert id")
-		}
 		group.ID = uint(id) // nolint:gosec // dismiss G115
 		groupID = group.ID
 

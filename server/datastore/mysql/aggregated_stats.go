@@ -44,24 +44,43 @@ FROM (SELECT (@rownum := @rownum + 1) AS row_number_value, sum1.*
             GROUP BY d.host_id) as sum2) AS t2
 WHERE t1.row_number_value = FLOOR(total_rows * %[2]s) + 1`
 
+const scheduledQueryPercentileQueryPG = `
+SELECT COALESCE((t1.%[1]s_total / t1.executions_total), 0)
+FROM (SELECT ROW_NUMBER() OVER (ORDER BY (SUM(d.%[1]s) / SUM(d.executions))) AS row_number_value,
+            SUM(d.%[1]s) as %[1]s_total, SUM(d.executions) as executions_total
+      FROM scheduled_query_stats d
+      WHERE d.scheduled_query_id = ?
+        AND d.executions > 0
+      GROUP BY d.host_id) AS t1,
+     (SELECT COUNT(*) AS total_rows
+      FROM (SELECT 1
+            FROM scheduled_query_stats d
+            WHERE d.scheduled_query_id = ?
+              AND d.executions > 0
+            GROUP BY d.host_id) as sum2) AS t2
+WHERE t1.row_number_value = FLOOR(total_rows * %[2]s) + 1`
+
 const (
 	scheduledQueryTotalExecutions = `SELECT coalesce(sum(executions), 0) FROM scheduled_query_stats WHERE scheduled_query_id=?`
 )
 
-func getPercentileQuery(aggregate fleet.AggregatedStatsType, time string, percentile string) string {
+func getPercentileQuery(aggregate fleet.AggregatedStatsType, time string, percentile string, isPG bool) string {
 	switch aggregate { //nolint:gocritic // ignore singleCaseSwitch
 	case fleet.AggregatedStatsTypeScheduledQuery:
+		if isPG {
+			return fmt.Sprintf(scheduledQueryPercentileQueryPG, time, percentile)
+		}
 		return fmt.Sprintf(scheduledQueryPercentileQuery, time, percentile)
 	}
 	return ""
 }
 
 func setP50AndP95Map(
-	ctx context.Context, tx sqlx.QueryerContext, aggregate fleet.AggregatedStatsType, time string, id uint, statsMap map[string]interface{},
+	ctx context.Context, tx sqlx.QueryerContext, aggregate fleet.AggregatedStatsType, time string, id uint, statsMap map[string]interface{}, isPG bool,
 ) error {
 	var p50, p95 float64
 
-	err := sqlx.GetContext(ctx, tx, &p50, getPercentileQuery(aggregate, time, "0.5"), id, id)
+	err := sqlx.GetContext(ctx, tx, &p50, getPercentileQuery(aggregate, time, "0.5", isPG), id, id)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
@@ -69,7 +88,7 @@ func setP50AndP95Map(
 		return ctxerr.Wrapf(ctx, err, "getting %s p50 for %s %d", time, aggregate, id)
 	}
 	statsMap[time+"_p50"] = p50
-	err = sqlx.GetContext(ctx, tx, &p95, getPercentileQuery(aggregate, time, "0.95"), id, id)
+	err = sqlx.GetContext(ctx, tx, &p95, getPercentileQuery(aggregate, time, "0.95", isPG), id, id)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
@@ -103,10 +122,11 @@ func (ds *Datastore) CalculateAggregatedPerfStatsPercentiles(ctx context.Context
 
 	// many queries is not ideal, but getting both values and totals in the same query was a bit more complicated
 	// so I went for the simpler approach first, we can optimize later
-	if err := setP50AndP95Map(ctx, reader, aggregate, "user_time", queryID, statsMap); err != nil {
+	_, isPG := ds.dialect.(postgresDialect)
+	if err := setP50AndP95Map(ctx, reader, aggregate, "user_time", queryID, statsMap, isPG); err != nil {
 		return err
 	}
-	if err := setP50AndP95Map(ctx, reader, aggregate, "system_time", queryID, statsMap); err != nil {
+	if err := setP50AndP95Map(ctx, reader, aggregate, "system_time", queryID, statsMap, isPG); err != nil {
 		return err
 	}
 
@@ -128,9 +148,8 @@ func (ds *Datastore) CalculateAggregatedPerfStatsPercentiles(ctx context.Context
 		ctx,
 		`
 		INSERT INTO aggregated_stats(id, type, global_stats, json_value)
-		VALUES (?, ?, 0, ?)
-		ON DUPLICATE KEY UPDATE json_value=VALUES(json_value)
-		`,
+		VALUES (?, ?, false, ?)
+		`+ds.dialect.OnDuplicateKey("id,type,global_stats", `json_value=VALUES(json_value)`),
 		queryID, aggregate, statsJson,
 	)
 	if err != nil {

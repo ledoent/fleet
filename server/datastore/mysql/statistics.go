@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/fleetdm/fleet/v4/server"
@@ -270,7 +271,7 @@ func (ds *Datastore) getTableRowCountsViaInformationSchema(ctx context.Context) 
 		ctx,
 		ds.reader(ctx),
 		&results,
-		"SELECT table_name, COALESCE(table_rows, 0) table_rows FROM information_schema.tables WHERE table_schema = (SELECT DATABASE())",
+		fmt.Sprintf("SELECT table_name, COALESCE(table_rows, 0) table_rows FROM information_schema.tables WHERE table_schema = %s", ds.currentDatabaseFn()),
 	); err != nil {
 		return nil, err
 	}

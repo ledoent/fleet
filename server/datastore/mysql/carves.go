@@ -11,7 +11,7 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func upsertCarveDB(ctx context.Context, writer sqlx.ExecerContext, metadata *fleet.CarveMetadata) (int64, error) {
+func upsertCarveDB(ctx context.Context, writer sqlx.ExtContext, dialect DialectHelper, metadata *fleet.CarveMetadata) (int64, error) {
 	stmt := `INSERT INTO carve_metadata (
 		host_id,
 		created_at,
@@ -36,8 +36,10 @@ func upsertCarveDB(ctx context.Context, writer sqlx.ExecerContext, metadata *fle
 		?
 	)`
 
-	result, err := writer.ExecContext(
+	id, err := insertAndGetIDTx(
 		ctx,
+		writer,
+		dialect,
 		stmt,
 		metadata.HostId,
 		metadata.CreatedAt.Format(mySQLTimestampFormat),
@@ -53,11 +55,11 @@ func upsertCarveDB(ctx context.Context, writer sqlx.ExecerContext, metadata *fle
 	if err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "insert carve metadata")
 	}
-	return result.LastInsertId()
+	return id, nil
 }
 
 func (ds *Datastore) NewCarve(ctx context.Context, metadata *fleet.CarveMetadata) (*fleet.CarveMetadata, error) {
-	id, err := upsertCarveDB(ctx, ds.writer(ctx), metadata)
+	id, err := upsertCarveDB(ctx, ds.writer(ctx), ds.dialect, metadata)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "insert carve metadata")
 	}

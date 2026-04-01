@@ -152,12 +152,11 @@ func (ds *Datastore) makeSessionInTransaction(ctx context.Context, tx sqlx.ExtCo
 		)
 		VALUES(?,?)
 	`
-	result, err := tx.ExecContext(ctx, sqlStatement, userID, sessionKey)
+	id, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlStatement, userID, sessionKey)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "saving session")
 	}
 
-	id, _ := result.LastInsertId()           // cannot fail with the mysql driver
 	return ds.sessionByID(ctx, tx, uint(id)) //nolint:gosec // dismiss G115
 }
 

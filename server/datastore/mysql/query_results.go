@@ -54,9 +54,9 @@ func (ds *Datastore) OverwriteQueryResultRows(ctx context.Context, rows []*fleet
 		}
 
 		//nolint:gosec // SQL query is constructed using constant strings
-		insertStmt := `
-		INSERT IGNORE INTO query_results (query_id, host_id, last_fetched, data) VALUES
-	` + strings.Join(valueStrings, ",")
+		insertStmt := ds.dialect.InsertIgnoreInto() + `
+		query_results (query_id, host_id, last_fetched, data) VALUES
+	` + strings.Join(valueStrings, ",") + ds.dialect.OnConflictDoNothing("query_id,host_id")
 
 		result, err = tx.ExecContext(ctx, insertStmt, valueArgs...)
 		if err != nil {

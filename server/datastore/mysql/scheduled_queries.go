@@ -15,7 +15,7 @@ import (
 
 // ListScheduledQueriesInPackWithStats loads a pack's scheduled queries and its aggregated stats.
 func (ds *Datastore) ListScheduledQueriesInPackWithStats(ctx context.Context, id uint, opts fleet.ListOptions) ([]*fleet.ScheduledQuery, error) {
-	query := `
+	query := fmt.Sprintf(`
 		SELECT
 			sq.id,
 			sq.pack_id,
@@ -31,16 +31,22 @@ func (ds *Datastore) ListScheduledQueriesInPackWithStats(ctx context.Context, id
 			sq.denylist,
 			q.query,
 			q.id AS query_id,
-			JSON_EXTRACT(ag.json_value, '$.user_time_p50') as user_time_p50,
-			JSON_EXTRACT(ag.json_value, '$.user_time_p95') as user_time_p95,
-			JSON_EXTRACT(ag.json_value, '$.system_time_p50') as system_time_p50,
-			JSON_EXTRACT(ag.json_value, '$.system_time_p95') as system_time_p95,
-			JSON_EXTRACT(ag.json_value, '$.total_executions') as total_executions
+			%s as user_time_p50,
+			%s as user_time_p95,
+			%s as system_time_p50,
+			%s as system_time_p95,
+			%s as total_executions
 		FROM scheduled_queries sq
 		JOIN (SELECT * FROM queries WHERE team_id IS NULL) q ON (sq.query_name = q.name)
 		LEFT JOIN aggregated_stats ag ON (ag.id = sq.id AND ag.global_stats = ? AND ag.type = ?)
 		WHERE sq.pack_id = ?
-	`
+	`,
+		ds.dialect.JSONExtract("ag.json_value", "$.user_time_p50"),
+		ds.dialect.JSONExtract("ag.json_value", "$.user_time_p95"),
+		ds.dialect.JSONExtract("ag.json_value", "$.system_time_p50"),
+		ds.dialect.JSONExtract("ag.json_value", "$.system_time_p95"),
+		ds.dialect.JSONExtract("ag.json_value", "$.total_executions"),
+	)
 	params := []interface{}{false, fleet.AggregatedStatsTypeScheduledQuery, id}
 	query, params = appendListOptionsWithCursorToSQL(query, params, &opts)
 	results := []*fleet.ScheduledQuery{}
@@ -83,10 +89,10 @@ func (ds *Datastore) ListScheduledQueriesInPack(ctx context.Context, id uint) (f
 }
 
 func (ds *Datastore) NewScheduledQuery(ctx context.Context, sq *fleet.ScheduledQuery, opts ...fleet.OptionalArg) (*fleet.ScheduledQuery, error) {
-	return insertScheduledQueryDB(ctx, ds.writer(ctx), sq)
+	return insertScheduledQueryDB(ctx, ds.writer(ctx), ds.dialect, sq)
 }
 
-func insertScheduledQueryDB(ctx context.Context, q sqlx.ExtContext, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error) {
+func insertScheduledQueryDB(ctx context.Context, q sqlx.ExtContext, dialect DialectHelper, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error) {
 	// This query looks up the query name using the ID (for backwards
 	// compatibility with the UI)
 	query := `
@@ -97,7 +103,7 @@ func insertScheduledQueryDB(ctx context.Context, q sqlx.ExtContext, sq *fleet.Sc
 			pack_id,
 			snapshot,
 			removed,
-			` + "`interval`" + `,
+			"interval",
 			platform,
 			version,
 			shard,
@@ -107,12 +113,11 @@ func insertScheduledQueryDB(ctx context.Context, q sqlx.ExtContext, sq *fleet.Sc
 		FROM queries
 		WHERE id = ?
 		`
-	result, err := q.ExecContext(ctx, query, sq.QueryID, sq.Name, sq.PackID, sq.Snapshot, sq.Removed, sq.Interval, sq.Platform, sq.Version, sq.Shard, sq.Denylist, sq.QueryID)
+	id, err := insertAndGetIDTx(ctx, q, dialect, query, sq.QueryID, sq.Name, sq.PackID, sq.Snapshot, sq.Removed, sq.Interval, sq.Platform, sq.Version, sq.Shard, sq.Denylist, sq.QueryID)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "insert scheduled query")
 	}
 
-	id, _ := result.LastInsertId()
 	sq.ID = uint(id) //nolint:gosec // dismiss G115
 
 	query = `SELECT query, name FROM queries WHERE id = ? LIMIT 1`
@@ -145,7 +150,7 @@ func (ds *Datastore) SaveScheduledQuery(ctx context.Context, sq *fleet.Scheduled
 func saveScheduledQueryDB(ctx context.Context, exec sqlx.ExecerContext, sq *fleet.ScheduledQuery) (*fleet.ScheduledQuery, error) {
 	query := `
 		UPDATE scheduled_queries
-			SET pack_id = ?, query_id = ?, ` + "`interval`" + ` = ?, snapshot = ?, removed = ?, platform = ?, version = ?, shard = ?, denylist = ?
+			SET pack_id = ?, query_id = ?, "interval" = ?, snapshot = ?, removed = ?, platform = ?, version = ?, shard = ?, denylist = ?
 			WHERE id = ?
 	`
 	result, err := exec.ExecContext(ctx, query, sq.PackID, sq.QueryID, sq.Interval, sq.Snapshot, sq.Removed, sq.Platform, sq.Version, sq.Shard, sq.Denylist, sq.ID)
@@ -276,8 +281,8 @@ func (ds *Datastore) AsyncBatchSaveHostsScheduledQueryStats(ctx context.Context,
 	// in SaveHostPackStats (in hosts.go) - that is, the behaviour per host must
 	// be the same.
 
-	stmt := `
-		INSERT IGNORE INTO scheduled_query_stats (
+	stmt := ds.dialect.InsertIgnoreInto() + `
+		 scheduled_query_stats (
 			scheduled_query_id,
 			host_id,
 			average_memory,
@@ -290,7 +295,7 @@ func (ds *Datastore) AsyncBatchSaveHostsScheduledQueryStats(ctx context.Context,
 			user_time,
 			wall_time
 		)
-		VALUES %s ON DUPLICATE KEY UPDATE
+		VALUES %s ` + ds.dialect.OnDuplicateKey("scheduled_query_id,host_id", `
 			scheduled_query_id = VALUES(scheduled_query_id),
 			host_id = VALUES(host_id),
 			average_memory = VALUES(average_memory),
@@ -301,7 +306,7 @@ func (ds *Datastore) AsyncBatchSaveHostsScheduledQueryStats(ctx context.Context,
 			output_size = VALUES(output_size),
 			system_time = VALUES(system_time),
 			user_time = VALUES(user_time),
-			wall_time = VALUES(wall_time);
+			wall_time = VALUES(wall_time)`) + `;
 	`
 	var countExecs int
 

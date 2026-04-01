@@ -180,7 +180,7 @@ func (ds *Datastore) GetCertificateTemplatesByTeamID(ctx context.Context, teamID
 }
 
 func (ds *Datastore) CreateCertificateTemplate(ctx context.Context, certificateTemplate *fleet.CertificateTemplate) (*fleet.CertificateTemplateResponse, error) {
-	result, err := ds.writer(ctx).ExecContext(ctx, `
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), `
 		INSERT INTO certificate_templates (
 			name,
 			team_id,
@@ -189,15 +189,10 @@ func (ds *Datastore) CreateCertificateTemplate(ctx context.Context, certificateT
 		) VALUES (?, ?, ?, ?)
 	`, certificateTemplate.Name, certificateTemplate.TeamID, certificateTemplate.CertificateAuthorityID, certificateTemplate.SubjectName)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return nil, ctxerr.Wrap(ctx, alreadyExists("CertificateTemplate", certificateTemplate.Name), "inserting certificate_template")
 		}
 		return nil, ctxerr.Wrap(ctx, err, "inserting certificate_template")
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting last insert id for certificate_template")
 	}
 
 	return &fleet.CertificateTemplateResponse{
@@ -236,17 +231,24 @@ func (ds *Datastore) BatchUpsertCertificateTemplates(ctx context.Context, certif
 		return nil, nil
 	}
 
-	const sqlInsertCertificate = `
+	var sqlInsertCertificate string
+	if ds.dialect.IsPostgres() {
+		// PG: ON CONFLICT DO NOTHING since the UPDATE only sets columns to themselves (no-op).
+		// This ensures RowsAffected()=0 for existing rows, so insertOnDuplicateDidInsertOrUpdate
+		// correctly detects no modification occurred.
+		sqlInsertCertificate = ds.dialect.InsertIgnoreInto() + ` certificate_templates (
+			name, team_id, certificate_authority_id, subject_name
+		) VALUES (?, ?, ?, ?)` + ds.dialect.OnConflictDoNothing("team_id,name")
+	} else {
+		sqlInsertCertificate = `
 		INSERT INTO certificate_templates (
-			name,
-			team_id,
-			certificate_authority_id,
-			subject_name
+			name, team_id, certificate_authority_id, subject_name
 		) VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("team_id,name", `
 			name = VALUES(name),
 			team_id = VALUES(team_id)
-	`
+		`)
+	}
 
 	teamsModifiedSet := make(map[uint]struct{})
 	for _, cert := range certificateTemplates {
@@ -306,8 +308,7 @@ SELECT
 	name,
 	status,
 	detail,
-	operation_type,
-	certificate_template_id
+	operation_type
 FROM host_certificate_templates
 WHERE host_uuid = ?`
 
@@ -351,7 +352,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForExistingHosts(
 			(hosts.team_id = ? OR (? = 0 AND hosts.team_id IS NULL)) AND
 			hosts.platform = '%s' AND
 			host_mdm.enrolled = 1
-		ON DUPLICATE KEY UPDATE host_uuid = host_uuid
+		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `host_uuid = VALUES(host_uuid)`)+`
 	`, fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall, fleet.AndroidPlatform)
 	result, err := ds.writer(ctx).ExecContext(ctx, stmt, certificateTemplateID, teamID, teamID)
 	if err != nil {
@@ -386,7 +387,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForNewHost(
 			UUID_TO_BIN(UUID(), true)
 		FROM certificate_templates
 		WHERE team_id = ?
-		ON DUPLICATE KEY UPDATE
+		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `
 		    -- Unconditionally reset to pending install with a new UUID so the certificate is
 		    -- re-delivered. This handles re-enrollment after work profile removal, where the device
 		    -- lost all certs but the old records may still exist. Clear stale certificate metadata
@@ -400,7 +401,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForNewHost(
 			not_valid_after = NULL,
 			serial = NULL,
 			detail = NULL
-	`, fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall,
+	`), fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall,
 		fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall)
 	result, err := ds.writer(ctx).ExecContext(ctx, stmt, hostUUID, teamID)
 	if err != nil {
@@ -432,37 +433,14 @@ func (ds *Datastore) ResendHostCertificateTemplate(ctx context.Context, hostID u
 			hct.certificate_template_id = ?
 		`, fleet.MaxCertificateInstallRetries)
 
-	const deleteChallenge = `
-		DELETE c FROM
-			challenges c
-		INNER JOIN
-			host_certificate_templates hct ON hct.fleet_challenge = c.challenge
-		INNER JOIN
-			hosts h ON h.uuid = hct.host_uuid
-		WHERE
-			h.id = ? AND
-			hct.certificate_template_id = ?
-		`
+	results, err := ds.writer(ctx).ExecContext(ctx, stmt, fleet.CertificateTemplatePending, hostID, templateID)
+	if err != nil {
+		return ctxerr.Wrap(ctx, err, "updating host certificate template uuid")
+	}
 
-	if err := ds.withTx(ctx, func(tx sqlx.ExtContext) error {
-		_, err := tx.ExecContext(ctx, deleteChallenge, hostID, templateID)
-		if err != nil {
-			return ctxerr.Wrap(ctx, err, "deleting challenges associated with resent certificate template")
-		}
-
-		results, err := tx.ExecContext(ctx, stmt, fleet.CertificateTemplatePending, hostID, templateID)
-		if err != nil {
-			return ctxerr.Wrap(ctx, err, "updating host certificate template uuid")
-		}
-
-		affected, _ := results.RowsAffected()
-		if affected == 0 {
-			return ctxerr.Wrapf(ctx, notFound("HostCertificateTemplate"), "template %d does not exist for host %d", templateID, hostID)
-		}
-
-		return nil
-	}); err != nil {
-		return ctxerr.Wrap(ctx, err, "resetting host certificate template for resend")
+	affected, _ := results.RowsAffected()
+	if affected == 0 {
+		return ctxerr.Wrapf(ctx, notFound("HostCertificateTemplate"), "template %d does not exist for host %d", templateID, hostID)
 	}
 
 	return nil
