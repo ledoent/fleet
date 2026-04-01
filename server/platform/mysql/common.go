@@ -223,10 +223,16 @@ func WithTxx(ctx context.Context, db *sqlx.DB, fn TxFn, logger *slog.Logger) err
 
 // WithReadOnlyTxx executes fn within an isolated, read-only transaction
 func WithReadOnlyTxx(ctx context.Context, reader *sqlx.DB, fn ReadTxFn, logger *slog.Logger) error {
-	tx, err := reader.BeginTxx(ctx, &sql.TxOptions{
+	txOpts := &sql.TxOptions{
 		ReadOnly:  true,
 		Isolation: sql.LevelRepeatableRead,
-	})
+	}
+	// pgx does not support non-default isolation levels via database/sql's
+	// TxOptions, so fall back to LevelDefault for PostgreSQL connections.
+	if reader.DriverName() == "pgx" || reader.DriverName() == "pgx-rebind" {
+		txOpts.Isolation = sql.LevelDefault
+	}
+	tx, err := reader.BeginTxx(ctx, txOpts)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "create read-only transaction")
 	}

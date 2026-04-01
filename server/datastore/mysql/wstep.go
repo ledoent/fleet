@@ -45,15 +45,11 @@ VALUES
 
 // WSTEPNewSerial allocates and returns a new (increasing) serial number.
 func (ds *Datastore) WSTEPNewSerial(ctx context.Context) (*big.Int, error) {
-	result, err := ds.writer(ctx).ExecContext(ctx, `INSERT INTO wstep_serials () VALUES ();`)
+	lid, err := ds.insertAndGetID(ctx, ds.writer(ctx), `INSERT INTO wstep_serials () VALUES ();`)
 	if err != nil {
 		return nil, err
 	}
-	lid, err := result.LastInsertId() // TODO: ok if sequential and not random?
-	if err != nil {
-		return nil, err
-	}
-	// TODO: check maxSerialNumber?
+	// TODO: check maxSerialNumber? ok if sequential and not random?
 	return big.NewInt(lid), nil
 }
 

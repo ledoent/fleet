@@ -29,7 +29,7 @@ import (
 
 type softwareSummary struct {
 	ID               uint    `db:"id"`
-	Checksum         string  `db:"checksum"`
+	Checksum         []byte  `db:"checksum"`
 	Name             string  `db:"name"`
 	TitleID          *uint   `db:"title_id"`
 	BundleIdentifier *string `db:"bundle_identifier"`
@@ -489,7 +489,7 @@ func (ds *Datastore) applyChangesForNewSoftwareDB(
 				return err
 			}
 
-			if err = updateSoftwareUpdatedAt(ctx, tx, hostID); err != nil {
+			if err = updateSoftwareUpdatedAt(ctx, tx, ds.dialect, hostID); err != nil {
 				return err
 			}
 			return nil
@@ -605,9 +605,9 @@ func (ds *Datastore) getExistingSoftware(
 	}
 
 	if len(newChecksumsToSoftware) > 0 {
-		sliceOfNewSWChecksums := make([]string, 0, len(newChecksumsToSoftware))
+		sliceOfNewSWChecksums := make([][]byte, 0, len(newChecksumsToSoftware))
 		for checksum := range newChecksumsToSoftware {
-			sliceOfNewSWChecksums = append(sliceOfNewSWChecksums, checksum)
+			sliceOfNewSWChecksums = append(sliceOfNewSWChecksums, []byte(checksum))
 		}
 		// We use the replica DB for retrieval to minimize the traffic to the writer DB.
 		// It is OK if the software is not found in the replica DB, because we will then attempt to insert it in the writer DB.
@@ -617,14 +617,14 @@ func (ds *Datastore) getExistingSoftware(
 		}
 
 		for _, currentSoftwareSummary := range currentSoftwareSummaries {
-			_, ok := newChecksumsToSoftware[currentSoftwareSummary.Checksum]
+			_, ok := newChecksumsToSoftware[string(currentSoftwareSummary.Checksum)]
 			if !ok {
 				// This should never happen. If it does, we have a bug.
 				return nil, nil, nil, ctxerr.New(
-					ctx, fmt.Sprintf("current software: software not found for checksum %s", hex.EncodeToString([]byte(currentSoftwareSummary.Checksum))),
+					ctx, fmt.Sprintf("current software: software not found for checksum %s", hex.EncodeToString(currentSoftwareSummary.Checksum)),
 				)
 			}
-			delete(setOfNewSWChecksums, currentSoftwareSummary.Checksum)
+			delete(setOfNewSWChecksums, string(currentSoftwareSummary.Checksum))
 		}
 	}
 
@@ -878,7 +878,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 
 	existingSet := make(map[string]struct{}, len(existingSoftwareSummaries))
 	for _, es := range existingSoftwareSummaries {
-		existingSet[es.Checksum] = struct{}{}
+		existingSet[string(es.Checksum)] = struct{}{}
 	}
 
 	for checksum, sw := range incomingSoftwareByChecksum {
@@ -925,22 +925,6 @@ func (ds *Datastore) preInsertSoftwareInventory(
 		}
 	}
 
-	// Fetch FMA canonical names to override osquery-reported names for macOS apps.
-	// This ensures software titles use consistent names (e.g., "Microsoft Visual Studio Code"
-	// instead of "Code" which is what osquery reports for VS Code).
-	// Note: This call is made from the base datastore so it bypasses the cached_mysql layer.
-	// The query is simple (SELECT from the small fleet_maintained_apps table) so this is acceptable.
-	// The cached_mysql layer still caches this method for other callers (e.g., API endpoints).
-	fmaNames, fmaErr := ds.GetFMANamesByIdentifier(ctx)
-	if fmaErr != nil {
-		// Log but don't fail - we can still use osquery-reported names.
-		// A nil map is safe here since Go's map access on nil returns the zero value.
-		if ds.logger != nil {
-			ds.logger.WarnContext(ctx, "failed to get FMA names by identifier", "err", fmaErr)
-		}
-		fmaNames = nil
-	}
-
 	// Process in smaller batches to reduce lock time
 	err := common_mysql.BatchProcessSimple(keys, softwareInventoryInsertBatchSize, func(batchKeys []string) error {
 		batchSoftware := make(map[string]fleet.Software, len(batchKeys))
@@ -957,19 +941,13 @@ func (ds *Datastore) preInsertSoftwareInventory(
 					// there is not an existing software title corresponding to this incoming software version
 					newTitleName := sw.Name
 					if sw.BundleIdentifier != "" {
-						// First check if there's an FMA with this bundle identifier - use its canonical name
-						if fmaName, ok := fmaNames[sw.BundleIdentifier]; ok {
-							newTitleName = fmaName
-						} else {
-							// Fall back to computed best name from osquery reports
-							key := titleKey{
-								bundleID:     sw.BundleIdentifier,
-								source:       sw.Source,
-								extensionFor: sw.ExtensionFor,
-							}
-							if computedName, exists := bestTitleNames[key]; exists {
-								newTitleName = computedName
-							}
+						key := titleKey{
+							bundleID:     sw.BundleIdentifier,
+							source:       sw.Source,
+							extensionFor: sw.ExtensionFor,
+						}
+						if computedName, exists := bestTitleNames[key]; exists {
+							newTitleName = computedName
 						}
 					}
 
@@ -1024,7 +1002,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				// Insert software titles
 				const numberOfArgsPerSoftwareTitles = 7
 				titlesValues := strings.TrimSuffix(strings.Repeat("(?,?,?,?,?,?,?),", len(uniqueTitlesToInsert)), ",")
-				titlesStmt := fmt.Sprintf("INSERT IGNORE INTO software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES %s", titlesValues)
+				titlesStmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+" software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES %s"+ds.dialect.OnConflictDoNothing("unique_identifier,source,extension_for"), titlesValues)
 				titlesArgs := make([]any, 0, len(uniqueTitlesToInsert)*numberOfArgsPerSoftwareTitles)
 
 				for _, title := range uniqueTitlesToInsert {
@@ -1177,7 +1155,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				strings.Repeat("(?,?,?,?,?,?,?,?,?,?,?,?,?),", len(batchKeys)), ",",
 			)
 			stmt := fmt.Sprintf(
-				`INSERT IGNORE INTO software (
+				ds.dialect.InsertIgnoreInto()+` software (
 					name,
 					version,
 					source,
@@ -1191,7 +1169,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 					checksum,
 					application_id,
 					upgrade_code
-				) VALUES %s`,
+				) VALUES %s`+ds.dialect.OnConflictDoNothing("checksum"),
 				values,
 			)
 
@@ -1208,35 +1186,9 @@ func (ds *Datastore) preInsertSoftwareInventory(
 					missingSoftwareTitles = append(missingSoftwareTitles,
 						fmt.Sprintf("%s %s %s", sw.Name, sw.Version, sw.Source))
 				}
-
-				// Use FMA canonical name if available, otherwise use osquery-reported name.
-				// This ensures software.name matches software_titles.name for consistency.
-				//
-				// IMPORTANT: The checksum is intentionally computed from osquery data
-				// (including the osquery-reported name, NOT the FMA name) for these reasons:
-				//
-				// 1. The checksum is used for deduplication via unique index. It serves as
-				//    an internal identifier, not a content integrity hash. The stored name
-				//    can differ from the name used in checksum computation.
-				//
-				// 2. Checksums are computed before FMA lookup, using raw osquery data.
-				//    If we regenerated checksums with FMA names:
-				//    - A cache miss or FMA sync delay could cause the same software to
-				//      generate different checksums, creating duplicate entries.
-				//    - Migration would require recomputing checksums for millions of rows.
-				//
-				// 3. The checksum is never recomputed from stored data - it's only computed
-				//    from incoming osquery data during ingestion and used for lookup.
-				softwareName := sw.Name
-				if sw.BundleIdentifier != "" {
-					if fmaName, ok := fmaNames[sw.BundleIdentifier]; ok {
-						softwareName = fmaName
-					}
-				}
-
 				args = append(
-					args, softwareName, sw.Version, sw.Source, sw.Release, sw.Vendor, sw.Arch,
-					sw.BundleIdentifier, sw.ExtensionID, sw.ExtensionFor, titleID, checksum, sw.ApplicationID, sw.UpgradeCode,
+					args, sw.Name, sw.Version, sw.Source, sw.Release, sw.Vendor, sw.Arch,
+					sw.BundleIdentifier, sw.ExtensionID, sw.ExtensionFor, titleID, []byte(checksum), sw.ApplicationID, sw.UpgradeCode,
 				)
 			}
 
@@ -1276,9 +1228,9 @@ func (ds *Datastore) linkSoftwareToHost(
 	var insertedSoftware []fleet.Software
 
 	// Build map of all checksums we need to link
-	allChecksums := make([]string, 0, len(softwareChecksums))
+	allChecksums := make([][]byte, 0, len(softwareChecksums))
 	for checksum := range softwareChecksums {
-		allChecksums = append(allChecksums, checksum)
+		allChecksums = append(allChecksums, []byte(checksum))
 	}
 
 	// Get all software IDs (they should exist from pre-insertion).
@@ -1292,7 +1244,7 @@ func (ds *Datastore) linkSoftwareToHost(
 	// Build ID map
 	softwareSummaryByChecksum := make(map[string]softwareSummary)
 	for _, s := range allSoftwareSummaries {
-		softwareSummaryByChecksum[s.Checksum] = s
+		softwareSummaryByChecksum[string(s.Checksum)] = s
 	}
 
 	// Link software to host
@@ -1315,7 +1267,7 @@ func (ds *Datastore) linkSoftwareToHost(
 	// INSERT IGNORE handles duplicate key errors for idempotency.
 	if len(insertsHostSoftware) > 0 {
 		values := strings.TrimSuffix(strings.Repeat("(?,?,?),", len(insertsHostSoftware)/3), ",")
-		stmt := fmt.Sprintf(`INSERT IGNORE INTO host_software (host_id, software_id, last_opened_at) VALUES %s`, values)
+		stmt := fmt.Sprintf(ds.dialect.InsertIgnoreInto()+` host_software (host_id, software_id, last_opened_at) VALUES %s`+ds.dialect.OnConflictDoNothing("host_id,software_id"), values)
 		if _, err := tx.ExecContext(ctx, stmt, insertsHostSoftware...); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "insert host software")
 		}
@@ -1466,7 +1418,7 @@ func (ds *Datastore) reconcileExistingTitleEmptyWindowsUpgradeCodes(
 	return nil
 }
 
-func getExistingSoftwareSummariesByChecksums(ctx context.Context, tx sqlx.QueryerContext, checksums []string) ([]softwareSummary, error) {
+func getExistingSoftwareSummariesByChecksums(ctx context.Context, tx sqlx.QueryerContext, checksums [][]byte) ([]softwareSummary, error) {
 	if len(checksums) == 0 {
 		return []softwareSummary{}, nil
 	}
@@ -1558,9 +1510,10 @@ func updateModifiedHostSoftwareDB(
 func updateSoftwareUpdatedAt(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	hostID uint,
 ) error {
-	const stmt = `INSERT INTO host_updates(host_id, software_updated_at) VALUES (?, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE software_updated_at=VALUES(software_updated_at)`
+	stmt := `INSERT INTO host_updates(host_id, software_updated_at) VALUES (?, CURRENT_TIMESTAMP) ` + dialect.OnDuplicateKey("host_id", "software_updated_at=VALUES(software_updated_at)")
 
 	if _, err := tx.ExecContext(ctx, stmt, hostID); err != nil {
 		return ctxerr.Wrap(ctx, err, "update host updates")
@@ -1569,7 +1522,10 @@ func updateSoftwareUpdatedAt(
 	return nil
 }
 
-var dialect = goqu.Dialect("mysql")
+// goquMySQLDialect is a package-level fallback for standalone functions that
+// haven't been refactored to accept a goqu.DialectWrapper parameter yet.
+// TODO(pg): remove once all standalone functions accept a dialect parameter.
+var goquMySQLDialect = goqu.Dialect("mysql")
 
 // listSoftwareDB returns software installed on hosts. Use opts for pagination, filtering, and controlling
 // fields populated in the returned software.
@@ -1866,7 +1822,7 @@ func selectSoftwareSQL(opts fleet.SoftwareListOptions) (string, []interface{}, e
 	}
 
 	// Fallback to the original goqu-based query builder for complex cases
-	ds := dialect.
+	ds := goquMySQLDialect.
 		From(goqu.I("software").As("s")).
 		Select(
 			"s.id",
@@ -2065,12 +2021,16 @@ func selectSoftwareSQL(opts fleet.SoftwareListOptions) (string, []interface{}, e
 		"generated_cpe",
 	)
 
+	if opts.HostID != nil {
+		ds = ds.GroupByAppend("hs.last_opened_at")
+	}
+
 	// Pagination is a bit more complex here due to the join with software_cve table and aggregated columns from cve_meta table.
 	// Apply order by again after joining on sub query
 	ds = appendListOptionsToSelect(ds, opts.ListOptions)
 
 	// join on software_cve and cve_meta after apply pagination using the sub-query above
-	ds = dialect.From(ds.As("s")).
+	ds = goquMySQLDialect.From(ds.As("s")).
 		Select(
 			"s.id",
 			"s.name",
@@ -2343,12 +2303,12 @@ func (ds *Datastore) AllSoftwareIterator(
 	}
 
 	if query.NameMatch != "" {
-		conditionals = append(conditionals, "s.name REGEXP ?")
+		conditionals = append(conditionals, ds.dialect.RegexpMatch("s.name", "?"))
 		args = append(args, query.NameMatch)
 	}
 
 	if query.NameExclude != "" {
-		conditionals = append(conditionals, "s.name NOT REGEXP ?")
+		conditionals = append(conditionals, "NOT ("+ds.dialect.RegexpMatch("s.name", "?")+")")
 		args = append(args, query.NameExclude)
 	}
 
@@ -2377,7 +2337,7 @@ func (ds *Datastore) UpsertSoftwareCPEs(ctx context.Context, cpes []fleet.Softwa
 
 	values := strings.TrimSuffix(strings.Repeat("(?,?),", len(cpes)), ",")
 	sql := fmt.Sprintf(
-		`INSERT INTO software_cpe (software_id, cpe) VALUES %s ON DUPLICATE KEY UPDATE cpe = VALUES(cpe)`,
+		`INSERT INTO software_cpe (software_id, cpe) VALUES %s `+ds.dialect.OnDuplicateKey("id", `cpe = VALUES(cpe)`),
 		values,
 	)
 
@@ -2523,9 +2483,11 @@ func (ds *Datastore) DeleteOutOfDateVulnerabilities(ctx context.Context, source 
 
 func (ds *Datastore) DeleteOrphanedSoftwareVulnerabilities(ctx context.Context) error {
 	if _, err := ds.writer(ctx).ExecContext(ctx, `
-		DELETE sc FROM software_cve sc
-		LEFT JOIN host_software hs ON hs.software_id = sc.software_id
-		WHERE hs.host_id IS NULL
+		DELETE FROM software_cve
+		WHERE NOT EXISTS (
+			SELECT 1 FROM host_software hs
+			WHERE hs.software_id = software_cve.software_id
+		)
 	`); err != nil {
 		return ctxerr.Wrap(ctx, err, "deleting orphaned software vulnerabilities")
 	}
@@ -2533,7 +2495,7 @@ func (ds *Datastore) DeleteOrphanedSoftwareVulnerabilities(ctx context.Context) 
 }
 
 func (ds *Datastore) SoftwareByID(ctx context.Context, id uint, teamID *uint, includeCVEScores bool, tmFilter *fleet.TeamFilter) (*fleet.Software, error) {
-	q := dialect.From(goqu.I("software").As("s")).
+	q := ds.dialect.GoquDialect().From(goqu.I("software").As("s")).
 		Select(
 			"s.id",
 			"s.name",
@@ -2563,7 +2525,7 @@ func (ds *Datastore) SoftwareByID(ctx context.Context, id uint, teamID *uint, in
 		)
 
 	// join only on software_id as we'll need counts for all teams
-	// to filter down to the teams the user has access to
+	// to filter down to the team's the user has access to
 	if tmFilter != nil {
 		q = q.LeftJoin(
 			goqu.I("software_host_counts").As("shc"),
@@ -2663,26 +2625,6 @@ func (ds *Datastore) SoftwareByID(ctx context.Context, id uint, teamID *uint, in
 	return &software, nil
 }
 
-func (ds *Datastore) SoftwareLiteByID(
-	ctx context.Context,
-	id uint,
-) (fleet.SoftwareLite, error) {
-	const stmt = `
-    SELECT id, name, version
-    FROM software
-    WHERE id = ?
-  `
-	var results fleet.SoftwareLite
-	if err := sqlx.GetContext(ctx, ds.reader(ctx), &results, stmt, id); err != nil {
-		if err == sql.ErrNoRows {
-			return fleet.SoftwareLite{}, notFound("Software").WithID(id)
-		}
-		return fleet.SoftwareLite{}, ctxerr.Wrap(ctx, err, "get software version name for host filter")
-	}
-
-	return results, nil
-}
-
 // SyncHostsSoftware calculates the number of hosts having each
 // software installed and stores that information in the software_host_counts
 // table.
@@ -2718,17 +2660,17 @@ func (ds *Datastore) SyncHostsSoftware(ctx context.Context, updatedAt time.Time)
       WHERE h.team_id IS NULL AND hs.software_id > ? AND hs.software_id <= ?
       GROUP BY hs.software_id`
 
-		insertStmt = `
+		valuesPart = `(?, ?, ?, ?, ?),`
+	)
+
+	insertStmt := `
       INSERT INTO ` + swapTable + `
         (software_id, hosts_count, team_id, global_stats, updated_at)
       VALUES
         %s
-      ON DUPLICATE KEY UPDATE
+      ` + ds.dialect.OnDuplicateKey("host_id,software_id", `
         hosts_count = VALUES(hosts_count),
-        updated_at = VALUES(updated_at)`
-
-		valuesPart = `(?, ?, ?, ?, ?),`
-	)
+        updated_at = VALUES(updated_at)`)
 
 	// Create a fresh swap table to populate with new counts. If a previous run left a partial swap table, drop it first.
 	w := ds.writer(ctx)
@@ -2910,12 +2852,12 @@ func (ds *Datastore) CleanupSoftwareTitles(ctx context.Context) error {
 		// Re-check orphan status on the writer to avoid deleting a title that an IT admin just linked
 		// (e.g., added a software installer) between the reader SELECT and this DELETE.
 		deleteOrphanedSoftwareTitlesStmt = `
-		DELETE st FROM software_titles st
-		LEFT JOIN software s ON st.id = s.title_id
-		LEFT JOIN software_installers si ON st.id = si.title_id
-		LEFT JOIN in_house_apps iha ON st.id = iha.title_id
-		LEFT JOIN vpp_apps vap ON st.id = vap.title_id
-		WHERE st.id IN (?) AND s.title_id IS NULL AND si.title_id IS NULL AND iha.title_id IS NULL AND vap.title_id IS NULL`
+		DELETE FROM software_titles
+		WHERE id IN (?)
+		AND NOT EXISTS (SELECT 1 FROM software s WHERE s.title_id = software_titles.id)
+		AND NOT EXISTS (SELECT 1 FROM software_installers si WHERE si.title_id = software_titles.id)
+		AND NOT EXISTS (SELECT 1 FROM in_house_apps iha WHERE iha.title_id = software_titles.id)
+		AND NOT EXISTS (SELECT 1 FROM vpp_apps vap WHERE vap.title_id = software_titles.id)`
 	)
 
 	var lastID uint
@@ -3049,13 +2991,13 @@ func (ds *Datastore) InsertCVEMeta(ctx context.Context, cveMeta []fleet.CVEMeta)
 	query := `
 INSERT INTO cve_meta (cve, cvss_score, epss_probability, cisa_known_exploit, published, description)
 VALUES %s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("cve", `
     cvss_score = VALUES(cvss_score),
     epss_probability = VALUES(epss_probability),
     cisa_known_exploit = VALUES(cisa_known_exploit),
     published = VALUES(published),
     description = VALUES(description)
-`
+`)
 
 	batchSize := 500
 	for i := 0; i < len(cveMeta); i += batchSize {
@@ -3097,11 +3039,11 @@ func (ds *Datastore) InsertSoftwareVulnerability(
 	stmt := `
 		INSERT INTO software_cve (cve, source, software_id, resolved_in_version)
 		VALUES (?,?,?,?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("id", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			updated_at=?
-	`
+	`)
 	args = append(args, vuln.CVE, source, vuln.SoftwareID, vuln.ResolvedInVersion, time.Now().UTC())
 
 	res, err := ds.writer(ctx).ExecContext(ctx, stmt, args...)
@@ -3174,11 +3116,11 @@ func (ds *Datastore) InsertSoftwareVulnerabilities(
 		stmt := fmt.Sprintf(`
 			INSERT INTO software_cve (cve, source, software_id, resolved_in_version)
 			VALUES %s
-			ON DUPLICATE KEY UPDATE
+			`+ds.dialect.OnDuplicateKey("id", `
 				source = VALUES(source),
 				resolved_in_version = VALUES(resolved_in_version),
 				updated_at = ?
-		`, values)
+		`), values)
 
 		var args []any
 		for _, v := range batch {
@@ -3210,7 +3152,7 @@ func (ds *Datastore) ListSoftwareVulnerabilitiesByHostIDsSource(
 	}
 	var queryR []softwareVulnerabilityWithHostId
 
-	stmt := dialect.
+	stmt := ds.dialect.GoquDialect().
 		From(goqu.T("software_cve").As("sc")).
 		Join(
 			goqu.T("host_software").As("hs"),
@@ -3314,7 +3256,7 @@ func (ds *Datastore) ListCVEs(ctx context.Context, maxAge time.Duration) ([]flee
 	var result []fleet.CVEMeta
 
 	maxAgeDate := time.Now().Add(-1 * maxAge)
-	stmt := dialect.From(goqu.T("cve_meta")).
+	stmt := ds.dialect.GoquDialect().From(goqu.T("cve_meta")).
 		Select(
 			goqu.C("cve"),
 			goqu.C("cvss_score"),
@@ -5837,6 +5779,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 		}
 
 		var replacements []any
+		gc := ds.dialect.GroupConcat
 		if len(softwareTitleIDs) > 0 {
 			replacements = append(replacements,
 				// For software installers
@@ -5852,12 +5795,12 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 					software_installers.filename AS package_name,
 					software_installers.version AS package_version,
 					software_installers.platform as package_platform,
-					GROUP_CONCAT(software.id) AS software_id_list,
-					GROUP_CONCAT(software.source) AS software_source_list,
-					GROUP_CONCAT(software.extension_for) AS software_extension_for_list,
-					GROUP_CONCAT(software.upgrade_code) AS software_upgrade_code_list,
-					GROUP_CONCAT(software.version) AS version_list,
-					GROUP_CONCAT(software.bundle_identifier) AS bundle_identifier_list,
+					`+gc("software.id", ",")+` AS software_id_list,
+					`+gc("software.source", ",")+` AS software_source_list,
+					`+gc("software.extension_for", ",")+` AS software_extension_for_list,
+					`+gc("software.upgrade_code", ",")+` AS software_upgrade_code_list,
+					`+gc("software.version", ",")+` AS version_list,
+					`+gc("software.bundle_identifier", ",")+` AS bundle_identifier_list,
 					NULL AS vpp_app_adam_id_list,
 					NULL AS vpp_app_version_list,
 					NULL AS vpp_app_platform_list,
@@ -5903,11 +5846,11 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 					NULL AS software_upgrade_code_list,
 					NULL AS version_list,
 					NULL AS bundle_identifier_list,
-					GROUP_CONCAT(vpp_apps.adam_id) AS vpp_app_adam_id_list,
-					GROUP_CONCAT(vpp_apps.latest_version) AS vpp_app_version_list,
-					GROUP_CONCAT(vpp_apps.platform) as vpp_app_platform_list,
-					GROUP_CONCAT(vpp_apps.icon_url) AS vpp_app_icon_url_list,
-					GROUP_CONCAT(vpp_apps_teams.self_service) AS vpp_app_self_service_list,
+					`+gc("vpp_apps.adam_id", ",")+` AS vpp_app_adam_id_list,
+					`+gc("vpp_apps.latest_version", ",")+` AS vpp_app_version_list,
+					`+gc("vpp_apps.platform", ",")+` as vpp_app_platform_list,
+					`+gc("vpp_apps.icon_url", ",")+` AS vpp_app_icon_url_list,
+					`+gc("vpp_apps_teams.self_service", ",")+` AS vpp_app_self_service_list,
 					NULL AS in_house_app_id_list,
 					NULL AS in_house_app_name_list,
 					NULL AS in_house_app_version_list,
@@ -5949,11 +5892,11 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 					NULL as vpp_app_platform_list,
 					NULL AS vpp_app_icon_url_list,
 					NULL AS vpp_app_self_service_list,
-					GROUP_CONCAT(in_house_apps.id) AS in_house_app_id_list,
-					GROUP_CONCAT(in_house_apps.filename) AS in_house_app_name_list,
-					GROUP_CONCAT(in_house_apps.version) AS in_house_app_version_list,
-					GROUP_CONCAT(in_house_apps.platform) as in_house_app_platform_list,
-					GROUP_CONCAT(in_house_apps.self_service) as in_house_app_self_service_list
+					`+gc("in_house_apps.id", ",")+` AS in_house_app_id_list,
+					`+gc("in_house_apps.filename", ",")+` AS in_house_app_name_list,
+					`+gc("in_house_apps.version", ",")+` AS in_house_app_version_list,
+					`+gc("in_house_apps.platform", ",")+` as in_house_app_platform_list,
+					`+gc("in_house_apps.self_service", ",")+` as in_house_app_self_service_list
 			`, `
 				GROUP BY
 					software_titles.id,
@@ -6484,7 +6427,7 @@ func (ds *Datastore) CreateIntermediateInstallFailureRecord(ctx context.Context,
 
 	// Create or update a record with the failure details
 	// Use INSERT ... ON DUPLICATE KEY UPDATE to make this idempotent
-	const insertStmt = `
+	insertStmt := `
 		INSERT INTO host_software_installs (
 			execution_id,
 			host_id,
@@ -6502,14 +6445,14 @@ func (ds *Datastore) CreateIntermediateInstallFailureRecord(ctx context.Context,
 			post_install_script_exit_code,
 			post_install_script_output
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("id", `
 			install_script_exit_code = VALUES(install_script_exit_code),
 			install_script_output = VALUES(install_script_output),
 			pre_install_query_output = VALUES(pre_install_query_output),
 			post_install_script_exit_code = VALUES(post_install_script_exit_code),
 			post_install_script_output = VALUES(post_install_script_output),
 			updated_at = CURRENT_TIMESTAMP(6)
-	`
+	`)
 
 	truncateOutput := func(output *string) *string {
 		if output != nil {
@@ -6637,12 +6580,11 @@ WHERE hvsi.host_id = ? AND st.id IN (?)
 
 func (ds *Datastore) NewSoftwareCategory(ctx context.Context, name string) (*fleet.SoftwareCategory, error) {
 	stmt := `INSERT INTO software_categories (name) VALUES (?)`
-	res, err := ds.writer(ctx).ExecContext(ctx, stmt, name)
+	r, err := ds.insertAndGetID(ctx, ds.writer(ctx), stmt, name)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "new software category")
 	}
 
-	r, _ := res.LastInsertId()
 	id := uint(r) //nolint:gosec // dismiss G115
 	return &fleet.SoftwareCategory{Name: name, ID: id}, nil
 }
@@ -6763,3 +6705,23 @@ WHERE
 
 	return ret, nil
 }
+func (ds *Datastore) SoftwareLiteByID(
+	ctx context.Context,
+	id uint,
+) (fleet.SoftwareLite, error) {
+	const stmt = `
+    SELECT id, name, version
+    FROM software
+    WHERE id = ?
+  `
+	var results fleet.SoftwareLite
+	if err := sqlx.GetContext(ctx, ds.reader(ctx), &results, stmt, id); err != nil {
+		if err == sql.ErrNoRows {
+			return fleet.SoftwareLite{}, notFound("Software").WithID(id)
+		}
+		return fleet.SoftwareLite{}, ctxerr.Wrap(ctx, err, "get software version name for host filter")
+	}
+
+	return results, nil
+}
+

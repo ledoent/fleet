@@ -15,8 +15,7 @@ func (ds *Datastore) CreateOrUpdateSoftwareTitleIcon(ctx context.Context, payloa
 	var args []any
 	query = `
 		INSERT INTO software_title_icons (team_id, software_title_id, storage_id, filename)
-		VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE
-		storage_id = VALUES(storage_id), filename = VALUES(filename)
+		VALUES (?, ?, ?, ?) ` + ds.dialect.OnDuplicateKey("id", `storage_id = VALUES(storage_id), filename = VALUES(filename)`) + `
 	`
 	args = []any{payload.TeamID, payload.TitleID, payload.StorageID, payload.Filename}
 

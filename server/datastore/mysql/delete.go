@@ -29,7 +29,7 @@ func (ds *Datastore) deleteEntityByName(ctx context.Context, dbTable entity, nam
 	deleteStmt := fmt.Sprintf("DELETE FROM %s WHERE name = ?", dbTable.name)
 	result, err := ds.writer(ctx).ExecContext(ctx, deleteStmt, name)
 	if err != nil {
-		if isMySQLForeignKey(err) {
+		if ds.dialect.IsForeignKey(err) {
 			return ctxerr.Wrap(ctx, foreignKey(dbTable.name, name))
 		}
 		return ctxerr.Wrapf(ctx, err, "delete %s", dbTable)

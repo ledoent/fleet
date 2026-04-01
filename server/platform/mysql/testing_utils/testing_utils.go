@@ -57,12 +57,26 @@ func TruncateTables(t testing.TB, db *sqlx.DB, logger *slog.Logger, nonEmptyTabl
 
 	ctx := context.Background()
 
+	isPG := strings.Contains(db.DriverName(), "pgx")
+
 	require.NoError(t, common_mysql.WithTxx(ctx, db, func(tx sqlx.ExtContext) error {
 		var skipSeeded bool
 
 		if len(tables) == 0 {
 			skipSeeded = true
-			sql := `
+			var sql string
+			if isPG {
+				sql = `
+      SELECT
+        table_name
+      FROM
+        information_schema.tables
+      WHERE
+        table_schema = current_schema() AND
+        table_type = 'BASE TABLE'
+    `
+			} else {
+				sql = `
       SELECT
         table_name
       FROM
@@ -71,13 +85,20 @@ func TruncateTables(t testing.TB, db *sqlx.DB, logger *slog.Logger, nonEmptyTabl
         table_schema = database() AND
         table_type = 'BASE TABLE'
     `
+			}
 			if err := sqlx.SelectContext(ctx, tx, &tables, sql); err != nil {
 				return err
 			}
 		}
 
-		if _, err := tx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=0`); err != nil {
-			return err
+		if isPG {
+			if _, err := tx.ExecContext(ctx, `SET session_replication_role = 'replica'`); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=0`); err != nil {
+				return err
+			}
 		}
 		for _, tbl := range tables {
 			if nonEmptyTables[tbl] {
@@ -86,12 +107,22 @@ func TruncateTables(t testing.TB, db *sqlx.DB, logger *slog.Logger, nonEmptyTabl
 				}
 				return fmt.Errorf("cannot truncate table %s, it contains seed data from schema.sql", tbl)
 			}
-			if _, err := tx.ExecContext(ctx, "TRUNCATE TABLE "+tbl); err != nil {
+			truncateSQL := "TRUNCATE TABLE " + tbl
+			if isPG {
+				truncateSQL += " CASCADE"
+			}
+			if _, err := tx.ExecContext(ctx, truncateSQL); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=1`); err != nil {
-			return err
+		if isPG {
+			if _, err := tx.ExecContext(ctx, `SET session_replication_role = 'origin'`); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS=1`); err != nil {
+				return err
+			}
 		}
 		return nil
 	}, logger))

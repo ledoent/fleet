@@ -53,7 +53,7 @@ func (ds *Datastore) NewUser(ctx context.Context, user *fleet.User) (*fleet.User
 		invite_id
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
       `
-		result, err := tx.ExecContext(ctx, sqlStatement,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlStatement,
 			user.Password,
 			user.Salt,
 			user.Name,
@@ -76,7 +76,6 @@ func (ds *Datastore) NewUser(ctx context.Context, user *fleet.User) (*fleet.User
 			return ctxerr.Wrap(ctx, err, "create new user")
 		}
 
-		id, _ := result.LastInsertId()
 		user.ID = uint(id) //nolint:gosec // dismiss G115
 
 		if err := saveTeamsForUserDB(ctx, tx, user); err != nil {
@@ -385,9 +384,8 @@ func (ds *Datastore) DeleteUser(ctx context.Context, id uint) error {
 		SELECT u.id, u.name, u.email
 		FROM users AS u
 		WHERE u.id = ?
-		ON DUPLICATE KEY UPDATE
-			name       = u.name,
-			email      = u.email`
+		` + ds.dialect.OnDuplicateKey("id", `name       = VALUES(name),
+			email      = VALUES(email)`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, id)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "populate users_deleted entry")
