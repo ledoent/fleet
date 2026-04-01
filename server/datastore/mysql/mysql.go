@@ -4,6 +4,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,6 +34,7 @@ import (
 	scep_depot "github.com/fleetdm/fleet/v4/server/mdm/scep/depot"
 	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
 	"github.com/go-sql-driver/mysql"
+	_ "github.com/fleetdm/fleet/v4/server/platform/postgres" // register pgx-rebind driver for PostgreSQL
 	"github.com/hashicorp/go-multierror"
 	"github.com/jmoiron/sqlx"
 	"go.opentelemetry.io/otel/attribute"
@@ -59,10 +61,11 @@ type Datastore struct {
 	replica fleet.DBReader // so it cannot be used to perform writes
 	primary *sqlx.DB
 
-	logger *slog.Logger
-	clock  clock.Clock
-	config config.MysqlConfig
-	pusher nano_push.Pusher
+	logger  *slog.Logger
+	clock   clock.Clock
+	config  config.MysqlConfig
+	dialect DialectHelper
+	pusher  nano_push.Pusher
 	android.Datastore
 
 	// nil if no read replica
@@ -113,10 +116,56 @@ func (ds *Datastore) reader(ctx context.Context) fleet.DBReader {
 	return ds.replica
 }
 
+// currentDatabaseFn returns the SQL function to get the current database name.
+// MySQL: DATABASE(), PostgreSQL: current_database()
+func (ds *Datastore) currentDatabaseFn() string {
+	if ds.dialect.ReturningID() != "" {
+		return "current_database()"
+	}
+	return "(SELECT DATABASE())"
+}
+
 // writer returns the DB instance to use for write statements, which is always
 // the primary.
 func (ds *Datastore) writer(ctx context.Context) *sqlx.DB {
 	return ds.primary
+}
+
+// Querier is any type that can execute SQL (sqlx.DB, sqlx.Tx, sqlx.ExtContext).
+type Querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// insertAndGetID executes an INSERT and returns the auto-generated ID.
+// For MySQL, uses LastInsertId(). For PostgreSQL, appends RETURNING id.
+func (ds *Datastore) insertAndGetID(ctx context.Context, q Querier, query string, args ...any) (int64, error) {
+	if ds.dialect.ReturningID() != "" {
+		// PostgreSQL: use RETURNING id
+		var id int64
+		err := q.QueryRowContext(ctx, query+ds.dialect.ReturningID(), args...).Scan(&id)
+		return id, err
+	}
+	// MySQL: use LastInsertId
+	res, err := q.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// insertAndGetIDTx is like insertAndGetID but for sqlx.ExtContext (transactions).
+func insertAndGetIDTx(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, query string, args ...any) (int64, error) {
+	if dialect.ReturningID() != "" {
+		var id int64
+		err := tx.QueryRowxContext(ctx, query+dialect.ReturningID(), args...).Scan(&id)
+		return id, err
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 // loadOrPrepareStmt will load a statement from the statement cache.
@@ -241,6 +290,13 @@ func NewDBConnections(cfg config.MysqlConfig, opts ...DBOption) (*common_mysql.D
 	if err := checkAndModifyConfig(&cfg); err != nil {
 		return nil, err
 	}
+
+	// Set migration client dialects to match the configured driver.
+	if cfg.Driver == "postgres" {
+		tables.SetDialect("postgres")
+		data.SetDialect("postgres")
+	}
+
 	// Convert replica config once so that checkAndModifyConfig mutations are preserved for the later NewDB call.
 	var replicaConf *config.MysqlConfig
 	if options.ReplicaConfig != nil {
@@ -286,12 +342,13 @@ func NewDatastore(conns *common_mysql.DBConnections, cfg config.MysqlConfig, c c
 		logger:              conns.Options.Logger,
 		clock:               c,
 		config:              cfg,
+		dialect:             dialectForDriver(cfg.Driver),
 		readReplicaConfig:   conns.Options.ReplicaConfig,
 		writeCh:             make(chan itemToWrite),
 		stmtCache:           make(map[string]*sqlx.Stmt),
 		minLastOpenedAtDiff: conns.Options.MinLastOpenedAtDiff,
 		serverPrivateKey:    conns.Options.PrivateKey,
-		Datastore:           NewAndroidDatastore(conns.Options.Logger, conns.Primary, conns.Replica),
+		Datastore:           NewAndroidDatastore(conns.Options.Logger, conns.Primary, conns.Replica, dialectForDriver(cfg.Driver)),
 	}
 
 	go ds.writeChanLoop()
@@ -378,7 +435,41 @@ func init() {
 }
 
 func NewDB(conf *config.MysqlConfig, opts *common_mysql.DBOptions) (*sqlx.DB, error) {
+	if conf.Driver == "postgres" {
+		return newPostgresDB(conf)
+	}
 	return common_mysql.NewDB(toCommonMysqlConfig(conf), opts, otelTracedDriverName)
+}
+
+// newPostgresDB opens a PostgreSQL connection using pgx/stdlib.
+func newPostgresDB(conf *config.MysqlConfig) (*sqlx.DB, error) {
+	// Build PostgreSQL DSN from the MySQL-style config fields.
+	// Address is expected as "host:port".
+	host, port, err := net.SplitHostPort(conf.Address)
+	if err != nil {
+		host = conf.Address
+		port = "5432"
+	}
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		host, port, conf.Username, conf.Password, conf.Database,
+	)
+	if conf.TLSCA != "" {
+		dsn = fmt.Sprintf(
+			"host=%s port=%s user=%s password=%s dbname=%s sslmode=verify-ca sslrootcert=%s",
+			host, port, conf.Username, conf.Password, conf.Database, conf.TLSCA,
+		)
+	}
+
+	// Use "pgx-rebind" driver which wraps pgx/stdlib and auto-converts
+	// MySQL-style ? placeholders to PostgreSQL $N placeholders.
+	db, err := sqlx.Open("pgx-rebind", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	db.SetMaxOpenConns(conf.MaxOpenConns)
+	db.SetMaxIdleConns(conf.MaxIdleConns)
+	return db, nil
 }
 
 // toCommonMysqlConfig converts a config.MysqlConfig to common_mysql.MysqlConfig.
@@ -439,7 +530,26 @@ func fromCommonMysqlConfig(conf *common_mysql.MysqlConfig) *config.MysqlConfig {
 	}
 }
 
+// dialectForDriver returns the DialectHelper for the given driver name.
+// Empty string defaults to "mysql".
+func dialectForDriver(driver string) DialectHelper {
+	switch driver {
+	case "postgres":
+		return postgresDialect{}
+	case "", "mysql":
+		return mysqlDialect{}
+	default:
+		// checkAndModifyConfig validates the driver before this is called,
+		// so reaching here means a programming error.
+		panic(fmt.Sprintf("unsupported database driver: %q", driver))
+	}
+}
+
 func checkAndModifyConfig(conf *config.MysqlConfig) error {
+	if conf.Driver != "" && conf.Driver != "mysql" && conf.Driver != "postgres" {
+		return fmt.Errorf("unsupported database driver %q: valid values are \"mysql\" and \"postgres\"", conf.Driver)
+	}
+
 	if conf.PasswordPath != "" && conf.Password != "" {
 		return errors.New("A MySQL password and a MySQL password file were provided - please specify only one")
 	}
@@ -488,11 +598,43 @@ func setupIAMAuthIfNeeded(conf *config.MysqlConfig, opts *common_mysql.DBOptions
 }
 
 func (ds *Datastore) MigrateTables(ctx context.Context) error {
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		return ds.migratePGBaseline(ctx)
+	}
 	return tables.MigrationClient.Up(ds.writer(ctx).DB, "")
 }
 
 func (ds *Datastore) MigrateData(ctx context.Context) error {
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		// PG baseline schema includes all data migrations (label seeds, etc.)
+		return nil
+	}
 	return data.MigrationClient.Up(ds.writer(ctx).DB, "")
+}
+
+//go:embed pg_baseline_schema.sql
+var pgBaselineSchemaSQL string
+
+// migratePGBaseline applies the PG baseline schema for fresh PostgreSQL databases.
+// It checks if tables already exist and skips if so.
+func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
+	var exists bool
+	err := ds.writer(ctx).GetContext(ctx, &exists,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hosts')`)
+	if err != nil {
+		return fmt.Errorf("checking PG schema: %w", err)
+	}
+	if exists {
+		ds.logger.InfoContext(ctx, "PostgreSQL schema already exists, skipping baseline")
+		return nil
+	}
+	ds.logger.InfoContext(ctx, "Applying PostgreSQL baseline schema")
+	_, err = ds.writer(ctx).ExecContext(ctx, pgBaselineSchemaSQL)
+	if err != nil {
+		return fmt.Errorf("applying PG baseline schema: %w", err)
+	}
+	ds.logger.InfoContext(ctx, "PostgreSQL baseline schema applied successfully")
+	return nil
 }
 
 // loadMigrations manually loads the applied migrations in ascending
@@ -532,6 +674,20 @@ func (ds *Datastore) loadMigrations(
 //
 // It assumes some deployments may have performed migrations out of order.
 func (ds *Datastore) MigrationStatus(ctx context.Context) (*fleet.MigrationStatus, error) {
+	// For PostgreSQL, the baseline schema is applied atomically — either it's all there or not.
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		var exists bool
+		err := ds.primary.GetContext(ctx, &exists,
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hosts')`)
+		if err != nil {
+			return nil, fmt.Errorf("checking PG schema: %w", err)
+		}
+		if exists {
+			return &fleet.MigrationStatus{StatusCode: fleet.AllMigrationsCompleted}, nil
+		}
+		return &fleet.MigrationStatus{StatusCode: fleet.NoMigrationsCompleted}, nil
+	}
+
 	if tables.MigrationClient.Migrations == nil || data.MigrationClient.Migrations == nil {
 		return nil, errors.New("unexpected nil migrations list")
 	}
@@ -732,14 +888,23 @@ func (ds *Datastore) HealthCheck() error {
 	// Check that the primary is reachable and not in read-only mode.
 	// After an AWS Aurora failover the old writer is demoted to a reader;
 	// detecting this lets the health check fail so the orchestrator can restart Fleet.
-	var readOnly int
-	if err := ds.primary.QueryRowContext(context.Background(), "SELECT @@read_only").Scan(&readOnly); err != nil {
-		return err
-	}
-	if readOnly == 1 {
-		// Intentionally return an error so that the health check endpoint returns a 500,
-		// signaling the orchestrator (ECS, Kubernetes) to restart Fleet with fresh DB connections.
-		return errors.New("primary database is read-only, possible failover detected")
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		// PG: check if the server is in recovery (read-only replica)
+		var inRecovery bool
+		if err := ds.primary.QueryRowContext(context.Background(), "SELECT pg_is_in_recovery()").Scan(&inRecovery); err != nil {
+			return err
+		}
+		if inRecovery {
+			return errors.New("primary database is in recovery (read-only), possible failover detected")
+		}
+	} else {
+		var readOnly int
+		if err := ds.primary.QueryRowContext(context.Background(), "SELECT @@read_only").Scan(&readOnly); err != nil {
+			return err
+		}
+		if readOnly == 1 {
+			return errors.New("primary database is read-only, possible failover detected")
+		}
 	}
 
 	if ds.readReplicaConfig != nil {
@@ -1255,6 +1420,10 @@ func (ds *Datastore) ProcessList(ctx context.Context) ([]fleet.MySQLProcess, err
 	return processList, nil
 }
 
+// insertOnDuplicateDidInsertOrUpdate returns true if an INSERT ON DUPLICATE KEY
+// UPDATE actually inserted or updated a row (vs no-op).
+// MySQL: checks LastInsertId (non-zero on insert) AND RowsAffected (> 0).
+// PostgreSQL: LastInsertId is not available, so just checks RowsAffected > 0.
 func insertOnDuplicateDidInsertOrUpdate(res sql.Result) bool {
 	// From mysql's documentation:
 	//
@@ -1281,9 +1450,13 @@ func insertOnDuplicateDidInsertOrUpdate(res sql.Result) bool {
 	// already holds:
 	// https://github.com/go-sql-driver/mysql/blob/bcc459a906419e2890a50fc2c99ea6dd927a88f2/result.go
 
-	lastID, _ := res.LastInsertId()
 	aff, _ := res.RowsAffected()
-	// something was updated (lastID != 0) AND row was found (aff == 1 or higher if more rows were found)
+	lastID, err := res.LastInsertId()
+	if err != nil {
+		// PostgreSQL doesn't support LastInsertId — fall back to RowsAffected only
+		return aff > 0
+	}
+	// MySQL: something was inserted (lastID != 0) AND row was found (aff > 0)
 	return lastID != 0 && aff > 0
 }
 
@@ -1321,9 +1494,9 @@ func (ds *Datastore) optimisticGetOrInsertWithWriter(ctx context.Context, writer
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// this does not exist yet, try to insert it
-			res, err := writer.ExecContext(ctx, insertStmt.Statement, insertStmt.Args...)
+			insertedID, err := insertAndGetIDTx(ctx, writer, ds.dialect, insertStmt.Statement, insertStmt.Args...)
 			if err != nil {
-				if IsDuplicate(err) {
+				if ds.dialect.IsDuplicate(err) {
 					// it might've been created between the select and the insert, read
 					// again this time from the primary database connection.
 					id, err := readID(writer)
@@ -1334,8 +1507,7 @@ func (ds *Datastore) optimisticGetOrInsertWithWriter(ctx context.Context, writer
 				}
 				return 0, ctxerr.Wrap(ctx, err, "insert")
 			}
-			id, _ := res.LastInsertId()
-			return uint(id), nil //nolint:gosec // dismiss G115
+			return uint(insertedID), nil //nolint:gosec // dismiss G115
 		}
 		return 0, ctxerr.Wrap(ctx, err, "get id from reader")
 	}
@@ -1394,4 +1566,19 @@ func batchProcessDB[T any](
 		}
 	}
 	return nil
+}
+
+// jsonObjectFunc returns the SQL function name for building JSON objects.
+// MySQL: JSON_OBJECT, PostgreSQL: jsonb_build_object
+func (ds *Datastore) jsonObjectFunc() string {
+	if ds.dialect.ReturningID() != "" {
+		return "jsonb_build_object"
+	}
+	return "JSON_OBJECT"
+}
+
+// resolveJSONFunc replaces %JSON_OBJECT% placeholder with the dialect-specific
+// JSON object builder function name.
+func (ds *Datastore) resolveJSONFunc(sql string) string {
+	return strings.ReplaceAll(sql, "%JSON_OBJECT%", ds.jsonObjectFunc())
 }
