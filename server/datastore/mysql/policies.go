@@ -2,7 +2,7 @@ package mysql
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // MD5 used for non-cryptographic checksum only
 	"database/sql"
 	"encoding/json"
 	"errors"
