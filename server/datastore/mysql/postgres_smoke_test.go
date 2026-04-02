@@ -379,7 +379,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 
 	// --- Host disk encryption key ---
 	t.Run("SetOrUpdateHostDiskEncryptionKey", func(t *testing.T) {
-		_, err := ds.SetOrUpdateHostDiskEncryptionKey(ctx, host, "test-key", "test-client", ptr.Bool(false))
+		_, err := ds.SetOrUpdateHostDiskEncryptionKey(ctx, host, "test-key", "test-client", new(bool))
 		if err != nil {
 			t.Logf("FAIL SetOrUpdateHostDiskEncryptionKey: %v", err)
 		}

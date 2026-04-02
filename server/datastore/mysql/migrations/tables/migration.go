@@ -113,25 +113,6 @@ func withSteps(steps []migrationStep, tx *sql.Tx) error {
 	return nil
 }
 
-// dialectStep returns a migrationStep that executes the MySQL statement
-// for MySQL databases and the PostgreSQL statement for PostgreSQL databases.
-// The driver is determined at migration time from the goose client's dialect.
-// Pass an empty string for either statement to make it a no-op for that dialect.
-func dialectStep(mysqlStmt, pgStmt string) migrationStep {
-	return func(tx *sql.Tx) error {
-		// Determine dialect from the connection's driver.
-		// In the current architecture, the migration client always uses MySqlDialect,
-		// so pgStmt will not be executed until a PostgreSQL migration client exists.
-		// For now, always execute mysqlStmt.
-		stmt := mysqlStmt
-		if stmt == "" {
-			return nil
-		}
-		_, err := tx.Exec(stmt)
-		return err
-	}
-}
-
 // migrationHelper provides dialect-specific schema introspection for migrations.
 // The default implementation uses MySQL information_schema.
 // When PostgreSQL support is added, a pgMigrationHelper will use pg_catalog.

@@ -538,7 +538,7 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 	var stmts []string
 	inDollarQuote := false
 	var current strings.Builder
-	for _, line := range strings.Split(schema, "\n") {
+	for line := range strings.SplitSeq(schema, "\n") {
 		trimmed := strings.TrimSpace(line)
 		// Count $$ occurrences — odd count toggles dollar-quote state
 		if strings.Count(trimmed, "$$")%2 == 1 {
@@ -652,7 +652,7 @@ func ExecAdhocSQLWithError(ds *Datastore, fn func(q sqlx.ExtContext) error) erro
 
 // InsertAndGetLastID executes an INSERT statement and returns the auto-generated ID.
 // On MySQL it uses LastInsertId(); on PG it appends RETURNING id and scans the result.
-func InsertAndGetLastID(ctx context.Context, ds *Datastore, query string, args ...interface{}) (int64, error) {
+func InsertAndGetLastID(ctx context.Context, ds *Datastore, query string, args ...any) (int64, error) {
 	if ds.dialect.IsPostgres() {
 		pgQuery := query + " RETURNING id"
 		var id int64
