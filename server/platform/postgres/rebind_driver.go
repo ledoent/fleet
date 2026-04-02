@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -20,25 +21,25 @@ import (
 
 // Pre-compiled regexes used in rebindQuery to avoid per-query compilation overhead.
 var (
-	reUUIDBinUpper     = regexp.MustCompile(`UUID_TO_BIN\(UUID\(\),\s*true\)`)
-	reUUIDBinLower     = regexp.MustCompile(`UUID_TO_BIN\(uuid\(\),\s*true\)`)
-	reUUIDBinTrue      = regexp.MustCompile(`UUID_TO_BIN\(([^,)]+),\s*true\)`)
-	reUUIDBin          = regexp.MustCompile(`UUID_TO_BIN\(([^,)]+)\)`)
-	reUUID             = regexp.MustCompile(`(?i)\bUUID\(\)`)
-	reBinToUUIDTrue    = regexp.MustCompile(`BIN_TO_UUID\(([^,)]+),\s*true\)`)
-	reBinToUUID        = regexp.MustCompile(`BIN_TO_UUID\(([^,)]+)\)`)
-	reTimeDiff         = regexp.MustCompile(`TIMEDIFF\(([^,]+),\s*([^)]+)\)`)
-	reTimeToSec        = regexp.MustCompile(`TIME_TO_SEC\(([^)]+)\)`)
-	reFromDual         = regexp.MustCompile(`(?i)\s+FROM\s+DUAL\b`)
-	reSeparator        = regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
-	reTimestamp        = regexp.MustCompile(`\bTIMESTAMP\(([^)]+)\)`)
-	reMaxDenylisted    = regexp.MustCompile(`MAX\(([^)]*\.denylisted)\)`)
+	reUUIDBinUpper  = regexp.MustCompile(`UUID_TO_BIN\(UUID\(\),\s*true\)`)
+	reUUIDBinLower  = regexp.MustCompile(`UUID_TO_BIN\(uuid\(\),\s*true\)`)
+	reUUIDBinTrue   = regexp.MustCompile(`UUID_TO_BIN\(([^,)]+),\s*true\)`)
+	reUUIDBin       = regexp.MustCompile(`UUID_TO_BIN\(([^,)]+)\)`)
+	reUUID          = regexp.MustCompile(`(?i)\bUUID\(\)`)
+	reBinToUUIDTrue = regexp.MustCompile(`BIN_TO_UUID\(([^,)]+),\s*true\)`)
+	reBinToUUID     = regexp.MustCompile(`BIN_TO_UUID\(([^,)]+)\)`)
+	reTimeDiff      = regexp.MustCompile(`TIMEDIFF\(([^,]+),\s*([^)]+)\)`)
+	reTimeToSec     = regexp.MustCompile(`TIME_TO_SEC\(([^)]+)\)`)
+	reFromDual      = regexp.MustCompile(`(?i)\s+FROM\s+DUAL\b`)
+	reSeparator     = regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
+	reTimestamp     = regexp.MustCompile(`\bTIMESTAMP\(([^)]+)\)`)
+	reMaxDenylisted = regexp.MustCompile(`MAX\(([^)]*\.denylisted)\)`)
 	// MAX(prof_*) columns from boolean subqueries (android/apple MDM profile status aggregation)
-	reMaxBooleanCols   = regexp.MustCompile(`MAX\(((?:prof|fv|rl|decl)_(?:pending|failed|verifying|verified)|android_prof_(?:pending|failed|verifying|verified))\)`)
-	reLimitTrailing    = regexp.MustCompile(`(?i)\s+LIMIT\s+\d+\s*$`)
-	reJSONExtractFunc  = regexp.MustCompile(`JSON_EXTRACT\((\w+),\s*(\?|'[^']*')\)`)
-	reJSONPath         = regexp.MustCompile(`->>?'\$\.[^']*'`)
-	reTimestampDiff       = regexp.MustCompile(`(?i)TIMESTAMPDIFF\(\s*SECOND\s*,\s*(.+?)\s*,\s*(.+?)\s*\)`)
+	reMaxBooleanCols        = regexp.MustCompile(`MAX\(((?:prof|fv|rl|decl)_(?:pending|failed|verifying|verified)|android_prof_(?:pending|failed|verifying|verified))\)`)
+	reLimitTrailing         = regexp.MustCompile(`(?i)\s+LIMIT\s+\d+\s*$`)
+	reJSONExtractFunc       = regexp.MustCompile(`JSON_EXTRACT\((\w+),\s*(\?|'[^']*')\)`)
+	reJSONPath              = regexp.MustCompile(`->>?'\$\.[^']*'`)
+	reTimestampDiff         = regexp.MustCompile(`(?i)TIMESTAMPDIFF\(\s*SECOND\s*,\s*(.+?)\s*,\s*(.+?)\s*\)`)
 	reNormalizeDuplicateKey = regexp.MustCompile(`(?i)ON\s+DUPLICATE\s+KEY\s+UPDATE`)
 	// MySQL: INSERT INTO table () VALUES () — empty column/value lists for auto-increment-only inserts
 	reEmptyValues = regexp.MustCompile(`(?i)(INSERT\s+INTO\s+\S+\s+)\(\s*\)\s*VALUES\s*\(\s*\)`)
@@ -483,7 +484,7 @@ func (r *rebindRows) NextResultSet() error {
 	if rs, ok := r.Rows.(driver.RowsNextResultSet); ok {
 		return rs.NextResultSet()
 	}
-	return fmt.Errorf("not supported")
+	return errors.New("not supported")
 }
 
 // coerceBoolArgsForTextCast converts Go bool args to "true"/"false" strings
@@ -868,65 +869,62 @@ func isIdentChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
-
 // castJsonbBuildObjectParams adds ::text casts to ? placeholders inside jsonb_build_object() calls.
 // PG's jsonb_build_object has a VARIADIC "any" signature, so it can't infer placeholder parameter types.
 // Casting to ::text makes all JSON values strings, which is compatible with ->>' text extraction.
 // Handles nested jsonb_build_object and subqueries via paren-balancing.
 func castJsonbBuildObjectParams(query string) string {
 	const prefix = "jsonb_build_object("
-	for {
-		idx := strings.Index(query, prefix)
-		if idx < 0 {
-			return query
-		}
-		start := idx + len(prefix)
-		depth := 1
-		i := start
-		// Walk through the jsonb_build_object args, adding ::text to ? placeholders
-		// in ALL positions (both keys and values). PG's jsonb_build_object has a
-		// VARIADIC "any" signature, so it can't infer any placeholder parameter types.
-		var result strings.Builder
-		result.WriteString(query[:start])
-		argStart := i
+	idx := strings.Index(query, prefix)
+	if idx < 0 {
+		return query
+	}
+	start := idx + len(prefix)
+	depth := 1
+	i := start
+	// Walk through the jsonb_build_object args, adding ::text to ? placeholders
+	// in ALL positions (both keys and values). PG's jsonb_build_object has a
+	// VARIADIC "any" signature, so it can't infer any placeholder parameter types.
+	var result strings.Builder
+	result.WriteString(query[:start])
+	argStart := i
 
-		for i < len(query) && depth > 0 {
-			switch query[i] {
-			case '(':
-				depth++
+	for i < len(query) && depth > 0 {
+		switch query[i] {
+		case '(':
+			depth++
+			i++
+		case ')':
+			depth--
+			if depth == 0 {
+				// Process the last argument
+				arg := query[argStart:i]
+				arg = castPlaceholdersInArg(arg)
+				result.WriteString(arg)
+				result.WriteByte(')')
+			}
+			i++
+		case ',':
+			if depth == 1 {
+				arg := query[argStart:i]
+				arg = castPlaceholdersInArg(arg)
+				result.WriteString(arg)
+				result.WriteByte(',')
+				argStart = i + 1
 				i++
-			case ')':
-				depth--
-				if depth == 0 {
-					// Process the last argument
-					arg := query[argStart:i]
-					arg = castPlaceholdersInArg(arg)
-					result.WriteString(arg)
-					result.WriteByte(')')
-				}
-				i++
-			case ',':
-				if depth == 1 {
-					arg := query[argStart:i]
-					arg = castPlaceholdersInArg(arg)
-					result.WriteString(arg)
-					result.WriteByte(',')
-					argStart = i + 1
-					i++
-				} else {
-					i++
-				}
-			default:
+			} else {
 				i++
 			}
+		default:
+			i++
 		}
-		if depth != 0 {
-			return query // unbalanced, leave as-is
-		}
-		// Recursively process the rest of the query
-		result.WriteString(castJsonbBuildObjectParams(query[i:]))
-		return result.String()
 	}
+	if depth != 0 {
+		return query // unbalanced, leave as-is
+	}
+	// Recursively process the rest of the query
+	result.WriteString(castJsonbBuildObjectParams(query[i:]))
+	return result.String()
 }
 
 // castPlaceholdersInArg adds ::text to bare ? placeholders in a jsonb_build_object value argument.
@@ -1000,9 +998,9 @@ func rewriteJSONPath(query string) string {
 		if len(parts) == 1 {
 			// Simple case: no dots
 			if isText {
-				return "->>'"+parts[0]+"'"
+				return "->>'" + parts[0] + "'"
 			}
-			return "->'"+parts[0]+"'"
+			return "->'" + parts[0] + "'"
 		}
 		// Multi-level path: all but last use ->, last uses the original operator
 		var sb strings.Builder
@@ -1381,36 +1379,36 @@ func splitTopLevel(s string, delim byte) []string {
 // This handles cases not going through the dialect helper.
 // knownPrimaryKeys maps table names to their primary key columns for ON CONFLICT resolution.
 var knownPrimaryKeys = map[string]string{
-	"host_dep_assignments":               "host_id",
-	"host_mdm_idp_accounts":              "host_uuid",
-	"host_mdm_apple_declarations":        "host_uuid,declaration_uuid",
-	"mdm_declaration_labels":             "apple_declaration_uuid,label_name",
-	"scim_user_group":                    "scim_user_id,group_id",
-	"host_munki_issues":                  "host_id,munki_issue_id",
-	"host_munki_info":                    "host_id",
-	"cron_stats":                         "id",
-	"nano_command_results":               "id,command_uuid",
-	"host_mdm_apple_bootstrap_packages":  "host_uuid",
-	"mdm_configuration_profile_labels":   "id",
-	"app_config_json":                    "id",
-	"host_mdm_android_profiles":          "host_uuid,profile_uuid",
-	"host_conditional_access":            "host_id",
-	"host_mdm":                           "host_id",
-	"host_display_names":                 "host_id",
-	"host_emails":                        "id",
-	"label_membership":                   "host_id,label_id",
-	"host_software":                      "host_id,software_id",
-	"software_host_counts":               "software_id,team_id",
-	"nano_enrollment_queue":              "id,command_uuid",
-	"host_mdm_windows_profiles":          "host_uuid,profile_uuid",
+	"host_dep_assignments":              "host_id",
+	"host_mdm_idp_accounts":             "host_uuid",
+	"host_mdm_apple_declarations":       "host_uuid,declaration_uuid",
+	"mdm_declaration_labels":            "apple_declaration_uuid,label_name",
+	"scim_user_group":                   "scim_user_id,group_id",
+	"host_munki_issues":                 "host_id,munki_issue_id",
+	"host_munki_info":                   "host_id",
+	"cron_stats":                        "id",
+	"nano_command_results":              "id,command_uuid",
+	"host_mdm_apple_bootstrap_packages": "host_uuid",
+	"mdm_configuration_profile_labels":  "id",
+	"app_config_json":                   "id",
+	"host_mdm_android_profiles":         "host_uuid,profile_uuid",
+	"host_conditional_access":           "host_id",
+	"host_mdm":                          "host_id",
+	"host_display_names":                "host_id",
+	"host_emails":                       "id",
+	"label_membership":                  "host_id,label_id",
+	"host_software":                     "host_id,software_id",
+	"software_host_counts":              "software_id,team_id",
+	"nano_enrollment_queue":             "id,command_uuid",
+	"host_mdm_windows_profiles":         "host_uuid,profile_uuid",
 	// NanoMDM/NanoDEP tables
-	"nano_dep_names":                     "name",
-	"nano_devices":                       "id",
-	"nano_users":                         "id,device_id",
-	"nano_enrollments":                   "id",
-	"nano_cert_auth_associations":        "id,sha256",
-	"nano_push_certs":                    "topic",
-	"host_certificate_templates":         "host_uuid,certificate_template_id",
+	"nano_dep_names":              "name",
+	"nano_devices":                "id",
+	"nano_users":                  "id,device_id",
+	"nano_enrollments":            "id",
+	"nano_cert_auth_associations": "id,sha256",
+	"nano_push_certs":             "topic",
+	"host_certificate_templates":  "host_uuid,certificate_template_id",
 }
 
 func rewriteOnDuplicateKey(query string) string {
@@ -1587,4 +1585,3 @@ func rewriteUpdateJoin(query string) string {
 	return fmt.Sprintf("UPDATE %s SET %s FROM %s WHERE %s",
 		table1, setClause, strings.Join(fromTables, ", "), allConditions)
 }
-

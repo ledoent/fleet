@@ -275,13 +275,13 @@ func policiesChecksumComputedColumn() string {
 }
 
 // policyChecksum computes the checksum for a policy in Go (portable across databases).
-// The checksum is MD5(CONCAT_WS(\x00, COALESCE(team_id, ''), name)) as raw bytes.
+// The checksum is MD5(CONCAT_WS(\x00, COALESCE(team_id, ”), name)) as raw bytes.
 func policyChecksum(teamID *uint, name string) []byte {
 	var teamStr string
 	if teamID != nil {
 		teamStr = fmt.Sprintf("%d", *teamID)
 	}
-	h := md5.Sum([]byte(teamStr + "\x00" + name))
+	h := md5.Sum([]byte(teamStr + "\x00" + name)) //nolint:gosec // MD5 used for non-cryptographic checksum
 	return h[:]
 }
 

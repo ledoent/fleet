@@ -23,7 +23,7 @@ func TestMysqlDialectSQL(t *testing.T) {
 	})
 
 	t.Run("OnConflictDoNothing", func(t *testing.T) {
-		assert.Equal(t, "", d.OnConflictDoNothing("id"))
+		assert.Empty(t, d.OnConflictDoNothing("id"))
 	})
 
 	t.Run("GroupConcat", func(t *testing.T) {

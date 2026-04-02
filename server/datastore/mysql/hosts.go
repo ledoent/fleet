@@ -297,7 +297,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 			seen[key] = i
 		}
 		if len(seen) < scheduledQueriesQueryCount {
-			var dedupedArgs []interface{}
+			var dedupedArgs []any
 			dedupedCount := 0
 			for i := 0; i < scheduledQueriesQueryCount; i++ {
 				base := i * argsPerRow
@@ -332,7 +332,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 			seen[key] = i
 		}
 		if len(seen) < userPacksQueryCount {
-			var dedupedArgs []interface{}
+			var dedupedArgs []any
 			dedupedCount := 0
 			for i := 0; i < userPacksQueryCount; i++ {
 				base := i * argsPerRow
@@ -358,7 +358,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 			// which avoids NOT NULL violations on PG).
 			argsPerRow := 12 // 2 (subquery: teamID, name) + 10 (values)
 			var selectParts []string
-			var reorderedArgs []interface{}
+			var reorderedArgs []any
 			for i := 0; i < scheduledQueriesQueryCount; i++ {
 				base := i * argsPerRow
 				selectParts = append(selectParts,
@@ -441,7 +441,7 @@ func saveHostPackStatsDB(ctx context.Context, db *sqlx.DB, dialect DialectHelper
 			// a second time" when multiple scheduled queries reference the same query_id.
 			argsPerRow := 12 // 2 (subquery: packName, sqName) + 10 (values)
 			var selectParts []string
-			var reorderedArgs []interface{}
+			var reorderedArgs []any
 			for i := 0; i < userPacksQueryCount; i++ {
 				base := i * argsPerRow
 				selectParts = append(selectParts,
