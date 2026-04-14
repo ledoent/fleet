@@ -31,6 +31,33 @@ VALUES
 			return ctxerr.Wrap(ctx, err, "upsert maintained app")
 		}
 		appID = uint(id) //nolint:gosec // dismiss G115
+
+		// For darwin apps, update existing software_titles and software entries
+		// to use the FMA canonical name. This ensures consistency when an FMA
+		// is added for software that was previously ingested with osquery-reported names.
+		// These UPDATEs are idempotent and safe to run unconditionally.
+		if app.Platform == "darwin" && app.UniqueIdentifier != "" {
+			_, err = tx.ExecContext(ctx, `
+				UPDATE software_titles
+				SET name = ?
+				WHERE bundle_identifier = ?
+					AND name != ?
+			`, app.Name, app.UniqueIdentifier, app.Name)
+			if err != nil {
+				return ctxerr.Wrap(ctx, err, "update software_titles names for FMA")
+			}
+
+			_, err = tx.ExecContext(ctx, `
+				UPDATE software
+				SET name = ?
+				WHERE bundle_identifier = ?
+					AND name != ?
+			`, app.Name, app.UniqueIdentifier, app.Name)
+			if err != nil {
+				return ctxerr.Wrap(ctx, err, "update software names for FMA")
+			}
+		}
+
 		return nil
 	})
 	if err != nil {
