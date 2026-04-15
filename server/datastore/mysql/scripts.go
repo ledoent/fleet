@@ -3015,7 +3015,48 @@ WHERE
 }
 
 func (ds *Datastore) markActivitiesAsCompleted(ctx context.Context, tx sqlx.ExtContext) error {
-	const stmt = `
+	// MySQL uses UPDATE ... JOIN syntax; PostgreSQL uses UPDATE ... FROM with a subquery.
+	// PostgreSQL also disallows HAVING with column aliases — expressions must be repeated.
+	// PostgreSQL also disallows table-qualified column names in the SET clause.
+	var stmt string
+	if ds.dialect.IsPostgres() {
+		stmt = `
+UPDATE batch_activities AS ba
+SET
+  status          = 'finished',
+  finished_at     = NOW(),
+  num_targeted    = agg.num_targeted,
+  num_incompatible = agg.num_incompatible,
+  num_ran         = agg.num_ran,
+  num_errored     = agg.num_errored,
+  num_canceled    = agg.num_canceled,
+  num_pending     = 0
+FROM (
+  SELECT
+    ba2.id AS batch_id,
+    COUNT(bahr.host_id)                                                                                                                          AS num_targeted,
+    COUNT(bahr.error)                                                                                                                            AS num_incompatible,
+    COUNT(CASE WHEN hsr.exit_code = 0 THEN 1 ELSE NULL END)                                                                                     AS num_ran,
+    COUNT(CASE WHEN hsr.exit_code <> 0 THEN 1 ELSE NULL END)                                                                                    AS num_errored,
+    COUNT(CASE WHEN (hsr.canceled = true AND hsr.exit_code IS NULL) OR (hsr.host_id IS NULL AND bahr.error IS NULL AND ba2.canceled = true) THEN 1 ELSE NULL END) AS num_canceled
+  FROM batch_activities AS ba2
+  LEFT JOIN batch_activity_host_results AS bahr
+    ON ba2.execution_id = bahr.batch_execution_id
+  LEFT JOIN host_script_results AS hsr
+    ON bahr.host_execution_id = hsr.execution_id
+  WHERE ba2.status = 'started'
+  GROUP BY ba2.id
+  HAVING (
+    COUNT(bahr.error) +
+    COUNT(CASE WHEN hsr.exit_code = 0 THEN 1 ELSE NULL END) +
+    COUNT(CASE WHEN hsr.exit_code <> 0 THEN 1 ELSE NULL END) +
+    COUNT(CASE WHEN (hsr.canceled = true AND hsr.exit_code IS NULL) OR (hsr.host_id IS NULL AND bahr.error IS NULL AND ba2.canceled = true) THEN 1 ELSE NULL END)
+  ) >= COUNT(bahr.host_id)
+) AS agg
+WHERE agg.batch_id = ba.id AND ba.status = 'started'
+`
+	} else {
+		stmt = `
 UPDATE batch_activities AS ba
 JOIN (
   SELECT
@@ -3024,12 +3065,12 @@ JOIN (
     COUNT(bahr.error)                                          AS num_incompatible,
     COUNT(IF(hsr.exit_code = 0, 1, NULL))                      AS num_ran,
     COUNT(IF(hsr.exit_code <> 0, 1, NULL))                     AS num_errored,
-	COUNT(IF((hsr.canceled = 1 AND hsr.exit_code IS NULL) OR (hsr.host_id IS NULL AND bahr.error is NULL AND ba2.canceled = 1), 1, NULL)) AS num_canceled
+    COUNT(IF((hsr.canceled = 1 AND hsr.exit_code IS NULL) OR (hsr.host_id IS NULL AND bahr.error is NULL AND ba2.canceled = 1), 1, NULL)) AS num_canceled
   FROM batch_activities AS ba2
   LEFT JOIN batch_activity_host_results AS bahr
-	  ON ba2.execution_id = bahr.batch_execution_id
+    ON ba2.execution_id = bahr.batch_execution_id
   LEFT JOIN host_script_results AS hsr
-	  ON bahr.host_execution_id = hsr.execution_id
+    ON bahr.host_execution_id = hsr.execution_id
   WHERE ba2.status = 'started'
   GROUP BY ba2.id
   HAVING (num_incompatible + num_ran + num_errored + num_canceled) >= num_targeted
@@ -3046,6 +3087,7 @@ SET
   ba.num_pending    = 0
 WHERE ba.status = 'started';
 `
+	}
 	// TODO -- use `RETURNING` to return the IDs of the updated activities?
 	_, err := tx.ExecContext(ctx, stmt)
 	if err != nil {

@@ -308,7 +308,8 @@ func rebindQuery(query string) string {
 		"hmdm.is_server", "hm.installed_from_dep", "q.discard_data",
 		"hmabp.skipped", "hm.is_personal_enrollment",
 		// Unqualified boolean columns (safe — always boolean in Fleet schema)
-		"deleted", "canceled", "refetch_requested", "expired",
+		// Note: "expired" is intentionally omitted — carve_metadata.expired is smallint in production PG.
+		"deleted", "canceled", "refetch_requested",
 		"enrolled", "enabled", "active",
 		"resync", "terms_expired", "sync_request",
 		"discard_data", "is_server", "is_kernel", "encrypted",

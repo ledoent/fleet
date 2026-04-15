@@ -6699,11 +6699,8 @@ func (ds *Datastore) UpdateHostIssuesVulnerabilities(ctx context.Context) error 
 }
 
 func (ds *Datastore) CleanupHostIssues(ctx context.Context) error {
-	stmt := `
-	DELETE hi
-	FROM host_issues hi
-	LEFT JOIN hosts h ON h.id = hi.host_id
-	WHERE h.id IS NULL`
+	// Cross-dialect: avoid MySQL-only "DELETE alias FROM table alias JOIN" syntax.
+	stmt := `DELETE FROM host_issues WHERE host_id NOT IN (SELECT id FROM hosts)`
 	if _, err := ds.writer(ctx).ExecContext(ctx, stmt); err != nil {
 		return ctxerr.Wrap(ctx, err, "cleanup host issues")
 	}

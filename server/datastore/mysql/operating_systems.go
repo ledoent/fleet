@@ -210,13 +210,9 @@ func getHostOperatingSystemDB(ctx context.Context, tx sqlx.QueryerContext, hostI
 
 func (ds *Datastore) CleanupHostOperatingSystems(ctx context.Context) error {
 	// delete operating_systems records that are not associated with any host (e.g., all hosts have
-	// upgraded from a prior version)
-	stmt := `
-	DELETE op
-	FROM operating_systems op
-	LEFT JOIN host_operating_system hop ON op.id = hop.os_id
-	WHERE hop.os_id IS NULL
-	`
+	// upgraded from a prior version).
+	// Cross-dialect: avoid MySQL-only "DELETE alias FROM table alias JOIN" syntax.
+	stmt := `DELETE FROM operating_systems WHERE id NOT IN (SELECT os_id FROM host_operating_system WHERE os_id IS NOT NULL)`
 	if _, err := ds.writer(ctx).ExecContext(ctx, stmt); err != nil {
 		return ctxerr.Wrap(ctx, err, "clean up host operating systems")
 	}

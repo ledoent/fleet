@@ -234,7 +234,8 @@ func (ds *Datastore) ListCarves(ctx context.Context, opt fleet.CarveListOptions)
 		carveSelectFields,
 	)
 	if !opt.Expired {
-		stmt += ` WHERE NOT expired `
+		// Cross-dialect: NOT expr is invalid on smallint in PostgreSQL; use = 0 instead.
+		stmt += ` WHERE expired = 0 `
 	}
 	stmt, params := appendListOptionsToSQL(stmt, &opt.ListOptions)
 	carves := []*fleet.CarveMetadata{}
