@@ -348,6 +348,8 @@ func rebindQuery(query string) string {
 	query = strings.ReplaceAll(query, "pm.passes = 0", "(pm.passes = false)::int")
 	// MySQL !boolean → PG NOT boolean (for use in SUM aggregates)
 	query = strings.ReplaceAll(query, "!pm.passes", "(NOT pm.passes)::int")
+	// SUM(1 - pm.passes): PG can't subtract boolean from integer; cast to int first
+	query = strings.ReplaceAll(query, "1 - pm.passes", "1 - (pm.passes)::int")
 	// Fix FIND_IN_SET/ANY result compared to integer: PG = ANY() returns boolean
 	// MySQL FIND_IN_SET returns integer, so code uses <> 0 / != 0 checks
 	// PG = ANY() returns boolean, making these comparisons invalid
