@@ -6466,7 +6466,7 @@ func updateHostIssuesFailingPoliciesForSingleHost(ctx context.Context, tx sqlx.E
 		GROUP BY host_id.id
 	` + dialect.OnDuplicateKey("host_id", `
 		failing_policies_count = VALUES(failing_policies_count),
-		total_issues_count = VALUES(failing_policies_count) + critical_vulnerabilities_count`)
+		total_issues_count = VALUES(failing_policies_count) + host_issues.critical_vulnerabilities_count`)
 	if _, err := tx.ExecContext(ctx, stmt, hostID); err != nil {
 		return ctxerr.Wrap(ctx, err, "updating failing policies in host issues for one host")
 	}
@@ -6516,7 +6516,7 @@ func updateHostIssuesFailingPolicies(ctx context.Context, tx sqlx.ExecerContext,
 		GROUP BY pm.host_id
 	`, sumExpr, sumExpr) + dialect.OnDuplicateKey("host_id", `
 		failing_policies_count = VALUES(failing_policies_count),
-		total_issues_count = VALUES(failing_policies_count) + critical_vulnerabilities_count`)
+		total_issues_count = VALUES(failing_policies_count) + host_issues.critical_vulnerabilities_count`)
 
 	// Sort host IDs to ensure consistent lock ordering across all transactions.
 	// This prevents deadlocks when multiple transactions process overlapping sets of hosts.
