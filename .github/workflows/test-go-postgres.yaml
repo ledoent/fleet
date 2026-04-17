@@ -6,6 +6,7 @@ on:
       - main
       - patch-*
       - prepare-*
+      - aggregated
     paths:
       - '**.go'
       - 'go.mod'
@@ -204,24 +205,26 @@ jobs:
 
       - name: Check for failures
         run: |
+          # Expected status artifact directory names — one per matrix leg.
+          # Must be kept in sync with the postgres matrix above.
+          expected=("postgres-0-status" "postgres-1-status")
           failed=""
-          status_count=0
-          for status_file in $(find ./ -type f -name 'status'); do
-            status_count=$((status_count + 1))
-            test_dir=$(basename $(dirname "$status_file"))
+          for dir in "${expected[@]}"; do
+            status_file="./${dir}/status"
+            if [[ ! -f "$status_file" ]]; then
+              echo "❌ Missing status file: $dir (matrix leg did not report — likely runner crash or cancellation)"
+              failed="${failed}${dir} (missing), "
+              continue
+            fi
             if grep -q "fail" "$status_file"; then
-              echo "❌ Failed: $test_dir"
-              failed="${failed}${test_dir}, "
+              echo "❌ Failed: $dir"
+              failed="${failed}${dir}, "
             else
-              echo "✅ Passed: $test_dir"
+              echo "✅ Passed: $dir"
             fi
           done
-          if [[ $status_count -eq 0 ]]; then
-            echo "❌ ERROR: No status files found"
-            exit 1
-          fi
           if [[ -n "$failed" ]]; then
-            echo "❌ One or more PostgreSQL test jobs failed: ${failed%, }"
+            echo "❌ One or more PostgreSQL test jobs failed or did not report: ${failed%, }"
             exit 1
           fi
           echo "✅ All PostgreSQL test jobs passed"

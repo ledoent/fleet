@@ -1,0 +1,67 @@
+name: Validate PG Compatibility
+
+on:
+  push:
+    branches:
+      - main
+      - patch-*
+      - prepare-*
+      - aggregated
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'server/datastore/mysql/schema.sql'
+      - 'server/datastore/mysql/pg_baseline_schema.sql'
+      - 'server/platform/postgres/rebind_driver.go'
+      - 'tools/pgcompat/**'
+      - '.github/workflows/validate-pg-compat.yml'
+  pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'server/datastore/mysql/schema.sql'
+      - 'server/datastore/mysql/pg_baseline_schema.sql'
+      - 'server/platform/postgres/rebind_driver.go'
+      - 'tools/pgcompat/**'
+      - '.github/workflows/validate-pg-compat.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  validate-pg-compat:
+    name: PG compatibility checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+
+      - name: Install Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: knownPrimaryKeys completeness (runtime sites)
+        run: go run ./tools/pgcompat/check_primary_keys
+
+      - name: knownPrimaryKeys completeness (including migrations)
+        run: go run ./tools/pgcompat/check_primary_keys --include-migrations
+
+      - name: MySQL ↔ PG schema drift
+        run: go run ./tools/pgcompat/check_schema_drift
