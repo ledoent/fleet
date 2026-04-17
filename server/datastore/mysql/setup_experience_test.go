@@ -740,10 +740,10 @@ func testEnqueueSetupExperienceItemsWithDisplayName(t *testing.T, ds *Datastore)
 
 	// Set custom display names that invert the alphabetical order
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		if err := updateSoftwareTitleDisplayName(ctx, q, &team.ID, titleID1, "Zulu Custom"); err != nil {
+		if err := updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, titleID1, "Zulu Custom"); err != nil {
 			return err
 		}
-		return updateSoftwareTitleDisplayName(ctx, q, &team.ID, titleID2, "Alpha Custom")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, titleID2, "Alpha Custom")
 	})
 
 	// Create two VPP apps with titles that sort in a known order, then invert with display names.
@@ -771,10 +771,10 @@ func testEnqueueSetupExperienceItemsWithDisplayName(t *testing.T, ds *Datastore)
 
 	// Set custom display names for VPP apps (invert order)
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		if err := updateSoftwareTitleDisplayName(ctx, q, &team.ID, vppApp1.TitleID, "Zulu VPP Custom"); err != nil {
+		if err := updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, vppApp1.TitleID, "Zulu VPP Custom"); err != nil {
 			return err
 		}
-		return updateSoftwareTitleDisplayName(ctx, q, &team.ID, vppApp2.TitleID, "Alpha VPP Custom")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, vppApp2.TitleID, "Alpha VPP Custom")
 	})
 
 	// Create a host assigned to the team and enqueue setup experience.
