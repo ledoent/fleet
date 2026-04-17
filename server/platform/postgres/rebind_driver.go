@@ -1435,6 +1435,18 @@ var knownPrimaryKeys = map[string]string{
 	"mdm_windows_configuration_profiles":   "profile_uuid",
 	"windows_mdm_command_results":          "id",
 	"host_mdm_actions":                     "host_id",
+	// Runtime upsert sites (non-dialect)
+	"users_deleted":                "id",
+	"wstep_cert_auth_associations": "id,sha256",
+	// Historical migration upsert sites — these migrations have already been
+	// applied to production and won't re-run on fresh PG installs (which start
+	// from pg_baseline_schema.sql). Entries are defense-in-depth in case the
+	// migration path is exercised against a fresh PG database.
+	"mobile_device_management_solutions":       "id",
+	"policy_stats":                             "policy_id,inherited_team_id_char",
+	"script_contents":                          "md5_checksum",
+	"software_titles":                          "id",
+	"operating_system_version_vulnerabilities": "id",
 }
 
 func rewriteOnDuplicateKey(query string) string {
