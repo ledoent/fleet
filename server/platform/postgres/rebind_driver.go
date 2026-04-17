@@ -1560,38 +1560,12 @@ func rewriteUpdateJoin(query string) string {
 		setAndWhere = m2[3]
 	}
 
-	// Parse individual JOINs from the join block
-	// Handle both aliased (JOIN table alias ON) and unaliased (JOIN table ON) joins
-	var fromTables []string
-	var onConditions []string
-	joinRe := regexp.MustCompile(`(?is)(?:INNER\s+)?JOIN\s+(\S+)\s+(?:(\w+)\s+)?ON\s+`)
-	joinMatches := joinRe.FindAllStringSubmatchIndex(joinBlock, -1)
-	for i, loc := range joinMatches {
-		table := joinBlock[loc[2]:loc[3]]
-		alias := ""
-		if loc[4] >= 0 && loc[5] >= 0 {
-			candidate := joinBlock[loc[4]:loc[5]]
-			// Make sure it's not the ON keyword itself
-			if !strings.EqualFold(candidate, "ON") {
-				alias = candidate
-			}
-		}
-		if alias != "" {
-			fromTables = append(fromTables, table+" "+alias)
-		} else {
-			fromTables = append(fromTables, table)
-		}
-		// ON condition runs from end of this match to start of next match (or end of block)
-		condStart := loc[1]
-		var condEnd int
-		if i+1 < len(joinMatches) {
-			condEnd = joinMatches[i+1][0]
-		} else {
-			condEnd = len(joinBlock)
-		}
-		cond := strings.TrimSpace(joinBlock[condStart:condEnd])
-		onConditions = append(onConditions, cond)
-	}
+	// Parse individual JOINs from the join block. Each JOIN is one of:
+	//   JOIN table [alias] ON cond
+	//   JOIN (subquery) alias ON cond
+	// Subqueries can contain arbitrary tokens including spaces, so use a
+	// paren-aware scanner instead of a regex (regex can't balance parens).
+	fromTables, onConditions := parseJoinBlock(joinBlock)
 
 	// Split SET clause from WHERE clause
 	var setClause, whereClause string
@@ -1622,4 +1596,97 @@ func rewriteUpdateJoin(query string) string {
 	}
 	return fmt.Sprintf("UPDATE %s SET %s FROM %s WHERE %s",
 		table1, setClause, strings.Join(fromTables, ", "), allConditions)
+}
+
+// parseJoinBlock walks a "JOIN ... ON ... [JOIN ... ON ...]" block and returns
+// the FROM-list expressions ("table alias" or "(subquery) alias") and the
+// matching ON conditions, in order. Returns nil slices on malformed input.
+func parseJoinBlock(joinBlock string) ([]string, []string) {
+	var fromTables, onConditions []string
+	s := joinBlock
+	for {
+		// Skip leading whitespace.
+		s = strings.TrimLeft(s, " \t\r\n")
+		if s == "" {
+			break
+		}
+		// Optional INNER prefix.
+		if up := strings.ToUpper(s); strings.HasPrefix(up, "INNER ") || strings.HasPrefix(up, "INNER\t") {
+			s = strings.TrimLeft(s[6:], " \t\r\n")
+		}
+		// Required JOIN keyword.
+		if up := strings.ToUpper(s); !strings.HasPrefix(up, "JOIN ") && !strings.HasPrefix(up, "JOIN\t") && !strings.HasPrefix(up, "JOIN(") {
+			return nil, nil
+		}
+		s = strings.TrimLeft(s[4:], " \t\r\n")
+		// Read table expression: either "(subquery)" with balanced parens, or
+		// a bareword \S+.
+		var table string
+		if strings.HasPrefix(s, "(") {
+			depth, end := 0, -1
+			for i, r := range s {
+				switch r {
+				case '(':
+					depth++
+				case ')':
+					depth--
+					if depth == 0 {
+						end = i
+					}
+				}
+				if end >= 0 {
+					break
+				}
+			}
+			if end < 0 {
+				return nil, nil
+			}
+			table = s[:end+1]
+			s = s[end+1:]
+		} else {
+			i := 0
+			for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n' {
+				i++
+			}
+			table = s[:i]
+			s = s[i:]
+		}
+		s = strings.TrimLeft(s, " \t\r\n")
+		// Optional alias (a single word that isn't ON).
+		alias := ""
+		if i := strings.IndexAny(s, " \t\r\n"); i > 0 {
+			cand := s[:i]
+			if !strings.EqualFold(cand, "ON") {
+				alias = cand
+				s = strings.TrimLeft(s[i:], " \t\r\n")
+			}
+		}
+		// Required ON keyword.
+		if up := strings.ToUpper(s); !strings.HasPrefix(up, "ON ") && !strings.HasPrefix(up, "ON\t") {
+			return nil, nil
+		}
+		s = strings.TrimLeft(s[2:], " \t\r\n")
+		// ON condition runs until the next "JOIN" / "INNER JOIN" keyword or end.
+		condEnd := len(s)
+		for i := 0; i < len(s); i++ {
+			rest := strings.ToUpper(s[i:])
+			if strings.HasPrefix(rest, "JOIN ") || strings.HasPrefix(rest, "JOIN\t") || strings.HasPrefix(rest, "INNER JOIN ") || strings.HasPrefix(rest, "INNER\tJOIN") {
+				// Must be at a word boundary (preceded by whitespace).
+				if i == 0 || s[i-1] == ' ' || s[i-1] == '\t' || s[i-1] == '\r' || s[i-1] == '\n' {
+					condEnd = i
+					break
+				}
+			}
+		}
+		cond := strings.TrimSpace(s[:condEnd])
+		s = s[condEnd:]
+
+		expr := table
+		if alias != "" {
+			expr = table + " " + alias
+		}
+		fromTables = append(fromTables, expr)
+		onConditions = append(onConditions, cond)
+	}
+	return fromTables, onConditions
 }

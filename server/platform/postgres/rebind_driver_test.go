@@ -73,3 +73,43 @@ func TestStripNullBytes_ReturnsSameSliceWhenClean(t *testing.T) {
 	out := stripNullBytes(in)
 	require.Equal(t, &in[0], &out[0], "should reuse input slice when no NULs")
 }
+
+func TestRewriteUpdateJoin(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "aliased table-table join with WHERE",
+			in:   "UPDATE host_software hs JOIN software s ON hs.software_id = s.id SET hs.name = s.name WHERE hs.host_id = ?",
+			want: "UPDATE host_software hs SET name = s.name FROM software s WHERE hs.software_id = s.id AND hs.host_id = ?",
+		},
+		{
+			name: "subquery join (regression for prod 'syntax error at or near WHERE')",
+			in:   "UPDATE host_software hs JOIN ( SELECT ? as host_id, ? as software_id, ? as last_opened_at) a ON hs.host_id = a.host_id AND hs.software_id = a.software_id SET hs.last_opened_at = a.last_opened_at",
+			want: "UPDATE host_software hs SET last_opened_at = a.last_opened_at FROM ( SELECT ? as host_id, ? as software_id, ? as last_opened_at) a WHERE hs.host_id = a.host_id AND hs.software_id = a.software_id",
+		},
+		{
+			name: "multi-row UNION ALL subquery",
+			in:   "UPDATE host_software hs JOIN ( SELECT ? as host_id, ? as software_id, ? as last_opened_at UNION ALL  SELECT ? as host_id, ? as software_id, ? as last_opened_at) a ON hs.host_id = a.host_id AND hs.software_id = a.software_id SET hs.last_opened_at = a.last_opened_at",
+			want: "UPDATE host_software hs SET last_opened_at = a.last_opened_at FROM ( SELECT ? as host_id, ? as software_id, ? as last_opened_at UNION ALL  SELECT ? as host_id, ? as software_id, ? as last_opened_at) a WHERE hs.host_id = a.host_id AND hs.software_id = a.software_id",
+		},
+		{
+			name: "INNER JOIN keyword",
+			in:   "UPDATE t1 a INNER JOIN t2 b ON a.id = b.id SET a.x = b.y",
+			want: "UPDATE t1 a SET x = b.y FROM t2 b WHERE a.id = b.id",
+		},
+		{
+			name: "no JOIN — passthrough",
+			in:   "UPDATE foo SET bar = 1 WHERE id = ?",
+			want: "UPDATE foo SET bar = 1 WHERE id = ?",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rewriteUpdateJoin(tc.in)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}

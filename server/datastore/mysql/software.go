@@ -2667,7 +2667,7 @@ func (ds *Datastore) SyncHostsSoftware(ctx context.Context, updatedAt time.Time)
         (software_id, hosts_count, team_id, global_stats, updated_at)
       VALUES
         %s
-      ` + ds.dialect.OnDuplicateKey("host_id,software_id", `
+      ` + ds.dialect.OnDuplicateKey("software_id,team_id,global_stats", `
         hosts_count = VALUES(hosts_count),
         updated_at = VALUES(updated_at)`)
 
