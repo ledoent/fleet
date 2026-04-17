@@ -1411,7 +1411,11 @@ var knownPrimaryKeys = map[string]string{
 	"nano_enrollments":            "id",
 	"nano_cert_auth_associations": "id,sha256",
 	"nano_push_certs":             "topic",
-	"host_certificate_templates":  "host_uuid,certificate_template_id",
+	"host_certificate_templates":           "host_uuid,certificate_template_id",
+	"mdm_windows_enrollments":              "id",
+	"mdm_windows_configuration_profiles":   "profile_uuid",
+	"windows_mdm_command_results":          "id",
+	"host_mdm_actions":                     "host_id",
 }
 
 func rewriteOnDuplicateKey(query string) string {
