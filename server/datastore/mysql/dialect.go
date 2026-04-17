@@ -98,4 +98,13 @@ type DialectHelper interface {
 
 	// IsPostgres returns true if the dialect is PostgreSQL.
 	IsPostgres() bool
+
+	// CreateTableLike returns DDL to create a table with the same structure as another.
+	//   MySQL:      "CREATE TABLE IF NOT EXISTS new LIKE src"
+	//   PostgreSQL: "CREATE TABLE IF NOT EXISTS new (LIKE src INCLUDING ALL)"
+	CreateTableLike(newTable, srcTable string) string
+
+	// AtomicTableSwap renames srcTable → oldName, swapTable → srcTable within a transaction.
+	// Returns the SQL statements to execute (1 for MySQL, 2 for PostgreSQL).
+	AtomicTableSwap(srcTable, swapTable string) []string
 }

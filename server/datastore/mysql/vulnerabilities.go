@@ -588,13 +588,7 @@ const (
 func (ds *Datastore) atomicTableSwapVulnerabilityCounts(ctx context.Context, counts vulnerabilityCounts) error {
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		// Create/recreate the swap table fresh
-		// Cross-dialect: PostgreSQL uses (LIKE ... INCLUDING ALL); MySQL uses LIKE without parentheses.
-		var swapSchema string
-		if ds.dialect.IsPostgres() {
-			swapSchema = "CREATE TABLE IF NOT EXISTS " + vulnerabilityHostCountsSwapTable + " (LIKE vulnerability_host_counts INCLUDING ALL)"
-		} else {
-			swapSchema = "CREATE TABLE IF NOT EXISTS " + vulnerabilityHostCountsSwapTable + " LIKE vulnerability_host_counts"
-		}
+		swapSchema := ds.dialect.CreateTableLike(vulnerabilityHostCountsSwapTable, "vulnerability_host_counts")
 		_, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS "+vulnerabilityHostCountsSwapTable)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "dropping existing swap table")
@@ -635,21 +629,8 @@ func (ds *Datastore) atomicTableSwapVulnerabilityCounts(ctx context.Context, cou
 
 	// Atomic table swap
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		// PostgreSQL does not support multi-table RENAME TABLE; use two ALTER TABLE RENAME TO instead.
-		if ds.dialect.IsPostgres() {
-			if _, err := tx.ExecContext(ctx, "ALTER TABLE vulnerability_host_counts RENAME TO vulnerability_host_counts_old"); err != nil {
-				return ctxerr.Wrap(ctx, err, "atomic table swap (rename old)")
-			}
-			if _, err := tx.ExecContext(ctx, "ALTER TABLE "+vulnerabilityHostCountsSwapTable+" RENAME TO vulnerability_host_counts"); err != nil {
-				return ctxerr.Wrap(ctx, err, "atomic table swap (rename new)")
-			}
-		} else {
-			_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-				RENAME TABLE
-					vulnerability_host_counts TO vulnerability_host_counts_old,
-					%s TO vulnerability_host_counts
-			`, vulnerabilityHostCountsSwapTable))
-			if err != nil {
+		for _, stmt := range ds.dialect.AtomicTableSwap("vulnerability_host_counts", vulnerabilityHostCountsSwapTable) {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
 				return ctxerr.Wrap(ctx, err, "atomic table swap")
 			}
 		}

@@ -520,13 +520,7 @@ func (ds *Datastore) InsertKernelSoftwareMapping(ctx context.Context) error {
 	)
 
 	// Create a fresh swap table. Drop any leftover from a previous failed run.
-	// Cross-dialect: PostgreSQL uses (LIKE ... INCLUDING ALL); MySQL uses LIKE without parentheses.
-	var swapTableCreate string
-	if ds.dialect.IsPostgres() {
-		swapTableCreate = "CREATE TABLE IF NOT EXISTS " + swapTable + " (LIKE kernel_host_counts INCLUDING ALL)"
-	} else {
-		swapTableCreate = "CREATE TABLE IF NOT EXISTS " + swapTable + " LIKE kernel_host_counts"
-	}
+	swapTableCreate := ds.dialect.CreateTableLike(swapTable, "kernel_host_counts")
 	if _, err := ds.writer(ctx).ExecContext(ctx, "DROP TABLE IF EXISTS "+swapTable); err != nil {
 		return ctxerr.Wrap(ctx, err, "drop existing kernel swap table")
 	}
@@ -583,19 +577,10 @@ func (ds *Datastore) InsertKernelSoftwareMapping(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS kernel_host_counts_old"); err != nil {
 			return ctxerr.Wrap(ctx, err, "drop leftover old kernel table")
 		}
-		// PostgreSQL does not support multi-table RENAME TABLE; use two ALTER TABLE RENAME TO instead.
-		if ds.dialect.IsPostgres() {
-			if _, err := tx.ExecContext(ctx, "ALTER TABLE kernel_host_counts RENAME TO kernel_host_counts_old"); err != nil {
-				return ctxerr.Wrap(ctx, err, "atomic kernel table swap (rename old)")
+		for _, stmt := range ds.dialect.AtomicTableSwap("kernel_host_counts", swapTable) {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return ctxerr.Wrap(ctx, err, "atomic table swap")
 			}
-			if _, err := tx.ExecContext(ctx, "ALTER TABLE "+swapTable+" RENAME TO kernel_host_counts"); err != nil {
-				return ctxerr.Wrap(ctx, err, "atomic kernel table swap (rename new)")
-			}
-		} else if _, err := tx.ExecContext(ctx, `
-			RENAME TABLE
-				kernel_host_counts TO kernel_host_counts_old,
-				`+swapTable+` TO kernel_host_counts`); err != nil {
-			return ctxerr.Wrap(ctx, err, "atomic kernel table swap")
 		}
 		if _, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS kernel_host_counts_old"); err != nil {
 			return ctxerr.Wrap(ctx, err, "drop old kernel table after swap")

@@ -3,9 +3,6 @@
 -- To regenerate: kubectl exec -n fleet fleet-db-1 -- pg_dump -U postgres -d fleet --schema-only
 -- Then run generate_pg_schema.py or use this dump directly.
 
-Defaulted container "postgres" out of: postgres, bootstrap-controller (init)
---
---
 
 
 

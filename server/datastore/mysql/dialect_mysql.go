@@ -100,3 +100,13 @@ func (mysqlDialect) IsBadConnection(err error) bool {
 func (mysqlDialect) ReturningID() string { return "" }
 
 func (mysqlDialect) IsPostgres() bool { return false }
+
+func (mysqlDialect) CreateTableLike(newTable, srcTable string) string {
+	return "CREATE TABLE IF NOT EXISTS " + newTable + " LIKE " + srcTable
+}
+
+func (mysqlDialect) AtomicTableSwap(srcTable, swapTable string) []string {
+	return []string{
+		"RENAME TABLE " + srcTable + " TO " + srcTable + "_old, " + swapTable + " TO " + srcTable,
+	}
+}

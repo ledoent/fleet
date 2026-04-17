@@ -408,12 +408,10 @@ func rebindQuery(query string) string {
 	for _, r := range query {
 		if r == '?' {
 			b.WriteByte('$')
-			b.WriteString(strings.Repeat("", 0)) // force allocation
-			// Write the number
 			if n < 10 {
 				b.WriteByte(byte('0' + n))
 			} else {
-				b.WriteString(fmt.Sprintf("%d", n))
+				fmt.Fprintf(&b, "%d", n)
 			}
 			n++
 		} else {
@@ -546,8 +544,6 @@ func coerceBoolArgsForTextCast(query string, args []driver.NamedValue) []driver.
 	return out
 }
 
-// coerceBinaryArgs converts string args that contain non-UTF-8 byte sequences
-// to []byte so that pgx sends them as bytea instead of text. MySQL's binary(N)
 // coerceTimeArgsToUTC converts time.Time parameters to UTC before sending to PG.
 // PG "timestamp without time zone" stores wall-clock values without timezone.
 // Go local time (e.g., 10:00 PDT) gets stored as "10:00" and read back as 10:00 UTC.

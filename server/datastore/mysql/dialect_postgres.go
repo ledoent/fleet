@@ -173,3 +173,14 @@ func (postgresDialect) IsBadConnection(err error) bool { return pg.IsBadConnecti
 func (postgresDialect) ReturningID() string { return " RETURNING id" }
 
 func (postgresDialect) IsPostgres() bool { return true }
+
+func (postgresDialect) CreateTableLike(newTable, srcTable string) string {
+	return "CREATE TABLE IF NOT EXISTS " + newTable + " (LIKE " + srcTable + " INCLUDING ALL)"
+}
+
+func (postgresDialect) AtomicTableSwap(srcTable, swapTable string) []string {
+	return []string{
+		"ALTER TABLE " + srcTable + " RENAME TO " + srcTable + "_old",
+		"ALTER TABLE " + swapTable + " RENAME TO " + srcTable,
+	}
+}

@@ -2672,13 +2672,7 @@ func (ds *Datastore) SyncHostsSoftware(ctx context.Context, updatedAt time.Time)
         updated_at = VALUES(updated_at)`)
 
 	// Create a fresh swap table to populate with new counts. If a previous run left a partial swap table, drop it first.
-	// Cross-dialect: PostgreSQL uses (LIKE ... INCLUDING ALL) with parentheses; MySQL uses LIKE without.
-	var swapTableCreate string
-	if ds.dialect.IsPostgres() {
-		swapTableCreate = "CREATE TABLE IF NOT EXISTS " + swapTable + " (LIKE software_host_counts INCLUDING ALL)"
-	} else {
-		swapTableCreate = "CREATE TABLE IF NOT EXISTS " + swapTable + " LIKE software_host_counts"
-	}
+	swapTableCreate := ds.dialect.CreateTableLike(swapTable, "software_host_counts")
 	w := ds.writer(ctx)
 	if _, err := w.ExecContext(ctx, "DROP TABLE IF EXISTS "+swapTable); err != nil {
 		return ctxerr.Wrap(ctx, err, "drop existing swap table")
@@ -2769,20 +2763,8 @@ func (ds *Datastore) SyncHostsSoftware(ctx context.Context, updatedAt time.Time)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "drop leftover old table")
 		}
-		// PostgreSQL does not support multi-table RENAME TABLE; use two ALTER TABLE RENAME TO instead.
-		if ds.dialect.IsPostgres() {
-			if _, err = tx.ExecContext(ctx, "ALTER TABLE software_host_counts RENAME TO software_host_counts_old"); err != nil {
-				return ctxerr.Wrap(ctx, err, "atomic table swap (rename old)")
-			}
-			if _, err = tx.ExecContext(ctx, "ALTER TABLE "+swapTable+" RENAME TO software_host_counts"); err != nil {
-				return ctxerr.Wrap(ctx, err, "atomic table swap (rename new)")
-			}
-		} else {
-			_, err = tx.ExecContext(ctx, `
-				RENAME TABLE
-					software_host_counts TO software_host_counts_old,
-					`+swapTable+` TO software_host_counts`)
-			if err != nil {
+		for _, stmt := range ds.dialect.AtomicTableSwap("software_host_counts", swapTable) {
+			if _, err = tx.ExecContext(ctx, stmt); err != nil {
 				return ctxerr.Wrap(ctx, err, "atomic table swap")
 			}
 		}
