@@ -431,7 +431,7 @@ func rebindQuery(query string) string {
 func (c *rebindConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	if ec, ok := c.Conn.(driver.ExecerContext); ok {
 		rebound := rebindQuery(query)
-		coerced := coerceTimeArgsToUTC(coerceBinaryArgs(coerceBoolArgsForTextCast(rebound, args)))
+		coerced := coerceTimeArgsToUTC(coerceBinaryArgs(stripNullBytes(coerceBoolArgsForTextCast(rebound, args))))
 		return ec.ExecContext(ctx, rebound, coerced)
 	}
 	return nil, driver.ErrSkip
@@ -440,7 +440,7 @@ func (c *rebindConn) ExecContext(ctx context.Context, query string, args []drive
 func (c *rebindConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	if qc, ok := c.Conn.(driver.QueryerContext); ok {
 		rebound := rebindQuery(query)
-		coerced := coerceTimeArgsToUTC(coerceBinaryArgs(coerceBoolArgsForTextCast(rebound, args)))
+		coerced := coerceTimeArgsToUTC(coerceBinaryArgs(stripNullBytes(coerceBoolArgsForTextCast(rebound, args))))
 		rows, err := qc.QueryContext(ctx, rebound, coerced)
 		if err != nil {
 			return nil, err
@@ -557,6 +557,29 @@ func coerceTimeArgsToUTC(args []driver.NamedValue) []driver.NamedValue {
 			}
 			out[i].Value = t.UTC()
 		}
+	}
+	if out == nil {
+		return args
+	}
+	return out
+}
+
+// stripNullBytes removes 0x00 bytes from string args. MySQL TEXT allows NUL
+// bytes; PG TEXT rejects them with "invalid byte sequence for encoding UTF8".
+// osquery has been observed to include NULs in hostname/uuid fields from some
+// devices, which makes enroll fail in a loop until the agent is re-enrolled.
+func stripNullBytes(args []driver.NamedValue) []driver.NamedValue {
+	var out []driver.NamedValue
+	for i, a := range args {
+		s, ok := a.Value.(string)
+		if !ok || !strings.ContainsRune(s, 0) {
+			continue
+		}
+		if out == nil {
+			out = make([]driver.NamedValue, len(args))
+			copy(out, args)
+		}
+		out[i].Value = strings.ReplaceAll(s, "\x00", "")
 	}
 	if out == nil {
 		return args
