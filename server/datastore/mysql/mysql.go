@@ -615,8 +615,11 @@ func (ds *Datastore) MigrateData(ctx context.Context) error {
 //go:embed pg_baseline_schema.sql
 var pgBaselineSchemaSQL string
 
-// migratePGBaseline applies the PG baseline schema for fresh PostgreSQL databases.
-// It checks if tables already exist and skips if so.
+//go:embed pg_baseline_post.sql
+var pgBaselinePostSQL string
+
+// migratePGBaseline applies the PG baseline schema for fresh PostgreSQL databases
+// and always runs idempotent post-baseline fixups (e.g., asserting object ownership).
 func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
 	var exists bool
 	err := ds.writer(ctx).GetContext(ctx, &exists,
@@ -626,14 +629,16 @@ func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
 	}
 	if exists {
 		ds.logger.InfoContext(ctx, "PostgreSQL schema already exists, skipping baseline")
-		return nil
+	} else {
+		ds.logger.InfoContext(ctx, "Applying PostgreSQL baseline schema")
+		if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselineSchemaSQL); err != nil {
+			return fmt.Errorf("applying PG baseline schema: %w", err)
+		}
+		ds.logger.InfoContext(ctx, "PostgreSQL baseline schema applied successfully")
 	}
-	ds.logger.InfoContext(ctx, "Applying PostgreSQL baseline schema")
-	_, err = ds.writer(ctx).ExecContext(ctx, pgBaselineSchemaSQL)
-	if err != nil {
-		return fmt.Errorf("applying PG baseline schema: %w", err)
+	if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselinePostSQL); err != nil {
+		return fmt.Errorf("applying PG post-baseline fixups: %w", err)
 	}
-	ds.logger.InfoContext(ctx, "PostgreSQL baseline schema applied successfully")
 	return nil
 }
 
