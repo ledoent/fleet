@@ -352,24 +352,11 @@ func rebindQuery(query string) string {
 		query = strings.ReplaceAll(query, "COALESCE("+boolCol+", 1)", "COALESCE("+boolCol+", true)")
 	}
 
-	// Smallint columns that the Go layer passes as bool: rewrite
-	// `<col> = ?` to `<col> = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)`.
-	// The ?::text cast triggers coerceBoolArgsForTextCast, which converts the
-	// bool driver.Value to "true"/"false" string. PG then evaluates the CASE
-	// to 1 or 0, matching the smallint column type.
-	//
-	// MySQL uses TINYINT(1) for these columns and pgx/MySQL drivers happily
-	// encode bool→tinyint, so MySQL doesn't need the rewrite. PG's int2
-	// encoder rejects bool with "unable to encode false into binary format
-	// for int2" — this rewrite fixes that without changing the calling code.
-	//
-	// Add columns here as new ones are surfaced by PG-converted tests.
-	for _, col := range []string{
-		"expired", // carve_metadata.expired (smallint in PG, bool in fleet.CarveMetadata)
-	} {
-		query = strings.ReplaceAll(query, col+" = ?", col+" = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)")
-		query = strings.ReplaceAll(query, col+"=?", col+" = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)")
-	}
+	// Smallint columns that the Go layer passes as bool: see
+	// rewriteSmallintBoolColumns. MySQL drivers happily encode bool→tinyint
+	// so MySQL doesn't need the rewrite; PG's int2 encoder rejects bool with
+	// "unable to encode false into binary format for int2".
+	query = rewriteSmallintBoolColumns(query)
 
 	query = strings.ReplaceAll(query, "pm.passes = 1", "(pm.passes IS TRUE)::int")
 	query = strings.ReplaceAll(query, "pm.passes = 0", "(pm.passes = false)::int")
@@ -1561,6 +1548,35 @@ func rewriteGroupConcat(query string) string {
 var reSoftwareUpdateProjection = regexp.MustCompile(
 	`(?i)SELECT\s+\?\s+as\s+host_id\s*,\s*\?\s+as\s+software_id\s*,\s*\?\s+as\s+last_opened_at`,
 )
+
+// smallintBoolColumnPattern matches `<col>[whitespace]=[whitespace]?` where
+// `<col>` is a known smallint column the Go layer passes as bool. The `\b`
+// anchor ensures we don't substring-match inside a longer identifier
+// (e.g. `terms_expired = ?` must NOT be rewritten — it's a real boolean
+// already handled by the knownBooleanColumns loop). Add new entries by
+// appending to smallintBoolColumns and re-running tests.
+var smallintBoolColumns = []string{
+	"expired", // carve_metadata.expired (smallint in PG, bool in fleet.CarveMetadata)
+}
+
+var smallintBoolPatterns = func() map[string]*regexp.Regexp {
+	out := make(map[string]*regexp.Regexp, len(smallintBoolColumns))
+	for _, col := range smallintBoolColumns {
+		out[col] = regexp.MustCompile(`\b` + regexp.QuoteMeta(col) + `\s*=\s*\?`)
+	}
+	return out
+}()
+
+// rewriteSmallintBoolColumns wraps the placeholder for known smallint-bool
+// columns in a CASE expression, so pgx encodes the Go bool as text and PG
+// converts to smallint via the CASE. See smallintBoolColumns above.
+func rewriteSmallintBoolColumns(query string) string {
+	for _, col := range smallintBoolColumns {
+		query = smallintBoolPatterns[col].ReplaceAllString(query,
+			col+" = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)")
+	}
+	return query
+}
 
 // castSoftwareUpdateProjections injects PG type casts on every SELECT in the
 // UNION ALL chain emitted by updateModifiedHostSoftwareDB. Without these casts

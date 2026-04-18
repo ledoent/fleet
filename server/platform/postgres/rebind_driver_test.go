@@ -157,3 +157,52 @@ func TestCastSoftwareUpdateProjections(t *testing.T) {
 		})
 	}
 }
+
+func TestRewriteSmallintBoolColumns(t *testing.T) {
+	// Both compact and spaced forms must rewrite, both must inject the CASE.
+	// Critical: `terms_expired = ?` MUST NOT be rewritten — it shares the
+	// suffix `expired = ?` but is a real boolean column already handled by
+	// the knownBooleanColumns loop. A naive strings.ReplaceAll would corrupt
+	// the abm_tokens UPDATE in apple_mdm.go and produce a runtime type error.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "expired with spaces — rewritten",
+			in:   "UPDATE carve_metadata SET expired = ? WHERE id = ?",
+			want: "UPDATE carve_metadata SET expired = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END) WHERE id = ?",
+		},
+		{
+			name: "expired without spaces — rewritten",
+			in:   "UPDATE carve_metadata SET expired=? WHERE id = ?",
+			want: "UPDATE carve_metadata SET expired = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END) WHERE id = ?",
+		},
+		{
+			name: "terms_expired — MUST NOT match (regression guard)",
+			in:   "UPDATE abm_tokens SET terms_expired = ? WHERE organization_name = ? AND terms_expired != ?",
+			want: "UPDATE abm_tokens SET terms_expired = ? WHERE organization_name = ? AND terms_expired != ?",
+		},
+		{
+			name: "expired alongside terms_expired in same query — only the standalone one is rewritten",
+			in:   "UPDATE t SET expired = ?, terms_expired = ? WHERE id = ?",
+			want: "UPDATE t SET expired = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END), terms_expired = ? WHERE id = ?",
+		},
+		{
+			name: "no match — passthrough",
+			in:   "SELECT * FROM hosts WHERE id = ?",
+			want: "SELECT * FROM hosts WHERE id = ?",
+		},
+		{
+			name: "expired in WHERE clause is also rewritten (covers SELECT/DELETE WHERE expired = ? paths)",
+			in:   "DELETE FROM carve_metadata WHERE expired = ?",
+			want: "DELETE FROM carve_metadata WHERE expired = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, rewriteSmallintBoolColumns(tc.in))
+		})
+	}
+}
