@@ -25,4 +25,11 @@ BEGIN
     LOOP
         EXECUTE format('ALTER SEQUENCE public.%I OWNER TO %I', obj.sequencename, app_role);
     END LOOP;
+
+    FOR obj IN
+        SELECT viewname FROM pg_views
+        WHERE schemaname = 'public' AND viewowner != app_role
+    LOOP
+        EXECUTE format('ALTER VIEW public.%I OWNER TO %I', obj.viewname, app_role);
+    END LOOP;
 END $$;
