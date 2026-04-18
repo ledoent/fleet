@@ -1,12 +1,13 @@
 -- Fleet PostgreSQL Baseline Schema
 -- Generated from production database via pg_dump
 -- To regenerate: kubectl exec -n fleet fleet-db-1 -- pg_dump -U postgres -d fleet --schema-only
+-- Strip the leading `\restrict <token>` and trailing `\unrestrict <token>` lines:
+-- pg_dump 17+ emits psql meta-commands that fail when this file is loaded
+-- via raw `db.Exec` (as the embedded baseline loader does).
 
 --
 -- PostgreSQL database dump
 --
-
-\restrict X0Frdu5qRq3eL4XK06K7ntTaAAS8Fs0jYeetatALw3mKJOUvtF3rbuYVXKVWI7e
 
 -- Dumped from database version 16.13 (Debian 16.13-1.pgdg11+1)
 -- Dumped by pg_dump version 16.13 (Debian 16.13-1.pgdg11+1)
@@ -7940,6 +7941,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES 
 --
 -- PostgreSQL database dump complete
 --
-
-\unrestrict X0Frdu5qRq3eL4XK06K7ntTaAAS8Fs0jYeetatALw3mKJOUvtF3rbuYVXKVWI7e
 

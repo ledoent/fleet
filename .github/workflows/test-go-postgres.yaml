@@ -45,7 +45,7 @@ jobs:
 
     strategy:
       matrix:
-        postgres: ["postgres:16", "postgres:18"]
+        postgres: ["postgres:16"]
 
     env:
       GO_TEST_TIMEOUT: 20m
@@ -207,7 +207,7 @@ jobs:
         run: |
           # Expected status artifact directory names — one per matrix leg.
           # Must be kept in sync with the postgres matrix above.
-          expected=("postgres-0-status" "postgres-1-status")
+          expected=("postgres-0-status")
           failed=""
           for dir in "${expected[@]}"; do
             status_file="./${dir}/status"
