@@ -3036,7 +3036,7 @@ func (ds *Datastore) InsertSoftwareVulnerability(
 	stmt := `
 		INSERT INTO software_cve (cve, source, software_id, resolved_in_version)
 		VALUES (?,?,?,?)
-		` + ds.dialect.OnDuplicateKey("id", `
+		` + ds.dialect.OnDuplicateKey("software_id,cve", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			updated_at=?
@@ -3113,7 +3113,7 @@ func (ds *Datastore) InsertSoftwareVulnerabilities(
 		stmt := fmt.Sprintf(`
 			INSERT INTO software_cve (cve, source, software_id, resolved_in_version)
 			VALUES %s
-			`+ds.dialect.OnDuplicateKey("id", `
+			`+ds.dialect.OnDuplicateKey("software_id,cve", `
 				source = VALUES(source),
 				resolved_in_version = VALUES(resolved_in_version),
 				updated_at = ?
