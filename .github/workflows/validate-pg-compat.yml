@@ -65,3 +65,6 @@ jobs:
 
       - name: MySQL ↔ PG schema drift
         run: go run ./tools/pgcompat/check_schema_drift
+
+      - name: Validator regression test (gate-of-the-gate)
+        run: go test -count=1 -timeout 120s ./tools/pgcompat/
