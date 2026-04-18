@@ -6,30 +6,22 @@
 #
 # Blank lines and lines starting with # are ignored. Entries in this file are
 # intentional drift — e.g., PG-specific infrastructure tables that have no
-# MySQL counterpart, or MySQL tables that are renamed in the PG schema.
+# MySQL counterpart, or MySQL tables that are added upstream after the last
+# PG baseline regeneration.
 #
 # If a table appears in the drift diff that is NOT listed here, CI fails and
 # the pg_baseline_schema.sql must be regenerated (see its file header for the
 # canonical pg_dump command) or the entry must be added here with explanation.
 
-# MySQL-only tables renamed in PG:
-#   scep_certificates  → identity_certificates  (renamed for NanoMDM/identity refactor)
-#   scep_serials       → identity_serials       (same refactor)
-mysql-only: scep_certificates
-mysql-only: scep_serials
+# Tables added to upstream MySQL after the last PG baseline regeneration.
+# TODO: regenerate pg_baseline_schema.sql to include these and remove from
+# this allowlist.
+mysql-only: acme_accounts
+mysql-only: acme_authorizations
+mysql-only: acme_challenges
+mysql-only: acme_orders
 
-# PG-only tables:
-#   identity_certificates, identity_serials — see rename above.
-#   activities, host_activities — PG-native activity log tables (MySQL uses a different shape).
-#   acme_enrollments — ACME protocol PG-specific storage.
-#   host_managed_local_account_passwords — PG-specific (TODO verify if MySQL equivalent exists under different name).
-#   migration_status_data — PG migration tracking (MySQL uses migration_status_tables).
-#   user_api_endpoints — PG-specific API endpoint audit.
-pg-only: identity_certificates
-pg-only: identity_serials
+# PG-only tables — no MySQL equivalent.
 pg-only: activities
 pg-only: host_activities
-pg-only: acme_enrollments
-pg-only: host_managed_local_account_passwords
 pg-only: migration_status_data
-pg-only: user_api_endpoints
