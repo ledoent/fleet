@@ -151,6 +151,10 @@ mostly mechanical: swap the constructor, then triage failures.
    docker compose up -d postgres_test
    POSTGRES_TEST=1 FLEET_POSTGRES_TEST_PORT=5434 go test -count=1 -race -v -run TestX ./server/datastore/mysql/
    ```
+   `CreatePostgresDS` sets the test DB to `timezone=UTC`. If you bypass it
+   for a custom test helper, replicate that — PG `timestamp without time
+   zone` round-trips through session timezone and a non-UTC local cluster
+   will produce timestamp-comparison failures that look like driver bugs.
 3. **For each PG-failing subtest, prefer fixing the underlying gap** in
    `server/platform/postgres/rebind_driver.go`. Add a unit test in
    `server/platform/postgres/rebind_driver_test.go` covering the rewrite.

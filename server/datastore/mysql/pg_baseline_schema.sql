@@ -19,6 +19,12 @@
 --   kubectl exec -n fleet fleet-db-1 -- psql -U postgres -d fleet -tAc \
 --     "SELECT MAX(version_id) FROM migration_status_tables WHERE is_applied"
 --
+-- After bumping, verify locally before pushing:
+--   go test -count=1 -run TestVersionsAbove_EmbeddedBaselineCoversAllCode \
+--     ./server/datastore/mysql/
+-- Then run the schema-drift validator:
+--   make check-pg-compat
+--
 -- pg-baseline-up-to-migration: 20260410173222
 
 --

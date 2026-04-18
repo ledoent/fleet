@@ -656,7 +656,7 @@ func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
 	err := ds.writer(ctx).GetContext(ctx, &exists,
 		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hosts')`)
 	if err != nil {
-		return fmt.Errorf("checking PG schema: %w", err)
+		return ctxerr.Wrap(ctx, err, "checking PG schema")
 	}
 	freshApply := false
 	if exists {
@@ -664,17 +664,17 @@ func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
 	} else {
 		ds.logger.InfoContext(ctx, "Applying PostgreSQL baseline schema", "marker_version", marker)
 		if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselineSchemaSQL); err != nil {
-			return fmt.Errorf("applying PG baseline schema: %w", err)
+			return ctxerr.Wrap(ctx, err, "applying PG baseline schema")
 		}
 		ds.logger.InfoContext(ctx, "PostgreSQL baseline schema applied successfully")
 		freshApply = true
 	}
 	if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselinePostSQL); err != nil {
-		return fmt.Errorf("applying PG post-baseline fixups: %w", err)
+		return ctxerr.Wrap(ctx, err, "applying PG post-baseline fixups")
 	}
 	if freshApply {
 		if err := ds.seedPGMigrationHistory(ctx, marker); err != nil {
-			return fmt.Errorf("seeding PG migration history: %w", err)
+			return ctxerr.Wrap(ctx, err, "seeding PG migration history")
 		}
 	}
 	ds.warnPGMigrationDrift(ctx, marker)
@@ -693,7 +693,12 @@ func (ds *Datastore) seedPGMigrationHistory(ctx context.Context, marker int64) e
 	var existing int
 	if err := ds.writer(ctx).GetContext(ctx, &existing,
 		`SELECT COUNT(*) FROM migration_status_tables WHERE is_applied`); err != nil {
-		return fmt.Errorf("counting existing migration history: %w", err)
+		// Note: a partially-applied baseline can leave migration_status_tables
+		// missing while `hosts` is also missing — caller sees this as an error
+		// here rather than the more obvious "schema apply failed". Diagnose by
+		// running the embedded baseline against an empty PG and checking which
+		// statement errors first.
+		return ctxerr.Wrap(ctx, err, "counting existing PG migration history")
 	}
 	if existing > 0 {
 		return nil
@@ -716,7 +721,7 @@ func (ds *Datastore) seedPGMigrationHistory(ctx context.Context, marker int64) e
 		args = append(args, v)
 	}
 	if _, err := ds.writer(ctx).ExecContext(ctx, b.String(), args...); err != nil {
-		return fmt.Errorf("seeding migration_status_tables: %w", err)
+		return ctxerr.Wrap(ctx, err, "seeding migration_status_tables")
 	}
 	ds.logger.InfoContext(ctx, "Seeded PG migration history", "rows", len(versions), "marker_version", marker)
 	return nil
@@ -748,28 +753,36 @@ func (ds *Datastore) warnPGMigrationDrift(ctx context.Context, marker int64) {
 	)
 }
 
-// versionsAtOrBelow returns migration versions <= marker, sorted ascending.
-func versionsAtOrBelow(ms goose.Migrations, marker int64) []int64 {
-	out := make([]int64, 0, len(ms))
+// partitionMigrationVersions splits the migration list at marker (inclusive
+// of atOrBelow). Both returned slices are sorted ascending. One pass over the
+// input, one sort of each side — used together in migratePGBaseline so the
+// shared structure is intentional.
+func partitionMigrationVersions(ms goose.Migrations, marker int64) (atOrBelow, above []int64) {
+	atOrBelow = make([]int64, 0, len(ms))
+	above = make([]int64, 0)
 	for _, m := range ms {
 		if m.Version <= marker {
-			out = append(out, m.Version)
+			atOrBelow = append(atOrBelow, m.Version)
+		} else {
+			above = append(above, m.Version)
 		}
 	}
-	slices.Sort(out)
-	return out
+	slices.Sort(atOrBelow)
+	slices.Sort(above)
+	return atOrBelow, above
 }
 
-// versionsAbove returns migration versions > marker, sorted ascending.
+// versionsAtOrBelow / versionsAbove are thin wrappers around
+// partitionMigrationVersions kept for readability at call sites — each caller
+// only needs one half of the partition. The unit tests cover both halves.
+func versionsAtOrBelow(ms goose.Migrations, marker int64) []int64 {
+	atOrBelow, _ := partitionMigrationVersions(ms, marker)
+	return atOrBelow
+}
+
 func versionsAbove(ms goose.Migrations, marker int64) []int64 {
-	out := make([]int64, 0)
-	for _, m := range ms {
-		if m.Version > marker {
-			out = append(out, m.Version)
-		}
-	}
-	slices.Sort(out)
-	return out
+	_, above := partitionMigrationVersions(ms, marker)
+	return above
 }
 
 // loadMigrations manually loads the applied migrations in ascending

@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -130,9 +129,12 @@ func TestVersionsAbove_EmbeddedBaselineCoversAllCode(t *testing.T) {
 }
 
 // freshPGDatastore opens a brand-new PG database (named after the test) with
-// only the migration_status_tables created — no other Fleet schema. Tests
-// can then call ds.migratePGBaseline themselves, instead of going through
-// CreatePostgresDS which preloads the baseline a different way.
+// no Fleet schema applied — the caller is expected to invoke ds.migratePGBaseline
+// themselves. CreatePostgresDS preloads the baseline a different way (split-stmt
+// loop in testing_utils.go), which is exactly what these tests need to bypass.
+//
+// The DB is created with timezone=UTC, matching CreatePostgresDS, so that any
+// future timestamp-touching assertion round-trips deterministically.
 func freshPGDatastore(t *testing.T) *Datastore {
 	t.Helper()
 	if _, ok := os.LookupEnv("POSTGRES_TEST"); !ok {
@@ -142,15 +144,16 @@ func freshPGDatastore(t *testing.T) *Datastore {
 	if port == "" {
 		port = "5434"
 	}
-	dbName := strings.ToLower(strings.Map(func(r rune) rune {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' {
+	dbName := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
 			return r
-		}
-		if r >= 'A' && r <= 'Z' {
+		case r >= 'A' && r <= 'Z':
 			return r + ('a' - 'A')
+		default:
+			return '_'
 		}
-		return '_'
-	}, t.Name()))
+	}, t.Name())
 	if len(dbName) > 63 {
 		dbName = dbName[:63]
 	}
@@ -160,6 +163,10 @@ func freshPGDatastore(t *testing.T) *Datastore {
 	t.Cleanup(func() { _ = adminDB.Close() })
 	_, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName)
 	_, err = adminDB.Exec("CREATE DATABASE " + dbName)
+	require.NoError(t, err)
+	// Match CreatePostgresDS so timestamp columns round-trip deterministically
+	// in any future assertions (PG `timestamp without time zone` uses session tz).
+	_, err = adminDB.Exec("ALTER DATABASE " + dbName + " SET timezone TO 'UTC'")
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName) })
 
@@ -183,7 +190,7 @@ func freshPGDatastore(t *testing.T) *Datastore {
 // MigrationStatus reports the right state immediately after init.
 func TestMigratePGBaseline_FreshApplySeedsHistory(t *testing.T) {
 	ds := freshPGDatastore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	require.NoError(t, ds.migratePGBaseline(ctx))
 
 	marker := parsePGBaselineMarker(pgBaselineSchemaSQL)
@@ -208,7 +215,7 @@ func TestMigratePGBaseline_FreshApplySeedsHistory(t *testing.T) {
 // short-circuits because migration_status_tables already has rows.
 func TestMigratePGBaseline_ReapplyDoesNotDoubleSeed(t *testing.T) {
 	ds := freshPGDatastore(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	require.NoError(t, ds.migratePGBaseline(ctx))
 
 	var firstCount int
@@ -232,7 +239,7 @@ func TestMigratePGBaseline_DriftWarning_NoDrift(t *testing.T) {
 	ds := &Datastore{logger: logger}
 	marker := parsePGBaselineMarker(pgBaselineSchemaSQL)
 	require.NotZero(t, marker)
-	ds.warnPGMigrationDrift(context.Background(), marker)
+	ds.warnPGMigrationDrift(t.Context(), marker)
 
 	assert.NotContains(t, buf.String(), "PostgreSQL baseline is stale",
 		"no drift warning expected when marker covers all code migrations")
@@ -251,7 +258,7 @@ func TestMigratePGBaseline_DriftWarning_WithSyntheticGap(t *testing.T) {
 
 	// Pretend the baseline only covers up to version 1 — every real
 	// migration is "pending."
-	ds.warnPGMigrationDrift(context.Background(), 1)
+	ds.warnPGMigrationDrift(t.Context(), 1)
 	out := buf.String()
 	assert.Contains(t, out, "PostgreSQL baseline is stale")
 	assert.Contains(t, out, "pending_count=")
@@ -266,6 +273,6 @@ func TestMigratePGBaseline_DriftWarning_NoMarker(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	ds := &Datastore{logger: logger}
 
-	ds.warnPGMigrationDrift(context.Background(), 0)
+	ds.warnPGMigrationDrift(t.Context(), 0)
 	assert.Contains(t, buf.String(), "PostgreSQL baseline has no pg-baseline-up-to-migration marker")
 }
