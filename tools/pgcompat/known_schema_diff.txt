@@ -14,8 +14,8 @@
 # canonical pg_dump command) or the entry must be added here with explanation.
 
 # Tables added to upstream MySQL after the last PG baseline regeneration.
-# TODO: regenerate pg_baseline_schema.sql to include these and remove from
-# this allowlist.
+# Production PG does not yet have the corresponding migrations applied, so
+# these are not in the baseline dump. Remove once migrations land in prod.
 mysql-only: acme_accounts
 mysql-only: acme_authorizations
 mysql-only: acme_challenges
