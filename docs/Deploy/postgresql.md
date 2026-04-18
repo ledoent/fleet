@@ -50,10 +50,43 @@ When upstream Fleet adds new migrations, regenerate the baseline:
 1. Spin up an empty MySQL with the upstream schema applied (`make db-reset && make migrate`).
 2. Apply all migrations on a clean PG via the dialect adapter, OR translate the
    resulting MySQL `schema.sql` by hand.
-3. `pg_dump --schema-only -U <superuser> -d fleet` and replace
-   `server/datastore/mysql/pg_baseline_schema.sql`.
-4. Verify with `make check-pg-compat` (runs the validators in `tools/pgcompat/`).
-5. The `pg_baseline_post.sql` ownership block is a separate file — do not delete it.
+3. `pg_dump --schema-only --no-owner --no-privileges -U <superuser> -d fleet` and
+   replace `server/datastore/mysql/pg_baseline_schema.sql`.
+4. **Bump the marker line** at the top of that file:
+
+   ```
+   -- pg-baseline-up-to-migration: <max_version_id>
+   ```
+
+   Get the value from the source DB:
+
+   ```
+   psql -tAc "SELECT MAX(version_id) FROM migration_status_tables WHERE is_applied"
+   ```
+
+   The marker tells Fleet's baseline loader (a) which migration versions to seed
+   into `migration_status_tables` on a fresh apply and (b) when the running code
+   has migrations newer than the embedded baseline. Forgetting to bump it leaves
+   the new baseline silently behind code; a unit test
+   (`TestVersionsAbove_EmbeddedBaselineCoversAllCode`) will fail in CI to catch
+   this.
+5. Verify with `make check-pg-compat` (runs the validators in `tools/pgcompat/`).
+6. The `pg_baseline_post.sql` ownership block is a separate file — do not delete it.
+
+### Detecting baseline drift at runtime
+
+Every Fleet boot logs a warning if the embedded baseline is behind the
+migrations registered in code:
+
+```
+PostgreSQL baseline is stale: code has migrations not present in the embedded baseline
+  baseline_version=20260410173222 pending_count=4 oldest_pending=20260411090000 ...
+  remediation=regenerate pg_baseline_schema.sql ...
+```
+
+The drift is also enforced at build time by the unit test referenced above —
+images will not pass CI if the baseline is stale relative to the code on the
+same branch.
 
 ## Object ownership
 
@@ -79,6 +112,9 @@ needed if you cannot restart Fleet.
 - **Migrations DDL gaps.** The `prepare-db` init container's MySQL DDL is not
   fully PG-compatible. When upstream adds migrations, regenerate the baseline
   per the procedure above instead of relying on `prepare-db` for PG.
+  Drift is detected and surfaced as a startup warning + a unit-test failure
+  (see "Detecting baseline drift at runtime" above), so it can no longer
+  accumulate silently.
 - **Test coverage.** PG integration tests cover hosts, software, vulnerabilities,
   policies, and host-counts. MDM, carves, scripts, and activities are not yet
   exercised on PG; bugs there will be caught only at runtime.

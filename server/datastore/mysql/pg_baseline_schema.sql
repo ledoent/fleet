@@ -8,6 +8,18 @@
 --     (pg_dump 17+ emits these; db.Exec fails on the backslash)
 --   - the SET/SELECT pg_catalog preamble (especially set_config('search_path',''))
 --     since the embedded loader runs seed inserts that expect search_path=public
+--
+-- Bump the marker below to the highest applied migration on the source DB at
+-- regen time. It is parsed by migratePGBaseline to (a) seed
+-- migration_status_tables on a fresh apply so MigrationStatus reports the
+-- right state, and (b) detect drift when the running code carries newer
+-- migrations than this baseline knows about.
+--
+-- Get the value with:
+--   kubectl exec -n fleet fleet-db-1 -- psql -U postgres -d fleet -tAc \
+--     "SELECT MAX(version_id) FROM migration_status_tables WHERE is_applied"
+--
+-- pg-baseline-up-to-migration: 20260410173222
 
 --
 -- PostgreSQL database dump

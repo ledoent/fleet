@@ -11,6 +11,8 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -618,28 +620,156 @@ var pgBaselineSchemaSQL string
 //go:embed pg_baseline_post.sql
 var pgBaselinePostSQL string
 
+// pgBaselineMarkerRe matches the `pg-baseline-up-to-migration: <ts>` header
+// comment in pg_baseline_schema.sql. The timestamp records the highest
+// migration version embedded in the baseline.
+var pgBaselineMarkerRe = regexp.MustCompile(`(?m)^--\s*pg-baseline-up-to-migration:\s*(\d+)\s*$`)
+
+// parsePGBaselineMarker returns the highest migration version embedded in the
+// baseline. Returns 0 when no marker is present (older baselines), in which
+// case drift detection is skipped and a warning is logged elsewhere.
+func parsePGBaselineMarker(sql string) int64 {
+	m := pgBaselineMarkerRe.FindStringSubmatch(sql)
+	if m == nil {
+		return 0
+	}
+	v, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
 // migratePGBaseline applies the PG baseline schema for fresh PostgreSQL databases
 // and always runs idempotent post-baseline fixups (e.g., asserting object ownership).
+//
+// On a fresh apply it also seeds migration_status_tables with all migration
+// versions <= the baseline marker, so MigrationStatus reports correctly and
+// downstream code that queries the table sees the right history. On every
+// startup it logs a warning if the running code carries migrations newer
+// than the embedded baseline (silent drift would otherwise accumulate until
+// a feature broke at runtime).
 func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
+	marker := parsePGBaselineMarker(pgBaselineSchemaSQL)
+
 	var exists bool
 	err := ds.writer(ctx).GetContext(ctx, &exists,
 		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hosts')`)
 	if err != nil {
 		return fmt.Errorf("checking PG schema: %w", err)
 	}
+	freshApply := false
 	if exists {
 		ds.logger.InfoContext(ctx, "PostgreSQL schema already exists, skipping baseline")
 	} else {
-		ds.logger.InfoContext(ctx, "Applying PostgreSQL baseline schema")
+		ds.logger.InfoContext(ctx, "Applying PostgreSQL baseline schema", "marker_version", marker)
 		if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselineSchemaSQL); err != nil {
 			return fmt.Errorf("applying PG baseline schema: %w", err)
 		}
 		ds.logger.InfoContext(ctx, "PostgreSQL baseline schema applied successfully")
+		freshApply = true
 	}
 	if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselinePostSQL); err != nil {
 		return fmt.Errorf("applying PG post-baseline fixups: %w", err)
 	}
+	if freshApply {
+		if err := ds.seedPGMigrationHistory(ctx, marker); err != nil {
+			return fmt.Errorf("seeding PG migration history: %w", err)
+		}
+	}
+	ds.warnPGMigrationDrift(ctx, marker)
 	return nil
+}
+
+// seedPGMigrationHistory populates migration_status_tables with all known
+// migration versions <= marker, so MigrationStatus does not falsely report
+// the DB as empty after a fresh baseline apply. No-op when marker is 0
+// (baseline has no marker — operator must regen) or when migration_status_tables
+// already has rows (guards against double-seed and never touches existing DBs).
+func (ds *Datastore) seedPGMigrationHistory(ctx context.Context, marker int64) error {
+	if marker == 0 {
+		return nil
+	}
+	var existing int
+	if err := ds.writer(ctx).GetContext(ctx, &existing,
+		`SELECT COUNT(*) FROM migration_status_tables WHERE is_applied`); err != nil {
+		return fmt.Errorf("counting existing migration history: %w", err)
+	}
+	if existing > 0 {
+		return nil
+	}
+	versions := versionsAtOrBelow(tables.MigrationClient.Migrations, marker)
+	if len(versions) == 0 {
+		return nil
+	}
+	// Bulk insert with PG positional placeholders. migration_status_tables
+	// has no unique constraint on version_id (goose appends a row per
+	// up/down event), so a plain INSERT is correct.
+	var b strings.Builder
+	b.WriteString("INSERT INTO migration_status_tables (version_id, is_applied) VALUES ")
+	args := make([]any, 0, len(versions))
+	for i, v := range versions {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "($%d, true)", i+1)
+		args = append(args, v)
+	}
+	if _, err := ds.writer(ctx).ExecContext(ctx, b.String(), args...); err != nil {
+		return fmt.Errorf("seeding migration_status_tables: %w", err)
+	}
+	ds.logger.InfoContext(ctx, "Seeded PG migration history", "rows", len(versions), "marker_version", marker)
+	return nil
+}
+
+// warnPGMigrationDrift logs a loud warning when the running code has
+// migrations newer than the embedded PG baseline. The PG path has no
+// per-migration runner (migrations are MySQL DDL), so any drift means new
+// code is running against an old schema until pg_baseline_schema.sql is
+// regenerated.
+func (ds *Datastore) warnPGMigrationDrift(ctx context.Context, marker int64) {
+	if marker == 0 {
+		ds.logger.WarnContext(ctx,
+			"PostgreSQL baseline has no pg-baseline-up-to-migration marker; cannot detect migration drift",
+			"remediation", "add the marker to server/datastore/mysql/pg_baseline_schema.sql header")
+		return
+	}
+	pending := versionsAbove(tables.MigrationClient.Migrations, marker)
+	if len(pending) == 0 {
+		return
+	}
+	ds.logger.WarnContext(ctx,
+		"PostgreSQL baseline is stale: code has migrations not present in the embedded baseline",
+		"baseline_version", marker,
+		"pending_count", len(pending),
+		"oldest_pending", pending[0],
+		"newest_pending", pending[len(pending)-1],
+		"remediation", "regenerate pg_baseline_schema.sql (see file header) and bump the pg-baseline-up-to-migration marker",
+	)
+}
+
+// versionsAtOrBelow returns migration versions <= marker, sorted ascending.
+func versionsAtOrBelow(ms goose.Migrations, marker int64) []int64 {
+	out := make([]int64, 0, len(ms))
+	for _, m := range ms {
+		if m.Version <= marker {
+			out = append(out, m.Version)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// versionsAbove returns migration versions > marker, sorted ascending.
+func versionsAbove(ms goose.Migrations, marker int64) []int64 {
+	out := make([]int64, 0)
+	for _, m := range ms {
+		if m.Version > marker {
+			out = append(out, m.Version)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // loadMigrations manually loads the applied migrations in ascending
