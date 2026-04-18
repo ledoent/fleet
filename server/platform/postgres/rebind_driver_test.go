@@ -113,3 +113,47 @@ func TestRewriteUpdateJoin(t *testing.T) {
 		})
 	}
 }
+
+func TestCastSoftwareUpdateProjections(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "single SELECT — adds bigint+timestamp casts",
+			in:   "SELECT ? as host_id, ? as software_id, ? as last_opened_at",
+			want: "SELECT ?::bigint AS host_id, ?::bigint AS software_id, ?::timestamp AS last_opened_at",
+		},
+		{
+			name: "every SELECT in UNION ALL is cast",
+			in:   "SELECT ? as host_id, ? as software_id, ? as last_opened_at UNION ALL  SELECT ? as host_id, ? as software_id, ? as last_opened_at",
+			want: "SELECT ?::bigint AS host_id, ?::bigint AS software_id, ?::timestamp AS last_opened_at UNION ALL  SELECT ?::bigint AS host_id, ?::bigint AS software_id, ?::timestamp AS last_opened_at",
+		},
+		{
+			name: "wrapped inside the rewritten UPDATE — the canonical A1 production query",
+			in:   "UPDATE host_software hs SET last_opened_at = a.last_opened_at FROM ( SELECT ? as host_id, ? as software_id, ? as last_opened_at UNION ALL  SELECT ? as host_id, ? as software_id, ? as last_opened_at) a WHERE hs.host_id = a.host_id AND hs.software_id = a.software_id",
+			want: "UPDATE host_software hs SET last_opened_at = a.last_opened_at FROM ( SELECT ?::bigint AS host_id, ?::bigint AS software_id, ?::timestamp AS last_opened_at UNION ALL  SELECT ?::bigint AS host_id, ?::bigint AS software_id, ?::timestamp AS last_opened_at) a WHERE hs.host_id = a.host_id AND hs.software_id = a.software_id",
+		},
+		{
+			name: "different column triple — passthrough (regex requires the exact alias triple)",
+			in:   "SELECT ? as user_id, ? as team_id, ? as role",
+			want: "SELECT ? as user_id, ? as team_id, ? as role",
+		},
+		{
+			name: "extra whitespace tolerated (real queries have varying spacing)",
+			in:   "SELECT  ?  as host_id ,  ?  as software_id ,  ?  as last_opened_at",
+			want: "SELECT ?::bigint AS host_id, ?::bigint AS software_id, ?::timestamp AS last_opened_at",
+		},
+		{
+			name: "case-insensitive AS",
+			in:   "SELECT ? AS host_id, ? AS software_id, ? AS last_opened_at",
+			want: "SELECT ?::bigint AS host_id, ?::bigint AS software_id, ?::timestamp AS last_opened_at",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, castSoftwareUpdateProjections(tc.in))
+		})
+	}
+}

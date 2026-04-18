@@ -21,6 +21,11 @@ import (
 )
 
 func TestScripts(t *testing.T) {
+	// TODO(B1 follow-up): switch to CreateDS once the rebind-driver gaps
+	// surfaced by a trial conversion are fixed and tracked. Categories seen:
+	// GROUP BY strict mode (multiple subtests), LastInsertId via RETURNING,
+	// `timestamp * interval` math, $N type inference, idx_batch_script_executions
+	// uniqueness. Each is its own ticket — see docs/Deploy/postgresql.md.
 	ds := CreateMySQLDS(t)
 
 	cases := []struct {

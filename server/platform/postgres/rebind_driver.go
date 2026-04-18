@@ -249,6 +249,14 @@ func rebindQuery(query string) string {
 	if strings.Contains(query, "UPDATE") && strings.Contains(query, "JOIN") && strings.Contains(query, "SET") {
 		query = rewriteUpdateJoin(query)
 	}
+	// PG infers untyped parameters in `SELECT $N AS col` projections as text,
+	// which then fails JOIN comparisons against integer/timestamp columns
+	// (`operator does not exist: integer = text`). Inject casts on the FIRST
+	// SELECT in a UNION ALL chain — PG propagates the column types through
+	// subsequent UNION ALL siblings automatically. This pattern is emitted by
+	// updateModifiedHostSoftwareDB in software.go (the host-software last-opened
+	// UPDATE...JOIN path that A1 broke in production).
+	query = castSoftwareUpdateProjections(query)
 	// Note: PG doesn't allow alias-qualified columns in UPDATE SET clause.
 	// This needs per-query fixes in the source code (e.g., cron_stats.go).
 	// MySQL IF(cond, true_val, false_val) → PG CASE WHEN cond THEN true_val ELSE false_val END
@@ -342,6 +350,25 @@ func rebindQuery(query string) string {
 	} {
 		query = strings.ReplaceAll(query, "COALESCE("+boolCol+", 0)", "COALESCE("+boolCol+", false)")
 		query = strings.ReplaceAll(query, "COALESCE("+boolCol+", 1)", "COALESCE("+boolCol+", true)")
+	}
+
+	// Smallint columns that the Go layer passes as bool: rewrite
+	// `<col> = ?` to `<col> = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)`.
+	// The ?::text cast triggers coerceBoolArgsForTextCast, which converts the
+	// bool driver.Value to "true"/"false" string. PG then evaluates the CASE
+	// to 1 or 0, matching the smallint column type.
+	//
+	// MySQL uses TINYINT(1) for these columns and pgx/MySQL drivers happily
+	// encode bool→tinyint, so MySQL doesn't need the rewrite. PG's int2
+	// encoder rejects bool with "unable to encode false into binary format
+	// for int2" — this rewrite fixes that without changing the calling code.
+	//
+	// Add columns here as new ones are surfaced by PG-converted tests.
+	for _, col := range []string{
+		"expired", // carve_metadata.expired (smallint in PG, bool in fleet.CarveMetadata)
+	} {
+		query = strings.ReplaceAll(query, col+" = ?", col+" = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)")
+		query = strings.ReplaceAll(query, col+"=?", col+" = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)")
 	}
 
 	query = strings.ReplaceAll(query, "pm.passes = 1", "(pm.passes IS TRUE)::int")
@@ -1524,6 +1551,33 @@ func rewriteGroupConcat(query string) string {
 		query = query[:loc[0]] + replacement + query[i:]
 	}
 	return query
+}
+
+// reSoftwareUpdateProjection matches each `SELECT ? AS host_id, ? AS
+// software_id, ? AS last_opened_at` projection emitted by software.go's
+// updateModifiedHostSoftwareDB (one per row in the UNION ALL chain).
+// Queries reach rebindQuery with `?` placeholders; the pgx-rebind layer
+// rewrites to $N later.
+var reSoftwareUpdateProjection = regexp.MustCompile(
+	`(?i)SELECT\s+\?\s+as\s+host_id\s*,\s*\?\s+as\s+software_id\s*,\s*\?\s+as\s+last_opened_at`,
+)
+
+// castSoftwareUpdateProjections injects PG type casts on every SELECT in the
+// UNION ALL chain emitted by updateModifiedHostSoftwareDB. Without these casts
+// PG infers the parameters as text, which then fails the JOIN against
+// host_software's bigint columns ("operator does not exist: integer = text").
+// MySQL doesn't need casts because it pulls types from the JOIN target.
+//
+// Casting every SELECT (rather than just the first, which would also work via
+// PG's UNION-ALL type propagation) keeps the rewrite robust to small wording
+// changes in the source query and avoids depending on PG inference rules.
+//
+// The regex is anchored on the exact column-alias triple
+// (host_id, software_id, last_opened_at), so this is safe to run on every
+// query — a non-matching query is returned unchanged.
+func castSoftwareUpdateProjections(query string) string {
+	return reSoftwareUpdateProjection.ReplaceAllString(query,
+		`SELECT ?::bigint AS host_id, ?::bigint AS software_id, ?::timestamp AS last_opened_at`)
 }
 
 // rewriteUpdateJoin rewrites MySQL UPDATE t1 JOIN t2 ON cond SET ... → PG UPDATE t1 SET ... FROM t2 WHERE cond

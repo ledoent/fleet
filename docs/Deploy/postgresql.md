@@ -116,8 +116,11 @@ needed if you cannot restart Fleet.
   (see "Detecting baseline drift at runtime" above), so it can no longer
   accumulate silently.
 - **Test coverage.** PG integration tests cover hosts, software, vulnerabilities,
-  policies, and host-counts. MDM, carves, scripts, and activities are not yet
-  exercised on PG; bugs there will be caught only at runtime.
+  policies, host-counts, **carves**, and the **host-software UPDATE path**
+  that broke production in A1. MDM, scripts, activities, and the bulk of
+  software_test.go still run only against MySQL; bugs there will be caught
+  only at runtime. See "Adding PG test coverage" below for the conversion
+  procedure and the open Tier-3 (scripts) gap list.
 - **Performance.** No formal benchmarks vs MySQL; the rebind driver adds a
   per-statement string-rewrite cost that is negligible for OLTP but unmeasured
   for the vulnerability-cron's batch workloads.
@@ -128,10 +131,59 @@ needed if you cannot restart Fleet.
 ## CI gates
 
 - `validate-pg-compat.yml` runs the `tools/pgcompat/` validators on every PR
-  against `feat/pg-compat-clean`.
+  against `feat/pg-compat-clean`. Also includes the gate-of-the-gate test
+  (`go test ./tools/pgcompat/`) and the PG test-skip ledger (informational).
 - `test-go-postgres.yaml` runs the Go test suite against PG.
 - `build-ledo.yml` refuses to publish images unless both of the above succeeded
   on the build SHA.
+
+## Adding PG test coverage
+
+The same Go datastore tests can run against either MySQL or PG. The work is
+mostly mechanical: swap the constructor, then triage failures.
+
+1. **Switch the umbrella test's constructor** from `CreateMySQLDS(t)` to
+   `CreateDS(t)` (single-line change). `CreateDS` selects PG when
+   `POSTGRES_TEST=1` and MySQL when `MYSQL_TEST=1`, so each backend's CI job
+   picks up the same test automatically.
+2. **Run the suite locally on PG**:
+   ```
+   docker compose up -d postgres_test
+   POSTGRES_TEST=1 FLEET_POSTGRES_TEST_PORT=5434 go test -count=1 -race -v -run TestX ./server/datastore/mysql/
+   ```
+3. **For each PG-failing subtest, prefer fixing the underlying gap** in
+   `server/platform/postgres/rebind_driver.go`. Add a unit test in
+   `server/platform/postgres/rebind_driver_test.go` covering the rewrite.
+4. **If a fix is non-trivial**, open a tracking issue and skip the subtest:
+   ```go
+   if isPG(ds) {
+       t.Skip("TODO B1 (#NNNN): <one-line gap description>")
+   }
+   ```
+   The issue number is mandatory — `validate-pg-compat.yml` greps for the
+   `TODO B1 (#NNNN)` pattern and surfaces the count in the run summary.
+   Skips without an issue number defeat the ledger.
+
+### Tier 3 (scripts) gap inventory
+
+A trial conversion of `TestScripts` against PG surfaced 17 failing subtests
+across these driver categories. Each needs a tracking issue + fix or skip
+before the conversion can ship:
+
+- **GROUP BY strict mode** — PG requires every non-aggregate `SELECT` column
+  to appear in `GROUP BY`. MySQL is lenient. Affects bulk-execution summary
+  queries (`s.name must appear in the GROUP BY clause`).
+- **`LastInsertId is not supported`** — pgx omits `LastInsertId` because PG
+  uses `INSERT ... RETURNING id`. Several script-insert paths rely on
+  `Result.LastInsertId()`. Needs a dialect-specific code path or a wrapper.
+- **`timestamp with time zone * interval`** — interval arithmetic in script
+  cancellation queries uses MySQL syntax. The rebind driver needs a rewrite
+  for `<ts> * INTERVAL N <unit>` → PG-equivalent.
+- **`could not determine data type of parameter $1`** — placeholders used
+  in contexts where PG can't infer the type (e.g. `WHERE id = ANY($1)` on
+  empty arrays). Needs explicit casts in source SQL.
+- **`duplicate key on idx_batch_script_executions_execution_id`** — likely a
+  pgx encoding edge case for `BINARY(16)` UUID values vs PG `bytea`/`uuid`.
 
 ## Reverting to MySQL
 

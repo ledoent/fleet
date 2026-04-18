@@ -68,3 +68,26 @@ jobs:
 
       - name: Validator regression test (gate-of-the-gate)
         run: go test -count=1 -timeout 120s ./tools/pgcompat/
+
+      # Inventory PG test skips so the debt is visible in every PR. Each
+      # `t.Skip("TODO B1 (#NNNN): ...")` line marks a converted-to-CreateDS
+      # subtest with a known rebind-driver gap. The grep is informational —
+      # it does not gate the build, but if the count climbs without a
+      # corresponding open ticket per skip the gap is documented in the run
+      # summary.
+      - name: Inventory PG test skips
+        if: always()
+        run: |
+          set +e
+          matches=$(grep -rEn 't\.Skip\("TODO B1 \(#[0-9]+\)' server/datastore/mysql/ 2>/dev/null)
+          count=$(printf '%s' "$matches" | grep -c . || true)
+          {
+            echo "## PG test skip ledger"
+            echo "Total: \`$count\`"
+            if [ "$count" -gt 0 ]; then
+              echo ''
+              echo '```'
+              echo "$matches"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

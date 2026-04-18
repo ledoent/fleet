@@ -415,3 +415,145 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 		_ = invites
 	})
 }
+
+// TestPostgresHostSoftwareUpdate is the direct A1-regression guard. The
+// host-software UPDATE path in software.go (updateModifiedHostSoftwareDB,
+// linkSoftwareToHost, updateSoftwareUpdatedAt, deleteUninstalledHostSoftwareDB)
+// uses MySQL-only constructs — UPDATE...JOIN, INSERT...ON DUPLICATE KEY UPDATE,
+// per-row last_opened_at projection — that the rebind driver translates to PG.
+// A regression in any of those translations breaks every osquery distributed/write
+// in production. This test exercises the same sequence the cron + osquery path
+// run on every host check-in, against PG, so a regression fails CI before it ships.
+func TestPostgresHostSoftwareUpdate(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := t.Context()
+
+	host, err := ds.NewHost(ctx, &fleet.Host{
+		OsqueryHostID:   ptr.String("pg-sw-host-1"),
+		NodeKey:         ptr.String("pg-sw-key-1"),
+		UUID:            "pg-sw-uuid-1",
+		Hostname:        "pg-sw-hostname-1",
+		Platform:        "darwin",
+		DetailUpdatedAt: time.Now(),
+		LabelUpdatedAt:  time.Now(),
+		PolicyUpdatedAt: time.Now(),
+		SeenTime:        time.Now(),
+	})
+	require.NoError(t, err, "NewHost")
+
+	getHostSoftware := func(h *fleet.Host) []fleet.Software {
+		out := make([]fleet.Software, 0, len(h.Software))
+		for _, s := range h.Software {
+			out = append(out, s.Software)
+		}
+		return out
+	}
+
+	t.Run("InitialInsert", func(t *testing.T) {
+		// Exercises linkSoftwareToHost (INSERT...ON DUPLICATE KEY UPDATE)
+		// + the up-front software upsert in applyChangesForNewSoftwareDB.
+		initial := []fleet.Software{
+			{Name: "alpha", Version: "1.0.0", Source: "apps"},
+			{Name: "beta", Version: "2.0.0", Source: "apps", BundleIdentifier: "com.beta"},
+			{Name: "gamma", Version: "3.0.0", Source: "deb_packages"},
+		}
+		_, err := ds.UpdateHostSoftware(ctx, host.ID, initial)
+		require.NoError(t, err, "UpdateHostSoftware initial insert")
+
+		require.NoError(t, ds.LoadHostSoftware(ctx, host, false))
+		got := getHostSoftware(host)
+		require.Len(t, got, len(initial), "expected %d rows after initial insert", len(initial))
+	})
+
+	t.Run("UpdateLastOpenedAt", func(t *testing.T) {
+		// THIS is the A1 trigger: updateModifiedHostSoftwareDB issues
+		// `UPDATE host_software hs JOIN (...) a ON ... SET hs.last_opened_at = a.last_opened_at`.
+		// In MySQL it works as-is. In PG the rebind driver must rewrite to
+		// `UPDATE host_software hs SET last_opened_at = a.last_opened_at FROM (...) a WHERE ...`.
+		// A1 was a syntax error in that rewrite ("syntax error at or near WHERE")
+		// that broke every osquery distributed/write.
+		opened := time.Now().UTC().Truncate(time.Second)
+		updated := []fleet.Software{
+			{Name: "alpha", Version: "1.0.0", Source: "apps", LastOpenedAt: &opened},
+			{Name: "beta", Version: "2.0.0", Source: "apps", BundleIdentifier: "com.beta", LastOpenedAt: &opened},
+			{Name: "gamma", Version: "3.0.0", Source: "deb_packages"},
+		}
+		_, err := ds.UpdateHostSoftware(ctx, host.ID, updated)
+		require.NoError(t, err, "UpdateHostSoftware with last_opened_at — A1 regression target")
+
+		require.NoError(t, ds.LoadHostSoftware(ctx, host, false))
+		got := getHostSoftware(host)
+		require.Len(t, got, len(updated))
+
+		var alphaOpened, betaOpened, gammaOpened *time.Time
+		for _, s := range got {
+			switch s.Name {
+			case "alpha":
+				alphaOpened = s.LastOpenedAt
+			case "beta":
+				betaOpened = s.LastOpenedAt
+			case "gamma":
+				gammaOpened = s.LastOpenedAt
+			}
+		}
+		require.NotNil(t, alphaOpened, "alpha last_opened_at not propagated")
+		require.NotNil(t, betaOpened, "beta last_opened_at not propagated")
+		// gamma had no LastOpenedAt — must remain nil.
+		require.Nil(t, gammaOpened, "gamma last_opened_at should still be nil")
+		// PG TIMESTAMP and MySQL DATETIME(6) round-trip differs slightly;
+		// allow a 2s window.
+		assert.WithinDuration(t, opened, *alphaOpened, 2*time.Second)
+		assert.WithinDuration(t, opened, *betaOpened, 2*time.Second)
+	})
+
+	t.Run("BumpLastOpenedAt", func(t *testing.T) {
+		// Fire the UPDATE...JOIN path a second time with a NEWER last_opened_at
+		// to confirm it's an UPDATE (not a no-op due to nothingChanged()).
+		newer := time.Now().UTC().Add(1 * time.Hour).Truncate(time.Second)
+		updated := []fleet.Software{
+			{Name: "alpha", Version: "1.0.0", Source: "apps", LastOpenedAt: &newer},
+			{Name: "beta", Version: "2.0.0", Source: "apps", BundleIdentifier: "com.beta"},
+			{Name: "gamma", Version: "3.0.0", Source: "deb_packages"},
+		}
+		_, err := ds.UpdateHostSoftware(ctx, host.ID, updated)
+		require.NoError(t, err, "UpdateHostSoftware bump last_opened_at")
+
+		require.NoError(t, ds.LoadHostSoftware(ctx, host, false))
+		got := getHostSoftware(host)
+		var alpha *fleet.Software
+		for i := range got {
+			if got[i].Name == "alpha" {
+				alpha = &got[i]
+				break
+			}
+		}
+		require.NotNil(t, alpha)
+		require.NotNil(t, alpha.LastOpenedAt)
+		assert.WithinDuration(t, newer, *alpha.LastOpenedAt, 2*time.Second)
+	})
+
+	t.Run("RemoveSoftware", func(t *testing.T) {
+		// Exercises deleteUninstalledHostSoftwareDB — host reports a smaller
+		// inventory; the missing entries must be unlinked from this host.
+		shrunk := []fleet.Software{
+			{Name: "alpha", Version: "1.0.0", Source: "apps"},
+		}
+		_, err := ds.UpdateHostSoftware(ctx, host.ID, shrunk)
+		require.NoError(t, err, "UpdateHostSoftware shrunk inventory")
+
+		require.NoError(t, ds.LoadHostSoftware(ctx, host, false))
+		got := getHostSoftware(host)
+		require.Len(t, got, 1, "expected only alpha after shrink")
+		assert.Equal(t, "alpha", got[0].Name)
+	})
+
+	t.Run("EmptyInventory", func(t *testing.T) {
+		// Edge case: host reports zero software (e.g. agent crash, cleared cache).
+		// Must not produce a SQL error and must clear the host's inventory.
+		_, err := ds.UpdateHostSoftware(ctx, host.ID, []fleet.Software{})
+		require.NoError(t, err, "UpdateHostSoftware empty inventory")
+
+		require.NoError(t, ds.LoadHostSoftware(ctx, host, false))
+		assert.Empty(t, host.Software, "host inventory should be empty")
+	})
+}

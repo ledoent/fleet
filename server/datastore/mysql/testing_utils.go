@@ -432,6 +432,16 @@ func CreateDS(t *testing.T) *Datastore {
 	return createMySQLDSWithOptions(t, nil)
 }
 
+// isPG reports whether the datastore is backed by PostgreSQL. Used by tests
+// converted to CreateDS to skip subtests with known rebind-driver gaps; every
+// such use must reference a tracking issue in the comment so the debt stays
+// inventoried (see the skip-ledger step in validate-pg-compat.yml). Uses of
+// isPG should drop to zero as the rebind driver matures.
+func isPG(ds *Datastore) bool {
+	_, ok := ds.dialect.(postgresDialect)
+	return ok
+}
+
 func CreateNamedMySQLDS(t *testing.T, name string) *Datastore {
 	ds, _ := CreateNamedMySQLDSWithConns(t, name)
 	return ds
