@@ -3193,11 +3193,10 @@ func (ds *Datastore) LoadHostByDeviceAuthToken(ctx context.Context, authToken st
 
 // SetOrUpdateDeviceAuthToken inserts or updates the auth token for a host.
 func (ds *Datastore) SetOrUpdateDeviceAuthToken(ctx context.Context, hostID uint, authToken string) error {
-	// Note that by not specifying "updated_at = VALUES(updated_at)" in the UPDATE part
-	// of the statement, it inherits the default behaviour which is that the updated_at
-	// timestamp will NOT be changed if the new token is the same as the old token
-	// (which is exactly what we want). The updated_at timestamp WILL be updated if the
-	// new token is different.
+	// updated_at is bumped on every upsert so the token TTL check in
+	// LoadHostByDeviceAuthToken keeps passing while orbit is actively
+	// checking in. PG has no ON UPDATE CURRENT_TIMESTAMP trigger, so the
+	// bump must be explicit (MySQL's row-level auto-update is not portable).
 	//
 	// When the token changes, the current token is saved to previous_token so that
 	// both the old and new tokens can be used for authentication during the transition
@@ -3210,7 +3209,8 @@ func (ds *Datastore) SetOrUpdateDeviceAuthToken(ctx context.Context, hostID uint
 			(?, ?)
 		` + ds.dialect.OnDuplicateKey("host_id", `previous_token = IF(host_device_auth.token = VALUES(token), host_device_auth.previous_token,
 				IF(host_device_auth.updated_at >= DATE_SUB(NOW(), INTERVAL 3600 SECOND), host_device_auth.token, NULL)),
-			token = VALUES(token)`) + `
+			token = VALUES(token),
+			updated_at = CURRENT_TIMESTAMP`) + `
 `
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, hostID, authToken)
 	if err != nil {
