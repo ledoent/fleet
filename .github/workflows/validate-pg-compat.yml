@@ -14,6 +14,7 @@ on:
       - 'server/datastore/mysql/schema.sql'
       - 'server/datastore/mysql/pg_baseline_schema.sql'
       - 'server/platform/postgres/rebind_driver.go'
+      - 'server/platform/postgres/schema_bool_cols_gen.go'
       - 'tools/pgcompat/**'
       - '.github/workflows/validate-pg-compat.yml'
   pull_request:
@@ -24,6 +25,7 @@ on:
       - 'server/datastore/mysql/schema.sql'
       - 'server/datastore/mysql/pg_baseline_schema.sql'
       - 'server/platform/postgres/rebind_driver.go'
+      - 'server/platform/postgres/schema_bool_cols_gen.go'
       - 'tools/pgcompat/**'
       - '.github/workflows/validate-pg-compat.yml'
   workflow_dispatch:
@@ -75,6 +77,12 @@ jobs:
       # it does not gate the build, but if the count climbs without a
       # corresponding open ticket per skip the gap is documented in the run
       # summary.
+      - name: schemaBoolCols generated file is up to date
+        run: |
+          go run ./tools/pgcompat/gen_bool_cols
+          git diff --exit-code server/platform/postgres/schema_bool_cols_gen.go || \
+            { echo "schema_bool_cols_gen.go is stale — run: go run ./tools/pgcompat/gen_bool_cols"; exit 1; }
+
       - name: Inventory PG test skips
         if: always()
         run: |

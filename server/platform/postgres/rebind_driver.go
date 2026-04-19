@@ -3,6 +3,8 @@
 // including placeholder conversion (? → $N), function rewrites (IF → CASE WHEN,
 // JSON_OBJECT → jsonb_build_object, etc.), and type fixes (boolean = integer).
 // Register with: sql.Register("pgx-rebind", &rebindDriver{})
+//go:generate go run ../../../tools/pgcompat/gen_bool_cols
+
 package postgres
 
 import (
@@ -57,6 +59,49 @@ var (
 	reIntervalLiteral     = map[string]*regexp.Regexp{}
 	reIntervalPlaceholder = map[string]*regexp.Regexp{}
 )
+
+// qualifiedBoolCols lists alias.col forms of boolean columns that appear in queries.
+// Aliases cannot be inferred from the schema, so this list is hand-curated.
+// Unqualified column names are in schemaBoolCols (generated from pg_baseline_schema.sql).
+// "expired" is intentionally absent — carve_metadata.expired is smallint in PG (see rewriteSmallintBoolColumns).
+var qualifiedBoolCols = []string{
+	"ne.enabled", "hsr.canceled", "pl.exclude", "si.is_active",
+	"hsi2.removed", "hsi2.canceled", "hsi.removed", "hsi.canceled",
+	"abt.terms_expired",
+	"n.enrolled", "q.active",
+	"hrkp.deleted", "rkp.deleted",
+	"hm.enrolled", "hmdm.enrolled", "nq.active", "nvq.active",
+	"nano_enrollment_queue.active",
+	"ba.canceled", "ba2.canceled",
+	"mcpl.exclude", "mcpl.require_all", "mel.exclude", "mel.require_all",
+	"sil.exclude", "sil.require_all",
+	"vatl.exclude", "vatl.require_all", "ihl.exclude", "ihl.require_all",
+	"neq.active", "e.enabled", "p.conditional_access_enabled", "p.critical",
+	"hvsi.canceled", "hvsi2.canceled", "hvsi.removed", "hvsi2.removed",
+	"hihsi.canceled", "hihsi.removed", "hihsi2.canceled", "hihsi2.removed",
+	"host_vpp_software_installs.canceled", "host_vpp_software_installs.removed",
+	"host_mdm.enrolled",
+	"q.automations_enabled", "nq.automations_enabled",
+	"hmdm.is_server", "hm.installed_from_dep", "q.discard_data",
+	"hmabp.skipped", "hm.is_personal_enrollment",
+	"q.saved", "sthc.global_stats", "shc.global_stats", "vhc.global_stats",
+	"si.self_service", "vat.self_service", "iha.self_service",
+	"software_installer_labels.exclude", "software_installer_labels.require_all",
+	"vpp_app_team_labels.exclude", "vpp_app_team_labels.require_all",
+	"in_house_app_labels.exclude", "in_house_app_labels.require_all",
+	"hsi.uninstall",
+	"hdek.decryptable",
+	"si.install_during_setup",
+}
+
+// allBoolCols merges schemaBoolCols and qualifiedBoolCols once at init time so
+// rebindQuery iterates a single slice instead of two.
+var allBoolCols = func() []string {
+	out := make([]string, 0, len(schemaBoolCols)+len(qualifiedBoolCols))
+	out = append(out, schemaBoolCols...)
+	out = append(out, qualifiedBoolCols...)
+	return out
+}()
 
 func init() {
 	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
@@ -294,49 +339,10 @@ func rebindQuery(query string) string {
 	// Fix CASE type mismatch: ELSE hdek.decryptable (boolean) mixed with THEN -1 (integer)
 	// Cast boolean to integer in CASE branches
 	query = strings.ReplaceAll(query, "ELSE hdek.decryptable", "ELSE CAST(hdek.decryptable AS integer)")
-	// Fix CAST(AVG(...) AS UNSIGNED) → CAST(AVG(...) AS integer) (already handled above)
-	// Fix boolean = integer comparisons that PG doesn't allow
-	for _, col := range []string{
-		"ne.enabled", "hsr.canceled", "pl.exclude", "needs_full_membership_cleanup", "si.is_active",
-		"hsi2.removed", "hsi2.canceled", "hsi.removed", "hsi.canceled",
-		"abt.terms_expired", "n.token_update_tally", "ne.token_update_tally",
-		"n.enrolled", "q.active", "cve_meta.published",
-		"hrkp.deleted", "rkp.deleted",
-		// nano/mdm boolean columns
-		"hm.enrolled", "hmdm.enrolled", "nq.active", "nvq.active",
-		"nano_enrollment_queue.active",
-		"ba.canceled", "ba2.canceled",
-		// MDM profile label exclude/require_all columns (various aliases)
-		"mcpl.exclude", "mcpl.require_all", "mel.exclude", "mel.require_all",
-		"sil.exclude", "sil.require_all",
-		"vatl.exclude", "vatl.require_all", "ihl.exclude", "ihl.require_all",
-		// Additional qualified boolean columns
-		"neq.active", "e.enabled", "p.conditional_access_enabled", "p.critical",
-		"hvsi.canceled", "hvsi2.canceled", "hvsi.removed", "hvsi2.removed",
-		"hihsi.canceled", "hihsi.removed", "hihsi2.canceled", "hihsi2.removed",
-		"host_vpp_software_installs.canceled", "host_vpp_software_installs.removed",
-		"host_mdm.enrolled",
-		"q.automations_enabled", "nq.automations_enabled",
-		"hmdm.is_server", "hm.installed_from_dep", "q.discard_data",
-		"hmabp.skipped", "hm.is_personal_enrollment",
-		// Unqualified boolean columns (safe — always boolean in Fleet schema)
-		// Note: "expired" is intentionally omitted — carve_metadata.expired is smallint in production PG.
-		"deleted", "canceled", "refetch_requested",
-		"enrolled", "enabled", "active",
-		"resync", "terms_expired", "sync_request",
-		"discard_data", "is_server", "is_kernel", "encrypted",
-		"skipped", "installed_from_dep", "is_personal_enrollment",
-		"saved", "q.saved", "revoked", "global_stats",
-		"sthc.global_stats", "shc.global_stats", "vhc.global_stats",
-		"self_service", "si.self_service", "vat.self_service", "iha.self_service",
-		// Full table-qualified boolean columns (used without aliases)
-		"software_installer_labels.exclude", "software_installer_labels.require_all",
-		"vpp_app_team_labels.exclude", "vpp_app_team_labels.require_all",
-		"in_house_app_labels.exclude", "in_house_app_labels.require_all",
-		"hsi.uninstall", "uninstall",
-		"hdek.decryptable",
-		"install_during_setup", "si.install_during_setup",
-	} {
+	// Fix boolean = integer comparisons that PG doesn't allow.
+	// allBoolCols merges schemaBoolCols (generated, unqualified) with qualifiedBoolCols
+	// (hand-curated alias.col forms); see package-level declarations for details.
+	for _, col := range allBoolCols {
 		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
 		query = strings.ReplaceAll(query, col+" = 0", col+" = false")
 		query = strings.ReplaceAll(query, col+" != 1", col+" != true")
