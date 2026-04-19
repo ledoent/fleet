@@ -206,3 +206,53 @@ func TestRewriteSmallintBoolColumns(t *testing.T) {
 		})
 	}
 }
+
+func TestRewriteMaxBoolColumns(t *testing.T) {
+	// reMaxDenylisted rewrites MAX on known PG boolean columns to BOOL_OR.
+	// Covers two forms:
+	//   - unquoted (literal SQL via goqu.L): MAX(stats.denylisted)
+	//   - double-quoted (goqu expression after backtick→" conversion): MAX("c"."cisa_known_exploit")
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "unquoted denylisted from goqu.L literal",
+			in:   "MAX(stats.denylisted) AS denylisted",
+			want: "BOOL_OR(stats.denylisted) AS denylisted",
+		},
+		{
+			name: "unquoted denylisted inside COALESCE",
+			in:   "COALESCE(MAX(sqs.denylisted), false) AS denylisted",
+			want: "COALESCE(BOOL_OR(sqs.denylisted), false) AS denylisted",
+		},
+		{
+			// goqu generates MAX(`c`.`cisa_known_exploit`); backtick→" gives MAX("c"."cisa_known_exploit")
+			name: "double-quoted cisa_known_exploit (goqu-generated, post backtick-conversion)",
+			in:   `MAX("c"."cisa_known_exploit") AS "cisa_known_exploit"`,
+			want: `BOOL_OR("c"."cisa_known_exploit") AS "cisa_known_exploit"`,
+		},
+		{
+			name: "double-quoted denylisted (goqu-generated)",
+			in:   `MAX("c"."denylisted") AS "denylisted"`,
+			want: `BOOL_OR("c"."denylisted") AS "denylisted"`,
+		},
+		{
+			name: "non-boolean MAX — must not match",
+			in:   "MAX(c.cvss_score) AS cvss_score",
+			want: "MAX(c.cvss_score) AS cvss_score",
+		},
+		{
+			name: "passthrough unrelated query",
+			in:   "SELECT id FROM hosts WHERE id = ?",
+			want: "SELECT id FROM hosts WHERE id = ?",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := reMaxDenylisted.ReplaceAllString(tc.in, "BOOL_OR($1)")
+			require.Equal(t, tc.want, result)
+		})
+	}
+}

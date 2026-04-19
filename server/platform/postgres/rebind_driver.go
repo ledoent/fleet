@@ -33,7 +33,11 @@ var (
 	reFromDual      = regexp.MustCompile(`(?i)\s+FROM\s+DUAL\b`)
 	reSeparator     = regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
 	reTimestamp     = regexp.MustCompile(`\bTIMESTAMP\(([^)]+)\)`)
-	reMaxDenylisted = regexp.MustCompile(`MAX\(([^)]*\.denylisted)\)`)
+	// reMaxDenylisted handles two forms produced by different callers:
+	//   - literal SQL (goqu.L): MAX(stats.denylisted) — unquoted identifiers
+	//   - goqu expression: MAX("c"."cisa_known_exploit") — double-quoted after backtick→" conversion
+	// The pattern uses "?\w+"? to match both quoted and unquoted table aliases.
+	reMaxDenylisted = regexp.MustCompile(`MAX\(("?\w+"?\."?(?:denylisted|cisa_known_exploit)"?)\)`)
 	// MAX(prof_*) columns from boolean subqueries (android/apple MDM profile status aggregation)
 	reMaxBooleanCols        = regexp.MustCompile(`MAX\(((?:prof|fv|rl|decl)_(?:pending|failed|verifying|verified)|android_prof_(?:pending|failed|verifying|verified))\)`)
 	reLimitTrailing         = regexp.MustCompile(`(?i)\s+LIMIT\s+\d+\s*$`)
