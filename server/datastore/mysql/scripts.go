@@ -531,7 +531,7 @@ func (ds *Datastore) UpdateScriptContents(ctx context.Context, scriptID uint, sc
 		if newContentID != oldContentID {
 			updateStmt := `
 				UPDATE scripts
-				SET script_content_id = ?
+				SET script_content_id = ?, updated_at = NOW()
 				WHERE id = ?
 			`
 			_, err = tx.ExecContext(ctx, updateStmt, newContentID, scriptID)
@@ -642,7 +642,7 @@ VALUES
 		if IsDuplicate(err) {
 			// name already exists for this team/global
 			err = alreadyExists("Script", script.Name)
-		} else if isChildForeignKeyError(err) {
+		} else if dialect.IsForeignKey(err) {
 			// team does not exist
 			err = foreignKey("scripts", fmt.Sprintf("team_id=%v", script.TeamID))
 		}
@@ -833,18 +833,18 @@ func (ds *Datastore) DeleteScript(ctx context.Context, id uint) error {
 			return ctxerr.Wrapf(ctx, err, "cancel upcoming pending script executions")
 		}
 
+		// Proactively check for policy references before deleting, so that
+		// the error fires on both MySQL (FK-enforced) and PG (no FK in schema).
+		var policyCount int
+		if err := sqlx.GetContext(ctx, tx, &policyCount, `SELECT COUNT(*) FROM policies WHERE script_id = ?`, id); err != nil {
+			return ctxerr.Wrapf(ctx, err, "getting reference from policies")
+		}
+		if policyCount > 0 {
+			return ctxerr.Wrap(ctx, errDeleteScriptWithAssociatedPolicy, "delete script")
+		}
+
 		_, err = tx.ExecContext(ctx, `DELETE FROM scripts WHERE id = ?`, id)
 		if err != nil {
-			if ds.dialect.IsForeignKey(err) {
-				// Check if the script is referenced by a policy automation.
-				var count int
-				if err := sqlx.GetContext(ctx, tx, &count, `SELECT COUNT(*) FROM policies WHERE script_id = ?`, id); err != nil {
-					return ctxerr.Wrapf(ctx, err, "getting reference from policies")
-				}
-				if count > 0 {
-					return ctxerr.Wrap(ctx, errDeleteScriptWithAssociatedPolicy, "delete script")
-				}
-			}
 			return ctxerr.Wrap(ctx, err, "delete script")
 		}
 
@@ -1047,12 +1047,12 @@ WITH all_latest_activities AS (
 	-- latest from upcoming_activities
 	SELECT * FROM (
 		SELECT
-			NULL as id,
+			CAST(NULL AS SIGNED) as id,
 			ua.host_id,
 			sua.script_id,
 			ua.execution_id,
 			ua.created_at,
-			NULL as exit_code,
+			CAST(NULL AS SIGNED) as exit_code,
 			'upcoming' as source,
 			ROW_NUMBER() OVER (
 				PARTITION BY sua.script_id
@@ -1230,7 +1230,7 @@ INSERT INTO
   )
 VALUES
   (?, ?, ?, ?)
-` + ds.dialect.OnDuplicateKey("id", "script_content_id = VALUES(script_content_id), id=LAST_INSERT_ID(id)")
+` + ds.dialect.OnDuplicateKey("global_or_team_id, name", "script_content_id = VALUES(script_content_id), id=LAST_INSERT_ID(id)")
 
 	const clearPendingExecutionsWithObsoleteScriptHSR = `DELETE FROM host_script_results WHERE
 		exit_code IS NULL AND (sync_request = 0 OR created_at >= NOW() - INTERVAL ? SECOND)
@@ -2462,7 +2462,7 @@ func (ds *Datastore) batchExecuteScript(ctx context.Context, userID *uint, scrip
 		_, err := tx.ExecContext(
 			ctx,
 			`INSERT INTO batch_activities (execution_id, script_id, status, activity_type, num_targeted, started_at) VALUES (?, ?, ?, ?, ?, NOW()) `+
-				ds.dialect.OnDuplicateKey("id", "status = VALUES(status), started_at = VALUES(started_at)"),
+				ds.dialect.OnDuplicateKey("execution_id", "status = VALUES(status), started_at = VALUES(started_at)"),
 			batchExecID,
 			script.ID,
 			fleet.ScheduledBatchExecutionStarted,
@@ -2494,7 +2494,7 @@ func (ds *Datastore) batchExecuteScript(ctx context.Context, userID *uint, scrip
 				:host_id,
 				:host_execution_id,
 				:error
-			) ` + ds.dialect.OnDuplicateKey("id", "host_execution_id = VALUES(host_execution_id), error = VALUES(error)")
+			) ` + ds.dialect.OnDuplicateKey("batch_execution_id, host_id", "host_execution_id = VALUES(host_execution_id), error = VALUES(error)")
 
 		if _, err := sqlx.NamedExecContext(ctx, tx, insertStmt, args); err != nil {
 			return ctxerr.Wrap(ctx, err, "associating script executions with batch job")
@@ -2602,7 +2602,7 @@ SELECT
 FROM
 	batch_activity_host_results bahr
 LEFT JOIN
-	host_script_results hsr ON bahr.host_execution_id = hsr.execution_id -- I think?
+	host_script_results hsr ON bahr.host_execution_id = hsr.execution_id
 WHERE
 	bahr.batch_execution_id = ?
 AND
@@ -2924,7 +2924,7 @@ FROM (
   LEFT JOIN jobs j
          ON j.id = ba.job_id
   WHERE ( %s ) AND ba.status <> 'finished'
-  GROUP BY ba.id
+  GROUP BY ba.id, s.name, s.global_or_team_id, j.not_before
 ) AS u
 ORDER BY
   %s

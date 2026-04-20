@@ -2721,7 +2721,7 @@ CREATE TABLE public.mdm_windows_enrollments (
     host_uuid character varying(255) DEFAULT ''::character varying NOT NULL,
     credentials_hash bytea,
     credentials_acknowledged boolean DEFAULT false NOT NULL,
-    awaiting_configuration boolean DEFAULT false NOT NULL,
+    awaiting_configuration smallint DEFAULT 0 NOT NULL,
     awaiting_configuration_at timestamp without time zone
 );
 
@@ -3093,6 +3093,7 @@ CREATE VIEW public.nano_view_queue AS
     c.command_uuid,
     c.request_type,
     c.command,
+    c.name,
     r.updated_at AS result_updated_at,
     r.status,
     r.result

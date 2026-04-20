@@ -49,10 +49,10 @@ func main() {
 	// they're transient and owned by the PG swap-table helpers. Excluding
 	// them is intentional, not drift.
 	swapSuffix := regexp.MustCompile(`_swap$`)
-	pgFiltered := map[string]bool{}
+	pgFiltered := map[string]struct{}{}
 	for t := range pgTables {
 		if !swapSuffix.MatchString(t) {
-			pgFiltered[t] = true
+			pgFiltered[t] = struct{}{}
 		}
 	}
 
@@ -100,9 +100,9 @@ func main() {
 	os.Exit(1)
 }
 
-func loadAllowlist(path string) (mysqlOnly, pgOnly map[string]bool, err error) {
-	mysqlOnly = map[string]bool{}
-	pgOnly = map[string]bool{}
+func loadAllowlist(path string) (mysqlOnly, pgOnly map[string]struct{}, err error) {
+	mysqlOnly = map[string]struct{}{}
+	pgOnly = map[string]struct{}{}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -124,9 +124,9 @@ func loadAllowlist(path string) (mysqlOnly, pgOnly map[string]bool, err error) {
 		tag, table := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 		switch tag {
 		case "mysql-only":
-			mysqlOnly[table] = true
+			mysqlOnly[table] = struct{}{}
 		case "pg-only":
-			pgOnly[table] = true
+			pgOnly[table] = struct{}{}
 		default:
 			return nil, nil, fmt.Errorf("unknown allowlist tag %q in line %q (expected mysql-only or pg-only)", tag, line)
 		}
@@ -134,10 +134,12 @@ func loadAllowlist(path string) (mysqlOnly, pgOnly map[string]bool, err error) {
 	return mysqlOnly, pgOnly, sc.Err()
 }
 
-func diffExcluding(a, b, allow map[string]bool) []string {
+func diffExcluding(a, b, allow map[string]struct{}) []string {
 	var out []string
 	for k := range a {
-		if !b[k] && !allow[k] {
+		_, inB := b[k]
+		_, inAllow := allow[k]
+		if !inB && !inAllow {
 			out = append(out, k)
 		}
 	}
@@ -145,12 +147,14 @@ func diffExcluding(a, b, allow map[string]bool) []string {
 	return out
 }
 
-func staleAllowlist(allow, a, b map[string]bool) []string {
+func staleAllowlist(allow, a, b map[string]struct{}) []string {
 	var out []string
 	for k := range allow {
+		_, inA := a[k]
+		_, inB := b[k]
 		// Allowlist entry is stale when the table either exists in both sides
 		// (no drift) or doesn't exist in the side it claims to be "only" in.
-		if !a[k] || b[k] {
+		if !inA || inB {
 			out = append(out, k)
 		}
 	}
@@ -158,15 +162,14 @@ func staleAllowlist(allow, a, b map[string]bool) []string {
 	return out
 }
 
-func extract(path string, re *regexp.Regexp) (map[string]bool, error) {
+func extract(path string, re *regexp.Regexp) (map[string]struct{}, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]bool{}
+	out := map[string]struct{}{}
 	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
-		out[m[1]] = true
+		out[m[1]] = struct{}{}
 	}
 	return out, nil
 }
-

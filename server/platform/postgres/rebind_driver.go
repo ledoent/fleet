@@ -401,7 +401,7 @@ func rebindQuery(query string) string {
 	// e.g., "INTERVAL 5 MINUTE" → "INTERVAL '5 minutes'"
 	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
 		query = reIntervalLiteral[unit].ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
-		query = reIntervalPlaceholder[unit].ReplaceAllString(query, "? * INTERVAL '1 "+strings.ToLower(unit)+"'")
+		query = reIntervalPlaceholder[unit].ReplaceAllString(query, "(?::bigint) * INTERVAL '1 "+strings.ToLower(unit)+"'")
 	}
 	// MySQL allows LIMIT on UPDATE/DELETE; PG does not.
 	uq := strings.ToUpper(strings.TrimLeft(query, " \t\n"))
@@ -429,8 +429,25 @@ func rebindQuery(query string) string {
 	var b strings.Builder
 	b.Grow(len(query) + 10)
 	n := 1
+	inLineComment := false
+	prevDash := false
 	for _, r := range query {
-		if r == '?' {
+		if r == '\n' {
+			inLineComment = false
+			prevDash = false
+			b.WriteRune(r)
+			continue
+		}
+		if !inLineComment && r == '-' {
+			if prevDash {
+				inLineComment = true
+			}
+			prevDash = !prevDash
+			b.WriteRune(r)
+			continue
+		}
+		prevDash = false
+		if r == '?' && !inLineComment {
 			b.WriteByte('$')
 			if n < 10 {
 				b.WriteByte(byte('0' + n))
@@ -1342,7 +1359,7 @@ func rewriteHex(query string) string {
 			break
 		}
 		inner := query[loc[1] : i-1]
-		replacement := "encode(" + inner + "::bytea, 'hex')"
+		replacement := "upper(encode(" + inner + "::bytea, 'hex'))"
 		query = query[:loc[0]] + replacement + query[i:]
 	}
 	query = strings.ReplaceAll(query, "HEX__SKIP(", "HEX(")

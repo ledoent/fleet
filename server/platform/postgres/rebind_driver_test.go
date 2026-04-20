@@ -256,3 +256,78 @@ func TestRewriteMaxBoolColumns(t *testing.T) {
 		})
 	}
 }
+
+func TestRewriteIntervalPlaceholder(t *testing.T) {
+	// INTERVAL ? UNIT must cast the placeholder to bigint so PG can multiply it
+	// by the fixed interval without a type-inference error.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "INTERVAL ? SECOND gets bigint cast",
+			in:   "created_at >= NOW() - INTERVAL ? SECOND",
+			want: "created_at >= NOW() - ($1::bigint) * INTERVAL '1 second'",
+		},
+		{
+			name: "INTERVAL ? MINUTE gets bigint cast",
+			in:   "ts >= NOW() - INTERVAL ? MINUTE",
+			want: "ts >= NOW() - ($1::bigint) * INTERVAL '1 minute'",
+		},
+		{
+			name: "INTERVAL ? HOUR gets bigint cast",
+			in:   "t >= NOW() - INTERVAL ? HOUR",
+			want: "t >= NOW() - ($1::bigint) * INTERVAL '1 hour'",
+		},
+		{
+			name: "literal INTERVAL N SECOND unchanged (no placeholder)",
+			in:   "created_at >= NOW() - INTERVAL 30 SECOND",
+			want: "created_at >= NOW() - INTERVAL '30 seconds'",
+		},
+		{
+			name: "multiple placeholders — each gets cast",
+			in:   "a >= NOW() - INTERVAL ? SECOND AND b <= NOW() + INTERVAL ? MINUTE",
+			want: "a >= NOW() - ($1::bigint) * INTERVAL '1 second' AND b <= NOW() + ($2::bigint) * INTERVAL '1 minute'",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rebindQuery(tc.in)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestRewriteCastNullAsSigned(t *testing.T) {
+	// CAST(NULL AS SIGNED) is MySQL syntax for a typed NULL integer in UNION branches.
+	// The existing "AS SIGNED)" → "AS integer)" rewrite (line ~327) converts it so
+	// PG gets CAST(NULL AS integer) — a valid typed NULL that resolves UNION type mismatches.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "CAST(NULL AS SIGNED) becomes CAST(NULL AS integer) for PG",
+			in:   "SELECT CAST(NULL AS SIGNED) as id, host_id FROM upcoming_activities",
+			want: "SELECT CAST(NULL AS integer) as id, host_id FROM upcoming_activities",
+		},
+		{
+			name: "multiple occurrences all rewritten",
+			in:   "SELECT CAST(NULL AS SIGNED) as id, CAST(NULL AS SIGNED) as exit_code",
+			want: "SELECT CAST(NULL AS integer) as id, CAST(NULL AS integer) as exit_code",
+		},
+		{
+			name: "no SIGNED cast - unchanged",
+			in:   "SELECT id FROM host_script_results",
+			want: "SELECT id FROM host_script_results",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rebindQuery(tc.in)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
