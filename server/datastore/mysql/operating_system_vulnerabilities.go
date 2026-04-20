@@ -296,7 +296,7 @@ func (ds *Datastore) InsertOSVulnerabilities(ctx context.Context, vulnerabilitie
 		stmt := fmt.Sprintf(`
 			INSERT INTO operating_system_vulnerabilities (operating_system_id, cve, source, resolved_in_version)
 			VALUES %s
-			`+ds.dialect.OnDuplicateKey("id", `
+			`+ds.dialect.OnDuplicateKey("operating_system_id, cve", `
 				source = VALUES(source),
 				resolved_in_version = VALUES(resolved_in_version),
 				updated_at = NOW()
@@ -327,7 +327,7 @@ func (ds *Datastore) InsertOSVulnerability(ctx context.Context, v fleet.OSVulner
 
 	var args []interface{}
 
-	// statement assumes a unique index on (host_id, cve)
+	// statement assumes a unique index on (operating_system_id, cve)
 	sqlStmt := `
 		INSERT INTO operating_system_vulnerabilities (
 			operating_system_id,
@@ -335,7 +335,7 @@ func (ds *Datastore) InsertOSVulnerability(ctx context.Context, v fleet.OSVulner
 			source,
 			resolved_in_version
 		) VALUES (?,?,?,?)
-		` + ds.dialect.OnDuplicateKey("id", `
+		` + ds.dialect.OnDuplicateKey("operating_system_id, cve", `
 			operating_system_id = VALUES(operating_system_id),
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
@@ -344,7 +344,7 @@ func (ds *Datastore) InsertOSVulnerability(ctx context.Context, v fleet.OSVulner
 
 	args = append(args, v.OSID, v.CVE, s, v.ResolvedInVersion)
 
-	if ds.dialect.ReturningID() != "" {
+	if ds.dialect.IsPostgres() {
 		// PostgreSQL: use RETURNING id and xmax to distinguish insert from update.
 		// xmax = 0 means the row was freshly inserted (not updated).
 		var id int64
@@ -622,7 +622,7 @@ func (ds *Datastore) refreshOSVersionVulnerabilities(ctx context.Context) error 
 		JOIN software_cve sc ON sc.software_id = khc.software_id
 		WHERE khc.hosts_count > 0
 		GROUP BY khc.team_id, khc.os_version_id, sc.cve
-		`+ds.dialect.OnDuplicateKey("id", `
+		`+ds.dialect.OnDuplicateKey("(COALESCE(team_id, -1)), os_version_id, cve", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			created_at = VALUES(created_at),
@@ -648,7 +648,7 @@ func (ds *Datastore) refreshOSVersionVulnerabilities(ctx context.Context) error 
 		JOIN software_cve sc ON sc.software_id = khc.software_id
 		WHERE khc.hosts_count > 0
 		GROUP BY khc.os_version_id, sc.cve
-		`+ds.dialect.OnDuplicateKey("id", `
+		`+ds.dialect.OnDuplicateKey("(COALESCE(team_id, -1)), os_version_id, cve", `
 			source = VALUES(source),
 			resolved_in_version = VALUES(resolved_in_version),
 			created_at = VALUES(created_at),
