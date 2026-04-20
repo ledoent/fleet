@@ -55,9 +55,41 @@ var (
 	// Match: COALESCE(<expr>, '0') = '1' → COALESCE(<expr>, '0') IN ('1', 'true')
 	reJSONBoolCoalesce = regexp.MustCompile(`COALESCE\(([^)]+->>'[^']+'),\s*'0'\)\s*=\s*'1'`)
 
+	// FIND_IN_SET(val, col) > 0 → val = ANY(string_to_array(col, ','))
+	// MySQL FIND_IN_SET returns an integer position; PG has no equivalent function.
+	reFindInSet = regexp.MustCompile(`(?i)FIND_IN_SET\(([^,]+),\s*([^)]+)\)\s*>\s*0`)
+
+	// FOR UPDATE removal when LEFT JOIN is present — PG forbids FOR UPDATE on
+	// the nullable side of an outer join.
+	reForUpdateClause = regexp.MustCompile(`(?i)\s+FOR\s+UPDATE\b`)
+
+	// rewriteDeleteUsing — hoisted from function body to avoid per-call compile.
+	reDeleteFromUsing = regexp.MustCompile(`(?is)DELETE\s+FROM\s+(\w+)\s+USING\s+`)
+	reUsingJoinOnWhere = regexp.MustCompile(`(?is)(USING\s+\w+\s+\w+\s+)ON\s+(.*?)\s+WHERE\s+`)
+
+	// rewriteHex — hoisted to avoid per-call compile.
+	reHexFunc = regexp.MustCompile(`(?i)\bHEX\(`)
+
+	// rewriteGroupConcat — hoisted to avoid per-call compile.
+	reGroupConcatFunc    = regexp.MustCompile(`(?i)GROUP_CONCAT\(`)
+	reGroupConcatSep     = regexp.MustCompile(`(?i)\s+SEPARATOR\s+'([^']*)'`)
+	reGroupConcatOrderBy = regexp.MustCompile(`(?i)\s+ORDER\s+BY\s+.+`)
+
+	// rewriteUpdateJoin — hoisted to avoid per-call compile.
+	reUpdateJoinAliased   = regexp.MustCompile(`(?is)UPDATE\s+(\S+)\s+(\w+)\s+((?:(?:INNER\s+)?JOIN\s+.+?\s+ON\s+.+?\s+)+)\bSET\b\s+(.+)`)
+	reUpdateJoinUnaliased = regexp.MustCompile(`(?is)UPDATE\s+(\S+)\s+((?:(?:INNER\s+)?JOIN\s+.+?\s+ON\s+.+?\s+)+)\bSET\b\s+(.+)`)
+	reUpdateSetWhere      = regexp.MustCompile(`(?i)\sWHERE\s`)
+
+	// rewriteOnDuplicateKey / resolveOnConflictAmbiguity — hoisted to avoid per-call compile.
+	reValuesCol          = regexp.MustCompile("(?i)VALUES\\(`?(\\w+)`?\\)")
+	reInsertIntoTable    = regexp.MustCompile("(?i)INSERT\\s+INTO\\s+`?(\\w+)`?")
+	reExcludedCol        = regexp.MustCompile(`EXCLUDED\.(\w+)`)
+	reOnConflictSetCol   = regexp.MustCompile(`(?:^|,)\s*(\w+)\s*=`)
+
 	// Per-unit INTERVAL regexes (SECOND, MINUTE, HOUR, DAY)
 	reIntervalLiteral     = map[string]*regexp.Regexp{}
 	reIntervalPlaceholder = map[string]*regexp.Regexp{}
+	reIntervalDateAdd     = map[string]*regexp.Regexp{} // for DATE_ADD/DATE_SUB rewrites
 )
 
 // qualifiedBoolCols lists alias.col forms of boolean columns that appear in queries.
@@ -107,6 +139,7 @@ func init() {
 	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
 		reIntervalLiteral[unit] = regexp.MustCompile(`INTERVAL\s+(\d+)\s+` + unit)
 		reIntervalPlaceholder[unit] = regexp.MustCompile(`INTERVAL\s+(\?)\s+` + unit)
+		reIntervalDateAdd[unit] = regexp.MustCompile(`(?i)INTERVAL\s+(.+)\s+` + unit)
 	}
 }
 
@@ -219,8 +252,11 @@ func rebindQuery(query string) string {
 	query = strings.ReplaceAll(query, "IFNULL(", "COALESCE(")
 	// COALESCE(token, '') → COALESCE(token, ''::bytea) — token is bytea in PG,
 	// so the empty-string fallback needs an explicit cast.
+	// Handle bare column and alias-qualified forms (ds.token, hmae.token, etc.).
 	// Also handle checksum which is bytea.
 	query = strings.ReplaceAll(query, "COALESCE(token, '')", "COALESCE(token, ''::bytea)")
+	query = strings.ReplaceAll(query, "COALESCE(ds.token, '')", "COALESCE(ds.token, ''::bytea)")
+	query = strings.ReplaceAll(query, "COALESCE(hmae.token, '')", "COALESCE(hmae.token, ''::bytea)")
 	query = strings.ReplaceAll(query, "COALESCE(checksum, '')", "COALESCE(checksum, ''::bytea)")
 	// UUID_TO_BIN(UUID(), true) → gen_random_uuid() (must come before UUID() replacement)
 	query = reUUIDBinUpper.ReplaceAllString(query, "gen_random_uuid()")
@@ -239,7 +275,9 @@ func rebindQuery(query string) string {
 	query = reBinToUUIDTrue.ReplaceAllString(query, "($1)::text")
 	query = reBinToUUID.ReplaceAllString(query, "($1)::text")
 	// HEX(expr) → encode(expr::bytea, 'hex') — MySQL HEX function
-	query = rewriteHex(query)
+	if strings.Contains(query, "HEX(") {
+		query = rewriteHex(query)
+	}
 	// JSON_SET(col, path, val) → jsonb_set(col, path_array, val)
 	query = rewriteJSONSet(query)
 	// TIMEDIFF(a, b) → (a - b)
@@ -276,9 +314,7 @@ func rebindQuery(query string) string {
 	// Remove FOR UPDATE when LEFT JOIN is present — the SELECT FOR UPDATE semantic is advisory
 	// and removing it doesn't break correctness, only reduces locking.
 	if strings.Contains(query, "FOR UPDATE") && (strings.Contains(query, "LEFT JOIN") || strings.Contains(query, "LEFT OUTER JOIN")) {
-		query = strings.Replace(query, "\nFOR UPDATE", "", 1)
-		query = strings.Replace(query, "\n\t\tFOR UPDATE", "", 1)
-		query = strings.Replace(query, "FOR UPDATE", "", 1)
+		query = reForUpdateClause.ReplaceAllString(query, "")
 	}
 	// MySQL SEPARATOR in GROUP_CONCAT → already handled by dialect, but catch raw usage
 	if strings.Contains(query, "separator") || strings.Contains(query, "SEPARATOR") {
@@ -293,7 +329,9 @@ func rebindQuery(query string) string {
 	query = strings.ReplaceAll(query, "`", `"`)
 	// MySQL DELETE FROM t USING t INNER JOIN → PG DELETE FROM t USING (remove duplicate table)
 	// MySQL requires naming the target table again in USING; PG forbids it.
-	query = rewriteDeleteUsing(query)
+	if strings.Contains(query, "DELETE") && strings.Contains(query, "USING") {
+		query = rewriteDeleteUsing(query)
+	}
 	// MySQL UPDATE t1 JOIN t2 ON ... SET ... → PG UPDATE t1 SET ... FROM t2 WHERE ...
 	if strings.Contains(query, "UPDATE") && strings.Contains(query, "JOIN") && strings.Contains(query, "SET") {
 		query = rewriteUpdateJoin(query)
@@ -374,6 +412,11 @@ func rebindQuery(query string) string {
 	query = strings.ReplaceAll(query, "!pm.passes", "(NOT pm.passes)::int")
 	// SUM(1 - pm.passes): PG can't subtract boolean from integer; cast to int first
 	query = strings.ReplaceAll(query, "1 - pm.passes", "1 - (pm.passes)::int")
+	// Raw FIND_IN_SET(val, col) > 0 in queries that don't go through dialect helpers.
+	// MySQL: FIND_IN_SET(?, q.platform) > 0 — PG has no FIND_IN_SET function.
+	if strings.Contains(query, "FIND_IN_SET(") {
+		query = reFindInSet.ReplaceAllString(query, "$1 = ANY(string_to_array($2, ','))")
+	}
 	// Fix FIND_IN_SET/ANY result compared to integer: PG = ANY() returns boolean
 	// MySQL FIND_IN_SET returns integer, so code uses <> 0 / != 0 checks
 	// PG = ANY() returns boolean, making these comparisons invalid
@@ -698,8 +741,7 @@ func rewriteDateAddSub(query string, unit string, op string) string {
 		intervalPart := strings.TrimSpace(query[commaPos+1 : i-1])
 
 		// Parse: INTERVAL <value> <UNIT>
-		intervalRe := regexp.MustCompile(`(?i)INTERVAL\s+(.+)\s+` + unit)
-		m := intervalRe.FindStringSubmatch(intervalPart)
+		m := reIntervalDateAdd[unit].FindStringSubmatch(intervalPart)
 		if m == nil {
 			// This DATE_ADD/SUB doesn't use this unit, skip past it
 			return query[:i] + rewriteDateAddSub(query[i:], unit, op)
@@ -752,15 +794,15 @@ func rewriteUnhex(query string) string {
 // PG:     DELETE FROM t USING j alias WHERE <join_cond> AND <filter>
 func rewriteDeleteUsing(query string) string {
 	// Extract the target table from DELETE FROM <table>
-	delRe := regexp.MustCompile(`(?is)DELETE\s+FROM\s+(\w+)\s+USING\s+`)
-	m := delRe.FindStringSubmatch(query)
+	m := reDeleteFromUsing.FindStringSubmatch(query)
 	if m == nil {
 		return query
 	}
 	tableName := m[1]
 
 	// Check if the USING clause repeats the same table name followed by INNER JOIN
-	// Build a pattern: USING <tableName> INNER JOIN (case-insensitive)
+	// Build a pattern: USING <tableName> INNER JOIN (case-insensitive).
+	// This regex depends on tableName so cannot be hoisted to package level.
 	usingDupRe := regexp.MustCompile(`(?is)USING\s+` + regexp.QuoteMeta(tableName) + `\s+INNER\s+JOIN\s+`)
 	if !usingDupRe.MatchString(query) {
 		return query
@@ -771,8 +813,7 @@ func rewriteDeleteUsing(query string) string {
 
 	// Step 2: Convert "ON <join_cond> WHERE" → "WHERE <join_cond> AND"
 	// The ON clause from the removed INNER JOIN must merge into WHERE.
-	reOnWhere := regexp.MustCompile(`(?is)(USING\s+\w+\s+\w+\s+)ON\s+(.*?)\s+WHERE\s+`)
-	query = reOnWhere.ReplaceAllString(query, "${1}WHERE ${2} AND ")
+	query = reUsingJoinOnWhere.ReplaceAllString(query, "${1}WHERE ${2} AND ")
 
 	return query
 }
@@ -1006,10 +1047,6 @@ func castPlaceholdersInArg(arg string) string {
 	if strings.Contains(strings.ToUpper(trimmed), "SELECT ") {
 		return arg
 	}
-	// For other simple expressions with ?, cast them
-	if trimmed == "?" {
-		return strings.Replace(arg, "?", "?::text", 1)
-	}
 	return arg
 }
 
@@ -1229,8 +1266,7 @@ func rewriteField(query string) string {
 // in the VALUE expressions (right side of =) with the target table name.
 func resolveOnConflictAmbiguity(query string) string {
 	// Extract target table name from INSERT INTO <table>
-	insertRe := regexp.MustCompile(`(?i)INSERT\s+INTO\s+"?(\w+)"?`)
-	m := insertRe.FindStringSubmatch(query)
+	m := reInsertIntoTable.FindStringSubmatch(query)
 	if m == nil {
 		return query
 	}
@@ -1247,8 +1283,7 @@ func resolveOnConflictAmbiguity(query string) string {
 	setClause := query[setStart:]
 
 	// Collect column names from EXCLUDED references — these are the ambiguous ones
-	excludedRe := regexp.MustCompile(`EXCLUDED\.(\w+)`)
-	matches := excludedRe.FindAllStringSubmatch(setClause, -1)
+	matches := reExcludedCol.FindAllStringSubmatch(setClause, -1)
 	if len(matches) == 0 {
 		return query
 	}
@@ -1257,8 +1292,7 @@ func resolveOnConflictAmbiguity(query string) string {
 		cols[m[1]] = true
 	}
 	// Also add SET target names
-	setTargetRe := regexp.MustCompile(`(?:^|,)\s*(\w+)\s*=`)
-	for _, m := range setTargetRe.FindAllStringSubmatch(setClause, -1) {
+	for _, m := range reOnConflictSetCol.FindAllStringSubmatch(setClause, -1) {
 		cols[m[1]] = true
 	}
 
@@ -1329,22 +1363,15 @@ func isWordChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
-// rewriteHex rewrites MySQL HEX(expr) → PG encode(expr, 'hex')
+// rewriteHex rewrites MySQL HEX(expr) → PG upper(encode(expr::bytea, 'hex')).
+// Caller guarantees rewriteUnhex has already run, so no UNHEX( remains.
 func rewriteHex(query string) string {
-	// Only match standalone HEX( not UNHEX(
-	re := regexp.MustCompile(`(?i)\bHEX\(`)
 	for {
-		loc := re.FindStringIndex(query)
+		loc := reHexFunc.FindStringIndex(query)
 		if loc == nil {
 			break
 		}
-		// Make sure it's not UNHEX
-		if loc[0] > 0 && (query[loc[0]-1] == 'N' || query[loc[0]-1] == 'n') {
-			// Skip this match — it's part of UNHEX
-			query = query[:loc[0]] + "HEX__SKIP(" + query[loc[1]:]
-			continue
-		}
-		// Find matching close paren
+		// Find the matching close paren using paren-balancing.
 		depth := 1
 		i := loc[1]
 		for i < len(query) && depth > 0 {
@@ -1359,10 +1386,8 @@ func rewriteHex(query string) string {
 			break
 		}
 		inner := query[loc[1] : i-1]
-		replacement := "upper(encode(" + inner + "::bytea, 'hex'))"
-		query = query[:loc[0]] + replacement + query[i:]
+		query = query[:loc[0]] + "upper(encode(" + inner + "::bytea, 'hex'))" + query[i:]
 	}
-	query = strings.ReplaceAll(query, "HEX__SKIP(", "HEX(")
 	return query
 }
 
@@ -1498,13 +1523,10 @@ func rewriteOnDuplicateKey(query string) string {
 		return query
 	}
 	updateClause := strings.TrimSpace(query[idx+len(marker):])
-	// Rewrite VALUES(col) → EXCLUDED.col
-	re := regexp.MustCompile(`(?i)VALUES\(` + "`?" + `(\w+)` + "`?" + `\)`)
-	updateClause = re.ReplaceAllString(updateClause, "EXCLUDED.$1")
+	updateClause = reValuesCol.ReplaceAllString(updateClause, "EXCLUDED.$1")
 
 	// Extract table name from INSERT INTO <table>
-	tableRe := regexp.MustCompile(`(?i)INSERT\s+INTO\s+` + "`?" + `(\w+)` + "`?")
-	m := tableRe.FindStringSubmatch(query)
+	m := reInsertIntoTable.FindStringSubmatch(query)
 	conflictTarget := ""
 	if m != nil {
 		tableName := strings.ToLower(m[1])
@@ -1526,13 +1548,12 @@ func rewriteOnDuplicateKey(query string) string {
 // Also handles GROUP_CONCAT(expr SEPARATOR 'sep') → STRING_AGG(expr::text, 'sep')
 // And GROUP_CONCAT(DISTINCT expr) → STRING_AGG(DISTINCT expr::text, ',')
 func rewriteGroupConcat(query string) string {
-	re := regexp.MustCompile(`(?i)GROUP_CONCAT\(`)
 	for {
-		loc := re.FindStringIndex(query)
+		loc := reGroupConcatFunc.FindStringIndex(query)
 		if loc == nil {
 			break
 		}
-		// Find matching close paren
+		// Find matching close paren using paren-balancing.
 		depth := 1
 		i := loc[1]
 		for i < len(query) && depth > 0 {
@@ -1548,16 +1569,13 @@ func rewriteGroupConcat(query string) string {
 		}
 		inner := strings.TrimSpace(query[loc[1] : i-1])
 		sep := ","
-		// Check for SEPARATOR clause
-		sepRe := regexp.MustCompile(`(?i)\s+SEPARATOR\s+'([^']*)'`)
-		if m := sepRe.FindStringSubmatchIndex(inner); m != nil {
+		if m := reGroupConcatSep.FindStringSubmatchIndex(inner); m != nil {
 			sep = inner[m[2]:m[3]]
 			inner = strings.TrimSpace(inner[:m[0]])
 		}
-		// Check for ORDER BY clause (remove it for STRING_AGG — PG STRING_AGG has its own ORDER BY)
-		orderRe := regexp.MustCompile(`(?i)\s+ORDER\s+BY\s+.+`)
+		// PG STRING_AGG supports ORDER BY inside the aggregate; preserve it.
 		orderClause := ""
-		if m := orderRe.FindStringIndex(inner); m != nil {
+		if m := reGroupConcatOrderBy.FindStringIndex(inner); m != nil {
 			orderClause = " " + strings.TrimSpace(inner[m[0]:])
 			inner = strings.TrimSpace(inner[:m[0]])
 		}
@@ -1630,8 +1648,7 @@ func rewriteUpdateJoin(query string) string {
 	// PG:    UPDATE t1 [a] SET assignments FROM t2 b [, t3 c] WHERE cond [AND where]
 
 	// Try aliased form first: UPDATE table alias JOIN ...
-	re := regexp.MustCompile(`(?is)UPDATE\s+(\S+)\s+(\w+)\s+((?:(?:INNER\s+)?JOIN\s+.+?\s+ON\s+.+?\s+)+)\bSET\b\s+(.+)`)
-	m := re.FindStringSubmatch(query)
+	m := reUpdateJoinAliased.FindStringSubmatch(query)
 	var table1, alias1, joinBlock, setAndWhere string
 	if m != nil {
 		// Check if what we captured as "alias" is actually the JOIN keyword
@@ -1646,8 +1663,7 @@ func rewriteUpdateJoin(query string) string {
 		setAndWhere = m[4]
 	} else {
 		// Try unaliased form: UPDATE table JOIN ... (no alias)
-		reNoAlias := regexp.MustCompile(`(?is)UPDATE\s+(\S+)\s+((?:(?:INNER\s+)?JOIN\s+.+?\s+ON\s+.+?\s+)+)\bSET\b\s+(.+)`)
-		m2 := reNoAlias.FindStringSubmatch(query)
+		m2 := reUpdateJoinUnaliased.FindStringSubmatch(query)
 		if m2 == nil {
 			return query
 		}
@@ -1666,7 +1682,7 @@ func rewriteUpdateJoin(query string) string {
 
 	// Split SET clause from WHERE clause
 	var setClause, whereClause string
-	whereIdx := regexp.MustCompile(`(?i)\sWHERE\s`).FindStringIndex(setAndWhere)
+	whereIdx := reUpdateSetWhere.FindStringIndex(setAndWhere)
 	if whereIdx != nil {
 		setClause = strings.TrimSpace(setAndWhere[:whereIdx[0]])
 		whereClause = strings.TrimSpace(setAndWhere[whereIdx[1]:])

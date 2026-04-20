@@ -331,3 +331,61 @@ func TestRewriteCastNullAsSigned(t *testing.T) {
 		})
 	}
 }
+
+func TestRewriteFindInSet(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "FIND_IN_SET(?, col) > 0 rewrites to = ANY",
+			in:   "SELECT id FROM queries q WHERE (q.platform = '' OR FIND_IN_SET(?, q.platform) > 0)",
+			want: "SELECT id FROM queries q WHERE (q.platform = '' OR $1 = ANY(string_to_array(q.platform, ',')))",
+		},
+		{
+			name: "no FIND_IN_SET — passthrough",
+			in:   "SELECT id FROM hosts WHERE id = ?",
+			want: "SELECT id FROM hosts WHERE id = $1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, rebindQuery(tc.in))
+		})
+	}
+}
+
+func TestRewriteCoalesceAliasedToken(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "bare token gets bytea cast",
+			in:   "SELECT COALESCE(token, '') AS token FROM host_mdm_apple_declarations",
+			want: "SELECT COALESCE(token, ''::bytea) AS token FROM host_mdm_apple_declarations",
+		},
+		{
+			name: "ds.token gets bytea cast",
+			in:   "SELECT COALESCE(ds.token, '') as token FROM install_queue ds",
+			want: "SELECT COALESCE(ds.token, ''::bytea) as token FROM install_queue ds",
+		},
+		{
+			name: "hmae.token gets bytea cast",
+			in:   "SELECT COALESCE(hmae.token, '') as token FROM host_mdm_apple_enrollments hmae",
+			want: "SELECT COALESCE(hmae.token, ''::bytea) as token FROM host_mdm_apple_enrollments hmae",
+		},
+		{
+			name: "unrelated COALESCE(name, '') unchanged",
+			in:   "SELECT COALESCE(name, '') AS name FROM hosts",
+			want: "SELECT COALESCE(name, '') AS name FROM hosts",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, rebindQuery(tc.in))
+		})
+	}
+}
