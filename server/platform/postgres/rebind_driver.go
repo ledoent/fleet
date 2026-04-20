@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -135,18 +136,32 @@ var allBoolCols = func() []string {
 	return out
 }()
 
+// Per-table-name regex caches for rewrites that embed the table name in the pattern.
+// sync.Map is used because rebindQuery is called concurrently from request goroutines.
+var (
+	usingDupReCache  sync.Map // map[string]*regexp.Regexp, keyed by table name
+	setClauseReCache sync.Map // map[string]*regexp.Regexp, keyed by qualifier
+)
+
 func init() {
 	for _, unit := range []string{"SECOND", "MINUTE", "HOUR", "DAY"} {
 		reIntervalLiteral[unit] = regexp.MustCompile(`INTERVAL\s+(\d+)\s+` + unit)
 		reIntervalPlaceholder[unit] = regexp.MustCompile(`INTERVAL\s+(\?)\s+` + unit)
 		reIntervalDateAdd[unit] = regexp.MustCompile(`(?i)INTERVAL\s+(.+)\s+` + unit)
 	}
+	sql.Register("pgx-rebind", &rebindDriver{})
 }
 
-func init() {
-	// Register "pgx-rebind" as a wrapper driver that auto-rewrites ? → $N.
-	// This allows MySQL-style ? placeholders to work transparently with PG.
-	sql.Register("pgx-rebind", &rebindDriver{})
+// getOrCompile returns a cached compiled regex for the given key and pattern,
+// compiling it on first use. Concurrent callers are safe; at worst two goroutines
+// compile the same regex and one result is discarded.
+func getOrCompile(cache *sync.Map, key, pattern string) *regexp.Regexp {
+	if v, ok := cache.Load(key); ok {
+		return v.(*regexp.Regexp)
+	}
+	re := regexp.MustCompile(pattern)
+	v, _ := cache.LoadOrStore(key, re)
+	return v.(*regexp.Regexp)
 }
 
 type rebindDriver struct{}
@@ -800,10 +815,10 @@ func rewriteDeleteUsing(query string) string {
 	}
 	tableName := m[1]
 
-	// Check if the USING clause repeats the same table name followed by INNER JOIN
-	// Build a pattern: USING <tableName> INNER JOIN (case-insensitive).
-	// This regex depends on tableName so cannot be hoisted to package level.
-	usingDupRe := regexp.MustCompile(`(?is)USING\s+` + regexp.QuoteMeta(tableName) + `\s+INNER\s+JOIN\s+`)
+	// Check if the USING clause repeats the same table name followed by INNER JOIN.
+	// The regex embeds tableName so it's cached per table name rather than recompiled each call.
+	usingDupRe := getOrCompile(&usingDupReCache, tableName,
+		`(?is)USING\s+`+regexp.QuoteMeta(tableName)+`\s+INNER\s+JOIN\s+`)
 	if !usingDupRe.MatchString(query) {
 		return query
 	}
@@ -1695,12 +1710,13 @@ func rewriteUpdateJoin(query string) string {
 		allConditions += " AND " + whereClause
 	}
 
-	// PG UPDATE SET requires bare column names — strip table/alias qualifiers
+	// PG UPDATE SET requires bare column names — strip table/alias qualifiers.
+	// The regex embeds the qualifier so it's cached rather than recompiled each call.
 	qualifier := alias1
 	if qualifier == "" {
 		qualifier = table1
 	}
-	setClause = regexp.MustCompile(`\b`+regexp.QuoteMeta(qualifier)+`\.(\w+)\s*=`).
+	setClause = getOrCompile(&setClauseReCache, qualifier, `\b`+regexp.QuoteMeta(qualifier)+`\.(\w+)\s*=`).
 		ReplaceAllString(setClause, "$1 =")
 
 	if alias1 != "" {

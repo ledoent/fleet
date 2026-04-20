@@ -389,3 +389,104 @@ func TestRewriteCoalesceAliasedToken(t *testing.T) {
 		})
 	}
 }
+
+func TestRewriteDeleteUsing(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "no USING clause — passthrough",
+			in:   "DELETE FROM hosts WHERE id = ?",
+			want: "DELETE FROM hosts WHERE id = $1",
+		},
+		{
+			name: "duplicate table in USING removed and ON merged into WHERE",
+			in:   "DELETE FROM host_software USING host_software INNER JOIN hosts h ON host_software.host_id = h.id WHERE h.platform = ?",
+			want: "DELETE FROM host_software USING hosts h WHERE host_software.host_id = h.id AND h.platform = $1",
+		},
+		{
+			name: "DELETE FROM with USING a different table — no rewrite",
+			in:   "DELETE FROM host_software USING hosts WHERE host_software.host_id = hosts.id AND hosts.id = ?",
+			want: "DELETE FROM host_software USING hosts WHERE host_software.host_id = hosts.id AND hosts.id = $1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, rebindQuery(tc.in))
+		})
+	}
+}
+
+func TestRewriteGroupConcat(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "simple GROUP_CONCAT",
+			in:   "SELECT GROUP_CONCAT(name) FROM hosts",
+			want: "SELECT STRING_AGG(name::text, ',') FROM hosts",
+		},
+		{
+			name: "GROUP_CONCAT with SEPARATOR",
+			in:   "SELECT GROUP_CONCAT(name SEPARATOR '|') FROM hosts",
+			want: "SELECT STRING_AGG(name::text, '|') FROM hosts",
+		},
+		{
+			name: "GROUP_CONCAT with ORDER BY",
+			in:   "SELECT GROUP_CONCAT(name ORDER BY name ASC) FROM hosts",
+			want: "SELECT STRING_AGG(name::text, ',' ORDER BY name ASC) FROM hosts",
+		},
+		{
+			name: "GROUP_CONCAT with ORDER BY and SEPARATOR",
+			in:   "SELECT GROUP_CONCAT(name ORDER BY name ASC SEPARATOR ';') FROM hosts",
+			want: "SELECT STRING_AGG(name::text, ';' ORDER BY name ASC) FROM hosts",
+		},
+		{
+			name: "no GROUP_CONCAT — passthrough",
+			in:   "SELECT name FROM hosts WHERE id = ?",
+			want: "SELECT name FROM hosts WHERE id = $1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, rebindQuery(tc.in))
+		})
+	}
+}
+
+func TestResolveOnConflictAmbiguity(t *testing.T) {
+	// resolveOnConflictAmbiguity qualifies bare column refs in the DO UPDATE SET
+	// value side when EXCLUDED refs are present. It is called directly here since
+	// rebindQuery only triggers it when CASE WHEN/COALESCE appears in the SET clause.
+
+	t.Run("no ON CONFLICT — passthrough", func(t *testing.T) {
+		in := "INSERT INTO hosts (id, name) VALUES (?, ?)"
+		require.Equal(t, in, resolveOnConflictAmbiguity(in))
+	})
+
+	t.Run("no EXCLUDED refs — early return", func(t *testing.T) {
+		in := "INSERT INTO hosts (id, name) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET name = name"
+		require.Equal(t, in, resolveOnConflictAmbiguity(in))
+	})
+
+	t.Run("EXCLUDED only — no bare refs to qualify", func(t *testing.T) {
+		in := "INSERT INTO hosts (id, name) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name"
+		require.Equal(t, in, resolveOnConflictAmbiguity(in))
+	})
+
+	t.Run("bare col in CASE WHEN ELSE branch gets table-qualified", func(t *testing.T) {
+		in := "INSERT INTO hosts (id, name) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET name = CASE WHEN EXCLUDED.name != '' THEN EXCLUDED.name ELSE name END"
+		want := "INSERT INTO hosts (id, name) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET name = CASE WHEN EXCLUDED.name != '' THEN EXCLUDED.name ELSE hosts.name END"
+		require.Equal(t, want, resolveOnConflictAmbiguity(in))
+	})
+
+	t.Run("via rebindQuery — CASE WHEN triggers disambiguation", func(t *testing.T) {
+		in := "INSERT INTO hosts (id, name) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET name = CASE WHEN EXCLUDED.name != '' THEN EXCLUDED.name ELSE name END"
+		want := "INSERT INTO hosts (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = CASE WHEN EXCLUDED.name != '' THEN EXCLUDED.name ELSE hosts.name END"
+		require.Equal(t, want, rebindQuery(in))
+	})
+}

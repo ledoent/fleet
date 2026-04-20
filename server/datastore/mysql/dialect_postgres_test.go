@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPostgresDialectSQL(t *testing.T) {
@@ -65,6 +66,39 @@ func TestPostgresDialectSQL(t *testing.T) {
 
 	t.Run("JSONAgg", func(t *testing.T) {
 		assert.Equal(t, "jsonb_agg(x)", d.JSONAgg("x"))
+	})
+
+	t.Run("OnDuplicateKey_stripsLastInsertID", func(t *testing.T) {
+		got := d.OnDuplicateKey("id", "name=VALUES(name), id=LAST_INSERT_ID(id)")
+		assert.Equal(t, "ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name", got)
+	})
+
+	t.Run("OnDuplicateKey_onlyLastInsertIDBecomesNoOp", func(t *testing.T) {
+		// When the only assignment is LAST_INSERT_ID(id), a no-op SET is emitted
+		// so that RETURNING id still works (PG requires at least one SET assignment).
+		got := d.OnDuplicateKey("id", "id=LAST_INSERT_ID(id)")
+		assert.Equal(t, "ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id", got)
+	})
+
+	t.Run("ReturningID", func(t *testing.T) {
+		assert.Equal(t, " RETURNING id", d.ReturningID())
+	})
+
+	t.Run("IsPostgres", func(t *testing.T) {
+		assert.True(t, d.IsPostgres())
+	})
+
+	t.Run("CreateTableLike", func(t *testing.T) {
+		assert.Equal(t,
+			"CREATE TABLE IF NOT EXISTS new_table (LIKE src_table INCLUDING ALL)",
+			d.CreateTableLike("new_table", "src_table"))
+	})
+
+	t.Run("AtomicTableSwap", func(t *testing.T) {
+		stmts := d.AtomicTableSwap("hosts", "hosts_new")
+		require.Len(t, stmts, 2)
+		assert.Equal(t, "ALTER TABLE hosts RENAME TO hosts_old", stmts[0])
+		assert.Equal(t, "ALTER TABLE hosts_new RENAME TO hosts", stmts[1])
 	})
 
 	t.Run("GoquDialect", func(t *testing.T) {

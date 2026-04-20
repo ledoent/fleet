@@ -121,7 +121,7 @@ func (ds *Datastore) reader(ctx context.Context) fleet.DBReader {
 // currentDatabaseFn returns the SQL function to get the current database name.
 // MySQL: DATABASE(), PostgreSQL: current_database()
 func (ds *Datastore) currentDatabaseFn() string {
-	if ds.dialect.ReturningID() != "" {
+	if ds.dialect.IsPostgres() {
 		return "current_database()"
 	}
 	return "(SELECT DATABASE())"
@@ -600,14 +600,14 @@ func setupIAMAuthIfNeeded(conf *config.MysqlConfig, opts *common_mysql.DBOptions
 }
 
 func (ds *Datastore) MigrateTables(ctx context.Context) error {
-	if _, ok := ds.dialect.(postgresDialect); ok {
+	if ds.dialect.IsPostgres() {
 		return ds.migratePGBaseline(ctx)
 	}
 	return tables.MigrationClient.Up(ds.writer(ctx).DB, "")
 }
 
 func (ds *Datastore) MigrateData(ctx context.Context) error {
-	if _, ok := ds.dialect.(postgresDialect); ok {
+	if ds.dialect.IsPostgres() {
 		// PG baseline schema includes all data migrations (label seeds, etc.)
 		return nil
 	}
@@ -823,7 +823,7 @@ func (ds *Datastore) loadMigrations(
 // It assumes some deployments may have performed migrations out of order.
 func (ds *Datastore) MigrationStatus(ctx context.Context) (*fleet.MigrationStatus, error) {
 	// For PostgreSQL, the baseline schema is applied atomically — either it's all there or not.
-	if _, ok := ds.dialect.(postgresDialect); ok {
+	if ds.dialect.IsPostgres() {
 		var exists bool
 		err := ds.primary.GetContext(ctx, &exists,
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hosts')`)
@@ -1036,7 +1036,7 @@ func (ds *Datastore) HealthCheck() error {
 	// Check that the primary is reachable and not in read-only mode.
 	// After an AWS Aurora failover the old writer is demoted to a reader;
 	// detecting this lets the health check fail so the orchestrator can restart Fleet.
-	if _, ok := ds.dialect.(postgresDialect); ok {
+	if ds.dialect.IsPostgres() {
 		// PG: check if the server is in recovery (read-only replica)
 		var inRecovery bool
 		if err := ds.primary.QueryRowContext(context.Background(), "SELECT pg_is_in_recovery()").Scan(&inRecovery); err != nil {

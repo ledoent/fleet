@@ -16,12 +16,12 @@ upstream Fleet — see `tools/pgcompat/README.md` for the engineering reference.
 ## Connection configuration
 
 Set the same `FLEET_MYSQL_*` env vars Fleet normally uses; the binary detects PG
-from `FLEET_MYSQL_PROTOCOL=postgres` (or a `postgres://` connection URI). The
+from `FLEET_MYSQL_DRIVER=postgres`. The
 binding role MUST own the schema it operates on — see "Object ownership" below.
 
 ```yaml
 env:
-  - name: FLEET_MYSQL_PROTOCOL
+  - name: FLEET_MYSQL_DRIVER
     value: postgres
   - name: FLEET_MYSQL_ADDRESS
     value: fleet-db-rw.fleet.svc:5432
@@ -191,6 +191,6 @@ before the conversion can ship:
 
 ## Reverting to MySQL
 
-Drop `FLEET_MYSQL_PROTOCOL=postgres` and point the connection at a MySQL host.
+Drop `FLEET_MYSQL_DRIVER=postgres` and point the connection at a MySQL host.
 No data migration is provided in either direction; treat the choice as permanent
 per deployment.

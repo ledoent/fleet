@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/fleetdm/fleet/v4/server/fleet"
-	"github.com/fleetdm/fleet/v4/server/ptr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,8 +77,8 @@ func TestPostgresNewHost(t *testing.T) {
 	ctx := context.Background()
 
 	host, err := ds.NewHost(ctx, &fleet.Host{
-		OsqueryHostID:   ptr.String("pg-test-host"),
-		NodeKey:         ptr.String("pg-test-key"),
+		OsqueryHostID:   new("pg-test-host"),
+		NodeKey:         new("pg-test-key"),
 		UUID:            "pg-test-uuid",
 		Hostname:        "pg-test-hostname",
 		Platform:        "darwin",
@@ -102,8 +101,8 @@ func TestPostgresNewHostViaTestHelper(t *testing.T) {
 
 	// This is how test helpers create hosts - using the test package helper
 	host := &fleet.Host{
-		OsqueryHostID:   ptr.String("pg-helper-host"),
-		NodeKey:         ptr.String("pg-helper-key"),
+		OsqueryHostID:   new("pg-helper-host"),
+		NodeKey:         new("pg-helper-key"),
 		UUID:            "pg-helper-uuid",
 		Hostname:        "pg-helper",
 		Platform:        "darwin",
@@ -140,8 +139,8 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 
 	// --- Host CRUD ---
 	host, err := ds.NewHost(ctx, &fleet.Host{
-		OsqueryHostID:   ptr.String("pg-ops-host-1"),
-		NodeKey:         ptr.String("pg-ops-key-1"),
+		OsqueryHostID:   new("pg-ops-host-1"),
+		NodeKey:         new("pg-ops-key-1"),
 		UUID:            "pg-ops-uuid-1",
 		Hostname:        "pg-ops-hostname-1",
 		Platform:        "darwin",
@@ -180,7 +179,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 
 	// --- Labels ---
 	t.Run("Labels", func(t *testing.T) {
-		labels, err := ds.ListLabels(ctx, fleet.TeamFilter{User: &fleet.User{GlobalRole: ptr.String("admin")}}, fleet.ListOptions{}, false)
+		labels, err := ds.ListLabels(ctx, fleet.TeamFilter{User: &fleet.User{GlobalRole: new("admin")}}, fleet.ListOptions{}, false)
 		if err != nil {
 			t.Logf("FAIL ListLabels: %v", err)
 			return
@@ -237,7 +236,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 			Name:       "pg-test-user",
 			Email:      "pg-test@example.com",
 			Password:   []byte("test-password-hash"),
-			GlobalRole: ptr.String("admin"),
+			GlobalRole: new("admin"),
 		})
 		if err != nil {
 			t.Logf("FAIL NewUser: %v", err)
@@ -268,7 +267,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 
 	// --- Policies ---
 	t.Run("NewGlobalPolicy", func(t *testing.T) {
-		p, err := ds.NewGlobalPolicy(ctx, ptr.Uint(0), fleet.PolicyPayload{
+		p, err := ds.NewGlobalPolicy(ctx, new(uint(0)), fleet.PolicyPayload{
 			Name:  "pg-test-policy",
 			Query: "SELECT 1",
 		})
@@ -336,7 +335,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 
 	// --- ListHosts ---
 	t.Run("ListHosts", func(t *testing.T) {
-		hosts, err := ds.ListHosts(ctx, fleet.TeamFilter{User: &fleet.User{GlobalRole: ptr.String("admin")}}, fleet.HostListOptions{ListOptions: fleet.ListOptions{}})
+		hosts, err := ds.ListHosts(ctx, fleet.TeamFilter{User: &fleet.User{GlobalRole: new("admin")}}, fleet.HostListOptions{ListOptions: fleet.ListOptions{}})
 		if err != nil {
 			t.Logf("FAIL ListHosts: %v", err)
 			return
@@ -346,7 +345,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 
 	// --- CountHosts ---
 	t.Run("CountHosts", func(t *testing.T) {
-		count, err := ds.CountHosts(ctx, fleet.TeamFilter{User: &fleet.User{GlobalRole: ptr.String("admin")}}, fleet.HostListOptions{})
+		count, err := ds.CountHosts(ctx, fleet.TeamFilter{User: &fleet.User{GlobalRole: new("admin")}}, fleet.HostListOptions{})
 		if err != nil {
 			t.Logf("FAIL CountHosts: %v", err)
 			return
@@ -366,7 +365,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 	// --- Targets ---
 	t.Run("CountHostsInTargets", func(t *testing.T) {
 		metrics, err := ds.CountHostsInTargets(ctx,
-			fleet.TeamFilter{User: &fleet.User{GlobalRole: ptr.String("admin")}},
+			fleet.TeamFilter{User: &fleet.User{GlobalRole: new("admin")}},
 			fleet.HostTargets{HostIDs: []uint{host.ID}},
 			time.Now(),
 		)
@@ -429,8 +428,8 @@ func TestPostgresHostSoftwareUpdate(t *testing.T) {
 	ctx := t.Context()
 
 	host, err := ds.NewHost(ctx, &fleet.Host{
-		OsqueryHostID:   ptr.String("pg-sw-host-1"),
-		NodeKey:         ptr.String("pg-sw-key-1"),
+		OsqueryHostID:   new("pg-sw-host-1"),
+		NodeKey:         new("pg-sw-key-1"),
 		UUID:            "pg-sw-uuid-1",
 		Hostname:        "pg-sw-hostname-1",
 		Platform:        "darwin",
