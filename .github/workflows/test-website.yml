@@ -64,6 +64,16 @@ jobs:
       # Get dependencies (including dev deps)
       - run: cd website/ && npm install
 
+      # Audit production dependencies for known vulnerabilities.
+      # --omit=dev excludes build-tooling packages (eslint, grunt, babel, etc.)
+      # that are not installed in production deployments.
+      # continue-on-error: sails-hook-grunt@5 ships pre-bundled node_modules that
+      # npm audit surfaces as production hits even though the package is devDep-only.
+      # The step still runs and prints findings — review output for new runtime vulns.
+      - name: Audit production dependencies
+        continue-on-error: true
+        run: cd website/ && npm audit --audit-level=high --omit=dev
+
       # Run sanity checks
       - run: cd website/ && npm test
 
