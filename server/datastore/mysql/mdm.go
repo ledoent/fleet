@@ -1528,7 +1528,7 @@ func batchSetProfileLabelAssociationsDB(
               (%s_profile_uuid, label_id, label_name, exclude, require_all)
           VALUES
               %s
-          ` + dialect.OnDuplicateKey("id", `
+          ` + dialect.OnDuplicateKey("%[1]s_profile_uuid, label_name", `
               label_id = VALUES(label_id),
               exclude = VALUES(exclude),
 			  require_all = VALUES(require_all)`) + `
@@ -2124,7 +2124,7 @@ func batchSetProfileVariableAssociationsDB(
 			)
 			VALUES %s
 		`, platformPrefix, strings.TrimSuffix(valuePart, ",")) +
-			dialect.OnDuplicateKey("id", "fleet_variable_id = VALUES(fleet_variable_id)")
+			dialect.OnDuplicateKey(platformPrefix+"_profile_uuid, fleet_variable_id", "fleet_variable_id = VALUES(fleet_variable_id)")
 
 		_, err := tx.ExecContext(ctx, stmt, args...)
 		return err

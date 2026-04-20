@@ -2337,7 +2337,7 @@ func (ds *Datastore) UpsertSoftwareCPEs(ctx context.Context, cpes []fleet.Softwa
 
 	values := strings.TrimSuffix(strings.Repeat("(?,?),", len(cpes)), ",")
 	sql := fmt.Sprintf(
-		`INSERT INTO software_cpe (software_id, cpe) VALUES %s `+ds.dialect.OnDuplicateKey("id", `cpe = VALUES(cpe)`),
+		`INSERT INTO software_cpe (software_id, cpe) VALUES %s `+ds.dialect.OnDuplicateKey("software_id", `cpe = VALUES(cpe)`),
 		values,
 	)
 
@@ -6442,7 +6442,7 @@ func (ds *Datastore) CreateIntermediateInstallFailureRecord(ctx context.Context,
 			post_install_script_exit_code,
 			post_install_script_output
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		` + ds.dialect.OnDuplicateKey("id", `
+		` + ds.dialect.OnDuplicateKey("execution_id", `
 			install_script_exit_code = VALUES(install_script_exit_code),
 			install_script_output = VALUES(install_script_output),
 			pre_install_query_output = VALUES(pre_install_query_output),

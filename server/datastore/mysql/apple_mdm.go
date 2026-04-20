@@ -937,7 +937,7 @@ func (ds *Datastore) NewMDMAppleEnrollmentProfile(
 INSERT INTO
     mdm_apple_enrollment_profiles (token, type, dep_profile)
 VALUES (?, ?, ?)
-`+ds.dialect.OnDuplicateKey("id", `
+`+ds.dialect.OnDuplicateKey("type", `
     token = VALUES(token),
     type = VALUES(type),
     dep_profile = VALUES(dep_profile)
@@ -4662,7 +4662,7 @@ func (ds *Datastore) SetMDMAppleDefaultSetupAssistantProfileUUID(ctx context.Con
 			abm_tokens abt
 		WHERE
 			abt.organization_name = ?
-		` + ds.dialect.OnDuplicateKey("id", `
+		` + ds.dialect.OnDuplicateKey("global_or_team_id, abm_token_id", `
 			profile_uuid = VALUES(profile_uuid)
 `)
 	var globalOrTmID uint

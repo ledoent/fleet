@@ -82,7 +82,7 @@ func (ds *Datastore) applyQueriesInTx(
 			logging_type,
 			discard_data
 		) VALUES %s
-		` + ds.dialect.OnDuplicateKey("id", `name = VALUES(name),
+		` + ds.dialect.OnDuplicateKey("name, team_id_char", `name = VALUES(name),
 			description = VALUES(description),
 			query = VALUES(query),
 			author_id = VALUES(author_id),
