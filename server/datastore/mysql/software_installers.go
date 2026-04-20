@@ -644,7 +644,7 @@ func setOrUpdateSoftwareInstallerLabelsDB(ctx context.Context, tx sqlx.ExtContex
 		}
 
 		stmt := `INSERT INTO %[1]s_labels (%[1]s_id, label_id, exclude, require_all) VALUES %s
-							` + dialect.OnDuplicateKey("id", "exclude = VALUES(exclude), require_all = VALUES(require_all)")
+							` + dialect.OnDuplicateKey("%[1]s_id, label_id", "exclude = VALUES(exclude), require_all = VALUES(require_all)")
 		var placeholders string
 		var insertArgs []interface{}
 		for _, lid := range labelIds {
@@ -2088,7 +2088,7 @@ INSERT INTO software_titles
   (name, source, extension_for, bundle_identifier, upgrade_code)
 VALUES
   %s
-` + ds.dialect.OnDuplicateKey("id", `
+` + ds.dialect.OnDuplicateKey("(COALESCE(bundle_identifier, name)), source, extension_for", `
   name = VALUES(name),
   source = VALUES(source),
   extension_for = VALUES(extension_for),
@@ -2347,7 +2347,7 @@ INSERT INTO software_installers (
   (SELECT name FROM users WHERE id = ?), (SELECT email FROM users WHERE id = ?), ?, ?, COALESCE(?, false), ?, ?,
   ?, ?
 )
-` + ds.dialect.OnDuplicateKey("id", `
+` + ds.dialect.OnDuplicateKey("global_or_team_id, title_id", `
   install_script_content_id = VALUES(install_script_content_id),
   uninstall_script_content_id = VALUES(uninstall_script_content_id),
   post_install_script_content_id = VALUES(post_install_script_content_id),
@@ -2421,7 +2421,7 @@ INSERT INTO
 	)
 VALUES
 	%s
-` + ds.dialect.OnDuplicateKey("id", `
+` + ds.dialect.OnDuplicateKey("software_installer_id, label_id", `
 	exclude = VALUES(exclude),
 	require_all = VALUES(require_all)
 `)

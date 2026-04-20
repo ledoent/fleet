@@ -6302,6 +6302,10 @@ ALTER TABLE ONLY public.software_installer_software_categories
 ALTER TABLE ONLY public.software_titles
     ADD CONSTRAINT idx_unique_sw_titles UNIQUE (unique_identifier, source, extension_for);
 
+-- Functional index matching MySQL's GENERATED ALWAYS AS (COALESCE(bundle_identifier, name)) unique key.
+-- Used by software_installers and in_house_apps upsert paths which insert without unique_identifier.
+CREATE UNIQUE INDEX idx_software_titles_coalesce_unq ON public.software_titles ((COALESCE(bundle_identifier, name)), source, extension_for);
+
 
 --
 -- Name: software_title_display_names idx_unique_team_id_title_id; Type: CONSTRAINT; Schema: public; Owner: -
