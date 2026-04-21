@@ -420,7 +420,7 @@ func CreateMySQLDS(t testing.TB) *Datastore {
 // When MYSQL_TEST=1 is set, returns a MySQL-backed datastore.
 // When POSTGRES_TEST=1 is set, returns a PostgreSQL-backed datastore.
 // Skips the test if neither is set.
-func CreateDS(t *testing.T) *Datastore {
+func CreateDS(t testing.TB) *Datastore {
 	_, hasMysql := os.LookupEnv("MYSQL_TEST")
 	_, hasPG := os.LookupEnv("POSTGRES_TEST")
 	if !hasMysql && !hasPG {
@@ -494,7 +494,7 @@ func loadPGBaselineSchema() string {
 // CreatePostgresDS creates a test Datastore backed by PostgreSQL.
 // Requires POSTGRES_TEST=1 and a running postgres_test container (default port 5434).
 // The database is created fresh for each test with the full Fleet schema applied.
-func CreatePostgresDS(t *testing.T) *Datastore {
+func CreatePostgresDS(t testing.TB) *Datastore {
 	if _, ok := os.LookupEnv("POSTGRES_TEST"); !ok {
 		t.Skip("PostgreSQL tests are disabled")
 	}
@@ -524,7 +524,9 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 	require.NoError(t, err)
 	defer adminDB.Close()
 
-	_, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName)
+	// WITH (FORCE) terminates any active connections before dropping, preventing
+	// "database ... already exists" errors if a previous test run was killed mid-flight.
+	_, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName + " WITH (FORCE)")
 	_, err = adminDB.Exec("CREATE DATABASE " + dbName)
 	require.NoError(t, err)
 	// Set the test database timezone to UTC so that timestamp columns
@@ -533,7 +535,7 @@ func CreatePostgresDS(t *testing.T) *Datastore {
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		_, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName)
+		_, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName + " WITH (FORCE)")
 	})
 
 	// Connect to the test database

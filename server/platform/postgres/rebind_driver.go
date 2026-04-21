@@ -402,6 +402,18 @@ func rebindQuery(query string) string {
 		query = strings.ReplaceAll(query, col+"=1", col+"=true")
 		query = strings.ReplaceAll(query, col+"=0", col+"=false")
 		query = strings.ReplaceAll(query, col+"!=1", col+"!=true")
+		// goqu emits double-quoted identifiers (alias→backtick→") for alias.col forms.
+		// After backtick→" conversion above, `shc`.`global_stats` becomes "shc"."global_stats".
+		// The unquoted pattern above won't match, so also rewrite the quoted form.
+		if alias, name, ok := strings.Cut(col, "."); ok {
+			qCol := `"` + alias + `"."` + name + `"`
+			query = strings.ReplaceAll(query, qCol+" = 1", qCol+" = true")
+			query = strings.ReplaceAll(query, qCol+" = 0", qCol+" = false")
+			query = strings.ReplaceAll(query, qCol+" != 1", qCol+" != true")
+			query = strings.ReplaceAll(query, qCol+"=1", qCol+"=true")
+			query = strings.ReplaceAll(query, qCol+"=0", qCol+"=false")
+			query = strings.ReplaceAll(query, qCol+"!=1", qCol+"!=true")
+		}
 	}
 	// Fix pm.passes = 1/0: PG column is boolean, can't compare to integer.
 	// Cast to int for use in SUM/COUNT aggregates.
