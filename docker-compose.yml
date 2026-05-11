@@ -174,6 +174,19 @@ services:
     volumes:
       - data-s3:/data:rw
 
+  # PostgreSQL development instance.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: insecure
+      POSTGRES_DB: fleet
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-persistent-volume:/var/lib/postgresql/data
+
 volumes:
   mysql-persistent-volume:
+  postgres-persistent-volume:
   data-s3:
