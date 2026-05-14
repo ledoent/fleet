@@ -788,6 +788,14 @@ func (ds *Datastore) seedPGMigrationTable(ctx context.Context, marker int64, tab
 	// Bulk insert with PG positional placeholders. The tracking tables have no
 	// unique constraint on version_id (goose appends a row per up/down event),
 	// so a plain INSERT is correct.
+	//
+	// versions is sorted ascending by versionsAtOrBelow → partitionMigrationVersions,
+	// so PG assigns auto-increment ids in ascending version_id order. This
+	// preserves id↔version_id alignment for any downstream consumer that
+	// (incorrectly) infers "current version" from MAX(id). The dialect's
+	// dbVersionQuery uses ORDER BY version_id DESC, id DESC for that reason
+	// — even so, a defensive sort keeps the table tidy for human inspection
+	// and protects against future query regressions.
 	var b strings.Builder
 	b.WriteString("INSERT INTO " + tableName + " (version_id, is_applied) VALUES ")
 	args := make([]any, 0, len(versions))
