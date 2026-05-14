@@ -297,7 +297,7 @@ WHERE global_or_team_id = ?`
 		// Set setup experience on Apple hosts only if they have something configured.
 		if fleetPlatform == "darwin" || fleetPlatform == "ios" || fleetPlatform == "ipados" {
 			if totalInsertions > 0 {
-				if err := setHostAwaitingConfiguration(ctx, tx, hostUUID, true); err != nil {
+				if err := setHostAwaitingConfiguration(ctx, tx, ds.dialect, hostUUID, true); err != nil {
 					return ctxerr.Wrap(ctx, err, "setting host awaiting configuration to true")
 				}
 			}
@@ -499,7 +499,7 @@ func (ds *Datastore) GetSetupExperienceCount(ctx context.Context, platform strin
 			SELECT COUNT(*)
 			FROM software_installers
 			WHERE team_id = ?
-			AND install_during_setup = 1
+			AND install_during_setup = true
 			AND platform = ?
 		) AS installers,
 		(
@@ -507,7 +507,7 @@ func (ds *Datastore) GetSetupExperienceCount(ctx context.Context, platform strin
 			FROM vpp_apps_teams
 			WHERE team_id = ?
 			AND platform = ?
-			AND install_during_setup = 1
+			AND install_during_setup = true
 		) AS vpp,
 		(
 			SELECT COUNT(*)
@@ -768,14 +768,11 @@ WHERE
 
 func (ds *Datastore) SetSetupExperienceScript(ctx context.Context, script *fleet.Script) error {
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		var err error
-
 		// first insert script contents
-		scRes, err := insertScriptContents(ctx, tx, script.ScriptContents)
+		id, err := insertScriptContents(ctx, tx, ds.dialect, script.ScriptContents)
 		if err != nil {
 			return err
 		}
-		id, _ := scRes.LastInsertId()
 
 		// This clause allows for PUT semantics. The basic idea is:
 		// - no existing setup script -> go through the usual insert logic
@@ -859,17 +856,15 @@ func (ds *Datastore) deleteSetupExperienceScript(ctx context.Context, tx sqlx.Ex
 
 func (ds *Datastore) SetHostAwaitingConfiguration(ctx context.Context, hostUUID string, awaitingConfiguration bool) error {
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return setHostAwaitingConfiguration(ctx, tx, hostUUID, awaitingConfiguration)
+		return setHostAwaitingConfiguration(ctx, tx, ds.dialect, hostUUID, awaitingConfiguration)
 	})
 }
 
-func setHostAwaitingConfiguration(ctx context.Context, tx sqlx.ExtContext, hostUUID string, awaitingConfiguration bool) error {
-	const stmt = `
+func setHostAwaitingConfiguration(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hostUUID string, awaitingConfiguration bool) error {
+	stmt := `
 INSERT INTO host_mdm_apple_awaiting_configuration (host_uuid, awaiting_configuration)
 VALUES (?, ?)
-ON DUPLICATE KEY UPDATE
-	awaiting_configuration = VALUES(awaiting_configuration)
-	`
+` + dialect.OnDuplicateKey("host_uuid", "awaiting_configuration = VALUES(awaiting_configuration)")
 
 	_, err := tx.ExecContext(ctx, stmt, hostUUID, awaitingConfiguration)
 	if err != nil {

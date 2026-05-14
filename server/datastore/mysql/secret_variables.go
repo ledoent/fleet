@@ -105,17 +105,16 @@ func (ds *Datastore) CreateSecretVariable(ctx context.Context, name string, valu
 	if err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "encrypt secret value for insert with server private key")
 	}
-	res, err := ds.writer(ctx).ExecContext(ctx,
+	id_, err := ds.insertAndGetID(ctx, ds.writer(ctx),
 		`INSERT INTO secret_variables (name, value) VALUES (?, ?)`,
 		name, valueEncrypted,
 	)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return 0, ctxerr.Wrap(ctx, alreadyExists("name", name), "found duplicate")
 		}
 		return 0, ctxerr.Wrap(ctx, err, "insert secret variable")
 	}
-	id_, _ := res.LastInsertId()
 	return uint(id_), nil //nolint:gosec // dismiss G115
 }
 
@@ -539,7 +538,7 @@ func (ds *Datastore) ExpandHostSecrets(ctx context.Context, document string, enr
 func (ds *Datastore) getHostRecoveryLockPasswordDecrypted(ctx context.Context, hostUUID string) (string, error) {
 	var encryptedPassword []byte
 	err := sqlx.GetContext(ctx, ds.reader(ctx), &encryptedPassword,
-		`SELECT encrypted_password FROM host_recovery_key_passwords WHERE host_uuid = ? AND deleted = 0`, hostUUID)
+		`SELECT encrypted_password FROM host_recovery_key_passwords WHERE host_uuid = ? AND deleted = false`, hostUUID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", ctxerr.Wrap(ctx, notFound("HostRecoveryLockPassword").
@@ -561,7 +560,7 @@ func (ds *Datastore) getHostRecoveryLockPasswordDecrypted(ctx context.Context, h
 func (ds *Datastore) getHostRecoveryLockPendingPasswordDecrypted(ctx context.Context, hostUUID string) (string, error) {
 	var encryptedPassword []byte
 	err := sqlx.GetContext(ctx, ds.reader(ctx), &encryptedPassword,
-		`SELECT pending_encrypted_password FROM host_recovery_key_passwords WHERE host_uuid = ? AND deleted = 0 AND pending_encrypted_password IS NOT NULL`, hostUUID)
+		`SELECT pending_encrypted_password FROM host_recovery_key_passwords WHERE host_uuid = ? AND deleted = false AND pending_encrypted_password IS NOT NULL`, hostUUID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", ctxerr.Wrap(ctx, notFound("HostRecoveryLockPendingPassword").

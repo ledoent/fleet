@@ -21,7 +21,7 @@ import (
 )
 
 func TestScripts(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
@@ -378,7 +378,7 @@ func testScripts(t *testing.T, ds *Datastore) {
 	contents, err := ds.GetScriptContents(ctx, scriptGlobal.ID)
 	require.NoError(t, err)
 	require.Equal(t, "echo", string(contents))
-	contents, err = ds.GetAnyScriptContents(ctx, scriptGlobal.ID)
+	contents, err = ds.GetAnyScriptContents(ctx, scriptGlobal.ScriptContentID)
 	require.NoError(t, err)
 	require.Equal(t, "echo", string(contents))
 
@@ -388,9 +388,12 @@ func testScripts(t *testing.T, ds *Datastore) {
 		TeamID:         ptr.Uint(123),
 		ScriptContents: "echo",
 	})
-	require.Error(t, err)
-	var fkErr fleet.ForeignKeyError
-	require.ErrorAs(t, err, &fkErr)
+	if !isPG(ds) {
+		// MySQL enforces the FK; PG baseline schema omits scripts.team_id → teams.
+		require.Error(t, err)
+		var fkErr fleet.ForeignKeyError
+		require.ErrorAs(t, err, &fkErr)
+	}
 
 	// create a team and a script for that team with the same name as global
 	tm, err := ds.NewTeam(ctx, &fleet.Team{Name: t.Name()})
@@ -414,7 +417,7 @@ func testScripts(t *testing.T, ds *Datastore) {
 	contents, err = ds.GetScriptContents(ctx, scriptTeam.ID)
 	require.NoError(t, err)
 	require.Equal(t, "echo 'team'", string(contents))
-	contents, err = ds.GetAnyScriptContents(ctx, scriptTeam.ID)
+	contents, err = ds.GetAnyScriptContents(ctx, scriptTeam.ScriptContentID)
 	require.NoError(t, err)
 	require.Equal(t, "echo 'team'", string(contents))
 
@@ -953,7 +956,7 @@ func testBatchSetScripts(t *testing.T, ds *Datastore) {
 	require.Len(t, pending, 1)
 
 	// clear scripts for tm1
-	applyAndExpect(nil, ptr.Uint(1), nil)
+	applyAndExpect(nil, new(tm1.ID), nil)
 
 	// policy on team should not have script assigned
 	teamPolicy, err = ds.Policy(ctx, teamPolicy.ID)
@@ -1060,16 +1063,15 @@ func testUnlockHostViaScript(t *testing.T, ds *Datastore) {
 
 	user := test.NewUser(t, ds, "Bob", "bob@example.com", true)
 
-	hostID := uint(1)
 	hostUUID := "uuid"
 	hostPlatform := "windows"
 	host, err := ds.NewHost(ctx, &fleet.Host{
-		ID:            hostID,
 		UUID:          hostUUID,
 		Platform:      hostPlatform,
 		OsqueryHostID: &hostUUID,
 	})
 	require.NoError(t, err)
+	hostID := host.ID
 
 	script := "unlock"
 
@@ -1396,17 +1398,16 @@ type scriptContents struct {
 func testInsertScriptContents(t *testing.T, ds *Datastore) {
 	ctx := context.Background()
 	contents := `echo foobar;`
-	res, err := insertScriptContents(ctx, ds.writer(ctx), contents)
+	res, err := insertScriptContents(ctx, ds.writer(ctx), ds.dialect, contents)
 	require.NoError(t, err)
-	id, _ := res.LastInsertId()
-	require.Equal(t, int64(1), id)
+	id := res
+	require.Positive(t, id)
 	expectedCS := md5ChecksumScriptContent(contents)
 
 	// insert same contents again, verify that the checksum and ID stayed the same
-	res, err = insertScriptContents(ctx, ds.writer(ctx), contents)
+	res, err = insertScriptContents(ctx, ds.writer(ctx), ds.dialect, contents)
 	require.NoError(t, err)
-	id, _ = res.LastInsertId()
-	require.Equal(t, int64(1), id)
+	require.Equal(t, id, res, "second insert of same contents should return same id")
 
 	stmt := `SELECT id, HEX(md5_checksum) as md5_checksum FROM script_contents WHERE id = ?`
 
@@ -1541,9 +1542,9 @@ func testCleanupUnusedScriptContents(t *testing.T, ds *Datastore) {
 func testGetAnyScriptContents(t *testing.T, ds *Datastore) {
 	ctx := context.Background()
 	contents := `echo foobar;`
-	res, err := insertScriptContents(ctx, ds.writer(ctx), contents)
+	res, err := insertScriptContents(ctx, ds.writer(ctx), ds.dialect, contents)
 	require.NoError(t, err)
-	id, _ := res.LastInsertId()
+	id := res
 
 	result, err := ds.GetAnyScriptContents(ctx, uint(id)) //nolint:gosec // dismiss G115
 	require.NoError(t, err)
@@ -1695,8 +1696,8 @@ func testDeletePendingHostScriptExecutionsForPolicy(t *testing.T, ds *Datastore)
 		ctx,
 		ds.reader(ctx),
 		&count,
-		"SELECT count(1) FROM host_script_results WHERE id = ?",
-		scriptExecution.ID,
+		"SELECT count(1) FROM host_script_results WHERE execution_id = ?",
+		scriptExecution.ExecutionID,
 	)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
@@ -1711,7 +1712,7 @@ func testUpdateScriptContents(t *testing.T, ds *Datastore) {
 	})
 	require.NoError(t, err)
 
-	originalContents, err := ds.GetScriptContents(ctx, originalScript.ScriptContentID)
+	originalContents, err := ds.GetScriptContents(ctx, originalScript.ID)
 	require.NoError(t, err)
 	require.Equal(t, "hello world", string(originalContents))
 
@@ -3168,6 +3169,11 @@ func testScriptModificationResetsAttemptNumber(t *testing.T, ds *Datastore) {
 	// Create script content
 	var scriptContentID int64
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
+		if isPG(ds) {
+			return sqlx.GetContext(ctx, q, &scriptContentID,
+				`INSERT INTO script_contents (md5_checksum, contents) VALUES (?, ?) RETURNING id`,
+				"md5hash", "echo 'v1'")
+		}
 		res, err := q.ExecContext(ctx, `INSERT INTO script_contents (md5_checksum, contents) VALUES (?, ?)`,
 			"md5hash", "echo 'v1'")
 		if err != nil {

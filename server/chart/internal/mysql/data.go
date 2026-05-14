@@ -395,12 +395,20 @@ func (ds *Datastore) CleanupSCDData(ctx context.Context, days int) error {
 		if err := ctx.Err(); err != nil {
 			return ctxerr.Wrap(ctx, err, "cleanup SCD data")
 		}
+		// Subquery-on-PK form so we don't rely on MySQL's
+		// `DELETE ... ORDER BY ... LIMIT` which is invalid on PG. The
+		// `valid_to < ? AND valid_to <> ?` predicate scans the same way
+		// on both dialects; we just hand the ORDER BY / LIMIT to a SELECT
+		// so PG can plan it.
 		res, err := ds.writer(ctx).ExecContext(ctx,
 			`DELETE FROM host_scd_data
-			 WHERE valid_to < ?
-			   AND valid_to <> ?
-			 ORDER BY valid_to
-			 LIMIT ?`,
+			 WHERE id IN (
+				 SELECT id FROM host_scd_data
+				 WHERE valid_to < ?
+				   AND valid_to <> ?
+				 ORDER BY valid_to
+				 LIMIT ?
+			 )`,
 			cutoff, scdOpenSentinel, scdCleanupBatch)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "cleanup SCD data")
@@ -423,8 +431,17 @@ func (ds *Datastore) DeleteAllForDataset(ctx context.Context, dataset string, ba
 		batchSize = 5000
 	}
 	for {
+		// Subquery-on-PK so the LIMIT is applied via SELECT (valid on
+		// both MySQL and PG). MySQL's `DELETE ... LIMIT ?` is not valid
+		// PG syntax, and the rebind driver's trailing-LIMIT stripper only
+		// matches literal-integer LIMITs (not placeholder ones).
 		res, err := ds.writer(ctx).ExecContext(ctx,
-			`DELETE FROM host_scd_data WHERE dataset = ? LIMIT ?`,
+			`DELETE FROM host_scd_data
+			 WHERE id IN (
+				 SELECT id FROM host_scd_data
+				 WHERE dataset = ?
+				 LIMIT ?
+			 )`,
 			dataset, batchSize)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "delete SCD rows for dataset")

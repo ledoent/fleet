@@ -44,7 +44,7 @@ func (ds *Datastore) SoftwareTitleByID(ctx context.Context, id uint, teamID *uin
 		autoUpdatesSelect = `sus.enabled as auto_update_enabled, sus.start_time as auto_update_window_start, sus.end_time as auto_update_window_end, `
 		autoUpdatesJoin = fmt.Sprintf("LEFT JOIN software_update_schedules sus ON sus.title_id = st.id AND sus.team_id = %d", *teamID)
 		autoUpdatesGroupBy = "auto_update_enabled, auto_update_window_start, auto_update_window_end, "
-		teamFilter = fmt.Sprintf("sthc.team_id = %d AND sthc.global_stats = 0", *teamID)
+		teamFilter = fmt.Sprintf("sthc.team_id = %d AND sthc.global_stats = false", *teamID)
 		softwareInstallerGlobalOrTeamIDFilter = fmt.Sprintf("si.global_or_team_id = %d", *teamID)
 		vppAppsTeamsGlobalOrTeamIDFilter = fmt.Sprintf("vat.global_or_team_id = %d", *teamID)
 		inHouseAppsTeamsGlobalOrTeamIDFilter = fmt.Sprintf("iha.global_or_team_id = %d", *teamID)
@@ -631,7 +631,7 @@ FROM software_titles st
 			{{if .PackagesOnly}} FALSE {{else}} vat.global_or_team_id = {{teamID .}}{{end}}
 	{{end}}
 	LEFT JOIN software_titles_host_counts sthc ON sthc.software_title_id = st.id AND
-		(sthc.team_id = {{teamID .}} AND sthc.global_stats = {{if hasTeamID .}} 0 {{else}} 1 {{end}})
+		(sthc.team_id = {{teamID .}} AND sthc.global_stats = {{if hasTeamID .}} false {{else}} true {{end}})
 {{with $softwareJoin := " "}}
 	{{if or $.ListOptions.MatchQuery $.VulnerableOnly}}
 		-- If we do a match but not vulnerable only, we want a LEFT JOIN on
@@ -644,7 +644,7 @@ FROM software_titles st
 	{{if and $.VulnerableOnly (or $.KnownExploit $.MinimumCVSS $.MaximumCVSS)}}
 		{{$softwareJoin = printf "%s INNER JOIN cve_meta cm ON scve.cve = cm.cve" $softwareJoin}}
 	  	{{if $.KnownExploit}}
-		  {{$softwareJoin = printf "%s AND cm.cisa_known_exploit = 1" $softwareJoin}}
+		  {{$softwareJoin = printf "%s AND cm.cisa_known_exploit = true" $softwareJoin}}
 		{{end}}
 		{{if $.MinimumCVSS}}
 		  {{$softwareJoin = printf "%s AND cm.cvss_score >= ?" $softwareJoin}}
@@ -682,7 +682,7 @@ WHERE
 			{{$defFilter = $defFilter | printf " ( %s OR sthc.software_title_id IS NOT NULL ) "}}
 		{{ end }}
 		{{if and $.SelfServiceOnly (hasTeamID $)}}
-		   {{$defFilter = $defFilter | printf "%s AND ( si.self_service = 1 OR vat.self_service = 1 OR iha.self_service = 1 ) "}}
+		   {{$defFilter = $defFilter | printf "%s AND ( si.self_service = true OR vat.self_service = true OR iha.self_service = true ) "}}
 		{{end}}
 		AND ({{$defFilter}})
 	{{end}}
@@ -801,9 +801,9 @@ func buildOptimizedListSoftwareTitlesSQL(opts fleet.SoftwareTitleListOptions) st
 		teamID = *opts.TeamID
 	}
 
-	globalStats := 0
+	globalStats := "false"
 	if !hasTeamID {
-		globalStats = 1
+		globalStats = "true"
 	}
 
 	direction := "DESC"
@@ -832,7 +832,7 @@ func buildOptimizedListSoftwareTitlesSQL(opts fleet.SoftwareTitleListOptions) st
 		innerSQL = fmt.Sprintf(`
 			SELECT sthc.software_title_id, sthc.hosts_count
 			FROM software_titles_host_counts sthc
-			WHERE sthc.team_id = 0 AND sthc.global_stats = 1
+			WHERE sthc.team_id = 0 AND sthc.global_stats = true
 			ORDER BY sthc.hosts_count %[1]s, sthc.software_title_id %[1]s
 			LIMIT %[2]d`, direction, perPage)
 		if offset > 0 {
@@ -848,7 +848,7 @@ func buildOptimizedListSoftwareTitlesSQL(opts fleet.SoftwareTitleListOptions) st
 			FROM (
 				(SELECT sthc.software_title_id, sthc.hosts_count
 				FROM software_titles_host_counts sthc
-				WHERE sthc.team_id = %[1]d AND sthc.global_stats = 0)
+				WHERE sthc.team_id = %[1]d AND sthc.global_stats = false)
 
 				UNION ALL
 
@@ -865,7 +865,7 @@ func buildOptimizedListSoftwareTitlesSQL(opts fleet.SoftwareTitleListOptions) st
 					WHERE iha.global_or_team_id = %[1]d AND iha.title_id IS NOT NULL
 				) AS t
 				LEFT JOIN software_titles_host_counts sthc
-					ON sthc.software_title_id = t.title_id AND sthc.team_id = %[1]d AND sthc.global_stats = 0
+					ON sthc.software_title_id = t.title_id AND sthc.team_id = %[1]d AND sthc.global_stats = false
 				WHERE sthc.software_title_id IS NULL)
 			) AS combined
 			ORDER BY combined.hosts_count %[2]s, combined.software_title_id %[2]s
@@ -915,7 +915,7 @@ func buildOptimizedListSoftwareTitlesSQL(opts fleet.SoftwareTitleListOptions) st
 		FROM (%s) AS top
 		LEFT JOIN software_titles st ON st.id = top.software_title_id
 		LEFT JOIN software_titles_host_counts sthc ON sthc.software_title_id = top.software_title_id
-			AND sthc.team_id = %d AND sthc.global_stats = %d`,
+			AND sthc.team_id = %d AND sthc.global_stats = %s`,
 		innerSQL, teamID, globalStats)
 
 	if hasTeamID {
@@ -950,13 +950,13 @@ func countSoftwareTitlesOptimized(opts fleet.SoftwareTitleListOptions) string {
 
 	if !hasTeamID {
 		// All teams: only count titles with host counts.
-		return `SELECT COUNT(*) FROM software_titles_host_counts WHERE team_id = 0 AND global_stats = 1`
+		return `SELECT COUNT(*) FROM software_titles_host_counts WHERE team_id = 0 AND global_stats = true`
 	}
 
 	// Specific team: count of host-count titles + count of installer-only titles.
 	return fmt.Sprintf(`
 		SELECT
-			(SELECT COUNT(*) FROM software_titles_host_counts WHERE team_id = %[1]d AND global_stats = 0)
+			(SELECT COUNT(*) FROM software_titles_host_counts WHERE team_id = %[1]d AND global_stats = false)
 			+
 			(SELECT COUNT(DISTINCT t.title_id) FROM (
 				SELECT si.title_id FROM software_installers si
@@ -970,7 +970,7 @@ func countSoftwareTitlesOptimized(opts fleet.SoftwareTitleListOptions) string {
 				WHERE iha.global_or_team_id = %[1]d AND iha.title_id IS NOT NULL
 			) AS t
 			LEFT JOIN software_titles_host_counts sthc
-				ON sthc.software_title_id = t.title_id AND sthc.team_id = %[1]d AND sthc.global_stats = 0
+				ON sthc.software_title_id = t.title_id AND sthc.team_id = %[1]d AND sthc.global_stats = false
 			WHERE sthc.software_title_id IS NULL)
 		AS total_count`, teamID)
 }
@@ -1101,7 +1101,7 @@ SELECT
 	s.title_id,
 	s.id, s.version,
 	%s -- placeholder for optional host_counts
-	CONCAT('[', GROUP_CONCAT(JSON_QUOTE(scve.cve) SEPARATOR ','), ']') as vulnerabilities
+	CONCAT('[', ` + ds.dialect.GroupConcat(ds.dialect.JsonQuote("scve.cve"), ",") + `, ']') as vulnerabilities
 FROM software s
 LEFT JOIN software_host_counts shc ON shc.software_id = s.id AND %s
 LEFT JOIN software_cve scve ON shc.software_id = scve.software_id
@@ -1117,11 +1117,11 @@ GROUP BY s.id`
 	countsJoin := "TRUE"
 	switch {
 	case teamID == nil:
-		countsJoin = "shc.team_id = 0 AND shc.global_stats = 1"
+		countsJoin = "shc.team_id = 0 AND shc.global_stats = true"
 	case *teamID == 0:
-		countsJoin = "shc.team_id = 0 AND shc.global_stats = 0"
+		countsJoin = "shc.team_id = 0 AND shc.global_stats = false"
 	case *teamID > 0:
-		countsJoin = fmt.Sprintf("shc.team_id = %d AND shc.global_stats = 0", *teamID)
+		countsJoin = fmt.Sprintf("shc.team_id = %d AND shc.global_stats = false", *teamID)
 	}
 
 	selectVersionsStmt = fmt.Sprintf(selectVersionsStmt, extraSelect, countsJoin, teamFilter)
@@ -1138,8 +1138,7 @@ GROUP BY s.id`
 // table.
 func (ds *Datastore) SyncHostsSoftwareTitles(ctx context.Context, updatedAt time.Time) error {
 	const (
-		swapTable       = "software_titles_host_counts_swap"
-		swapTableCreate = "CREATE TABLE IF NOT EXISTS " + swapTable + " LIKE software_titles_host_counts"
+		swapTable = "software_titles_host_counts_swap"
 
 		globalCountsStmt = `
             SELECT
@@ -1178,24 +1177,23 @@ func (ds *Datastore) SyncHostsSoftwareTitles(ctx context.Context, updatedAt time
 			WHERE h.team_id IS NULL AND hs.software_id > 0
 			GROUP BY st.id`
 
-		insertStmt = `
+		valuesPart = `(?, ?, ?, ?, ?),`
+	)
+
+	insertStmt := `
             INSERT INTO ` + swapTable + `
                 (software_title_id, hosts_count, team_id, global_stats, updated_at)
             VALUES
                 %s
-            ON DUPLICATE KEY UPDATE
-                hosts_count = VALUES(hosts_count),
-                updated_at = VALUES(updated_at)`
-
-		valuesPart = `(?, ?, ?, ?, ?),`
-	)
+            ` + ds.dialect.OnDuplicateKey("software_title_id,team_id,global_stats", `hosts_count = VALUES(hosts_count),
+                updated_at = VALUES(updated_at)`)
 
 	// Create a fresh swap table to populate with new counts. If a previous run left a partial swap table, drop it first.
+	swapTableCreate := ds.dialect.CreateTableLike(swapTable, "software_titles_host_counts")
 	w := ds.writer(ctx)
 	if _, err := w.ExecContext(ctx, "DROP TABLE IF EXISTS "+swapTable); err != nil {
 		return ctxerr.Wrap(ctx, err, "drop existing swap table")
 	}
-	// CREATE TABLE ... LIKE copies structure including CHECK constraints (with auto-generated names).
 	if _, err := w.ExecContext(ctx, swapTableCreate); err != nil {
 		return ctxerr.Wrap(ctx, err, "create swap table")
 	}
@@ -1258,12 +1256,10 @@ func (ds *Datastore) SyncHostsSoftwareTitles(ctx context.Context, updatedAt time
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "drop leftover old table")
 		}
-		_, err = tx.ExecContext(ctx, `
-			RENAME TABLE
-				software_titles_host_counts TO software_titles_host_counts_old,
-				`+swapTable+` TO software_titles_host_counts`)
-		if err != nil {
-			return ctxerr.Wrap(ctx, err, "atomic table swap")
+		for _, stmt := range ds.dialect.AtomicTableSwap("software_titles_host_counts", swapTable) {
+			if _, err = tx.ExecContext(ctx, stmt); err != nil {
+				return ctxerr.Wrap(ctx, err, "atomic table swap")
+			}
 		}
 		_, err = tx.ExecContext(ctx, "DROP TABLE IF EXISTS software_titles_host_counts_old")
 		if err != nil {
@@ -1299,11 +1295,9 @@ func (ds *Datastore) UpdateSoftwareTitleAutoUpdateConfig(ctx context.Context, ti
 INSERT INTO software_update_schedules
 	(title_id, team_id, enabled, start_time, end_time)
 VALUES (?, ?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-	enabled = VALUES(enabled),
-	start_time = IF(VALUES(start_time) = '', start_time, VALUES(start_time)),
-	end_time = IF(VALUES(end_time) = '', end_time, VALUES(end_time))
-`
+` + ds.dialect.OnDuplicateKey("team_id, title_id", `enabled = VALUES(enabled),
+	start_time = CASE WHEN VALUES(start_time) = '' THEN software_update_schedules.start_time ELSE VALUES(start_time) END,
+	end_time = CASE WHEN VALUES(end_time) = '' THEN software_update_schedules.end_time ELSE VALUES(end_time) END`)
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, titleID, teamID, config.AutoUpdateEnabled, startTime, endTime)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "updating software title auto update config")

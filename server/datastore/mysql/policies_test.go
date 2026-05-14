@@ -2057,7 +2057,7 @@ func updatePolicyFailureCountsForHosts(ctx context.Context, ds *Datastore, hosts
 		FROM
 			policy_membership pm
 		WHERE
-			pm.passes = 0 AND
+			pm.passes = false AND
 			pm.host_id IN (?)
 		GROUP BY
 			pm.host_id
@@ -3422,7 +3422,7 @@ func testDeleteAllPolicyMemberships(t *testing.T, ds *Datastore) {
 	require.NoError(t, ds.writer(ctx).Get(&count, "select COUNT(*) from host_issues WHERE total_issues_count > 0"))
 	assert.Equal(t, 1, count)
 
-	err = deleteAllPolicyMemberships(ctx, ds.writer(ctx), host.ID)
+	err = deleteAllPolicyMemberships(ctx, ds.writer(ctx), ds.dialect, host.ID)
 	require.NoError(t, err)
 
 	err = ds.writer(ctx).Get(&count, "select COUNT(*) from policy_membership")
@@ -7330,7 +7330,7 @@ func testBatchedPolicyMembershipCleanup(t *testing.T, ds *Datastore) {
 
 	// Run the full cleanup function directly (simulates what ApplyPolicySpecs triggers when a
 	// query changes — shouldRemoveAllPolicyMemberships == true).
-	err = cleanupPolicyMembershipForPolicy(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID)
+	err = cleanupPolicyMembershipForPolicy(ctx, ds.reader(ctx), ds.writer(ctx), ds.dialect, pol.ID)
 	require.NoError(t, err)
 
 	// All policy_membership rows must be gone.
@@ -7402,7 +7402,7 @@ func testBatchedPolicyMembershipCleanupOnPolicyUpdate(t *testing.T, ds *Datastor
 	require.Equal(t, 6, count)
 
 	// Run the platform-aware cleanup (simulates CleanupPolicyMembership cron).
-	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform)
+	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform, ds.dialect)
 	require.NoError(t, err)
 
 	// Only the windows host should remain.
@@ -7467,7 +7467,7 @@ func testBatchedPolicyMembershipCleanupOnPolicyUpdate(t *testing.T, ds *Datastor
 
 	// Run cleanupPolicyMembershipOnPolicyUpdate with no platform restriction so
 	// only the label-based branch fires.
-	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), lblPol.ID, "" /* no platform filter */)
+	err = cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), lblPol.ID, "" /* no platform filter */, ds.dialect)
 	require.NoError(t, err)
 
 	// Only the host that belongs to the include label should remain.
@@ -7612,7 +7612,7 @@ func testCleanupPolicyMembershipCrashRecovery(t *testing.T, ds *Datastore) {
 
 		// Simulate: TX committed with the flag set, but cleanup never ran (crash/error).
 		_, err = ds.writer(ctx).ExecContext(ctx,
-			`UPDATE policies SET needs_full_membership_cleanup = 1 WHERE id = ?`, pol.ID)
+			`UPDATE policies SET needs_full_membership_cleanup = true WHERE id = ?`, pol.ID)
 		require.NoError(t, err)
 
 		// Retry GitOps with the same spec. ApplyPolicySpecs must detect the flag and
@@ -7644,7 +7644,7 @@ func testCleanupPolicyMembershipCrashRecovery(t *testing.T, ds *Datastore) {
 
 		// Simulate interrupted cleanup: set the flag directly, leave membership rows in place.
 		_, err := ds.writer(ctx).ExecContext(ctx,
-			`UPDATE policies SET needs_full_membership_cleanup = 1 WHERE id = ?`, pol.ID)
+			`UPDATE policies SET needs_full_membership_cleanup = true WHERE id = ?`, pol.ID)
 		require.NoError(t, err)
 
 		// CleanupPolicyMembership (cron) should pick up the flag and run the full cleanup.
@@ -7675,7 +7675,7 @@ func testCleanupPolicyMembershipCrashRecovery(t *testing.T, ds *Datastore) {
 
 		// Set the flag to simulate the crash window between cleanup and flag clear.
 		_, err := ds.writer(ctx).ExecContext(ctx,
-			`UPDATE policies SET needs_full_membership_cleanup = 1 WHERE id = ?`, pol.ID)
+			`UPDATE policies SET needs_full_membership_cleanup = true WHERE id = ?`, pol.ID)
 		require.NoError(t, err)
 
 		// CleanupPolicyMembership (cron) should handle this without errors.

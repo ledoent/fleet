@@ -4309,7 +4309,7 @@ func testListMDMAppleCommands(t *testing.T, ds *Datastore) {
 
 	// randomly set two commadns as inactive
 	ExecAdhocSQL(t, ds, func(tx sqlx.ExtContext) error {
-		_, err := tx.ExecContext(ctx, `UPDATE nano_enrollment_queue SET active = 0 LIMIT 2`)
+		_, err := tx.ExecContext(ctx, `UPDATE nano_enrollment_queue SET active = false LIMIT 2`)
 		return err
 	})
 	// only three results are listed
@@ -4348,7 +4348,7 @@ func testMDMAppleSetupAssistant(t *testing.T, ds *Datastore) {
 	// create for non-existing team fails
 	_, err = ds.SetOrUpdateMDMAppleSetupAssistant(ctx, &fleet.MDMAppleSetupAssistant{TeamID: ptr.Uint(123), Name: "test", Profile: json.RawMessage("{}")})
 	require.Error(t, err)
-	require.ErrorContains(t, err, "foreign key constraint fails")
+	require.True(t, fleet.IsForeignKey(err))
 
 	// create a team
 	tm, err := ds.NewTeam(ctx, &fleet.Team{Name: "tm"})
@@ -4682,7 +4682,7 @@ func testMDMAppleDefaultSetupAssistant(t *testing.T, ds *Datastore) {
 	// set for non-existing team fails
 	err = ds.SetMDMAppleDefaultSetupAssistantProfileUUID(ctx, ptr.Uint(123), "xyz", "o2")
 	require.Error(t, err)
-	require.ErrorContains(t, err, "foreign key constraint fails")
+	require.True(t, fleet.IsForeignKey(err))
 
 	// get for non-existing team fails
 	_, _, err = ds.GetMDMAppleDefaultSetupAssistant(ctx, ptr.Uint(123), "o2")
@@ -7636,7 +7636,7 @@ func testListIOSAndIPadOSToRefetch(t *testing.T, ds *Datastore) {
 
 	// set iOS device to not be enabled in fleet MDM. No devices should be returned.
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, `UPDATE nano_enrollments SET enabled = 0 WHERE id = ?`, iOS0.UUID)
+		_, err := q.ExecContext(ctx, `UPDATE nano_enrollments SET enabled = false WHERE id = ?`, iOS0.UUID)
 		return err
 	})
 	devices, err = ds.ListIOSAndIPadOSToRefetch(ctx, refetchInterval)
@@ -11427,7 +11427,7 @@ func testClaimHostsForRecoveryLockClear(t *testing.T, ds *Datastore) {
 			Status        *string `db:"status"`
 		}
 		err := sqlx.GetContext(ctx, ds.reader(ctx), &rec,
-			`SELECT operation_type, status FROM host_recovery_key_passwords WHERE host_uuid = ? AND deleted = 0`, hostUUID)
+			`SELECT operation_type, status FROM host_recovery_key_passwords WHERE host_uuid = ? AND deleted = false`, hostUUID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return "", "", false
@@ -11941,7 +11941,7 @@ func testRecoveryLockRotation(t *testing.T, ds *Datastore) {
 				pending_encrypted_password IS NOT NULL AS has_pending,
 				pending_error_message AS pending_err
 			FROM host_recovery_key_passwords
-			WHERE host_uuid = ? AND deleted = 0`, hostUUID)
+			WHERE host_uuid = ? AND deleted = false`, hostUUID)
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
@@ -12379,7 +12379,7 @@ func testRecoveryLockAutoRotation(t *testing.T, ds *Datastore) {
 		var autoRotateAt *time.Time
 		err := ds.writer(ctx).GetContext(ctx, &autoRotateAt, `
 			SELECT auto_rotate_at FROM host_recovery_key_passwords
-			WHERE host_uuid = ? AND deleted = 0`, hostUUID)
+			WHERE host_uuid = ? AND deleted = false`, hostUUID)
 		if err == sql.ErrNoRows {
 			return nil
 		}

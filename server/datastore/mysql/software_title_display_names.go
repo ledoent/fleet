@@ -8,7 +8,7 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func updateSoftwareTitleDisplayName(ctx context.Context, tx sqlx.ExtContext, teamID *uint, titleID uint, displayName string) error {
+func updateSoftwareTitleDisplayName(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, teamID *uint, titleID uint, displayName string) error {
 	var tmID uint
 	if teamID != nil {
 		tmID = *teamID
@@ -17,8 +17,7 @@ func updateSoftwareTitleDisplayName(ctx context.Context, tx sqlx.ExtContext, tea
 		INSERT INTO software_title_display_names
 			(team_id, software_title_id, display_name)
 		VALUES (?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			display_name = VALUES(display_name)`, tmID, titleID, displayName)
+		`+dialect.OnDuplicateKey("title_id", "display_name = VALUES(display_name)"), tmID, titleID, displayName)
 	if err != nil {
 		return err
 	}

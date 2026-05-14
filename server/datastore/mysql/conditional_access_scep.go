@@ -61,7 +61,24 @@ func (ds *Datastore) RevokeOldConditionalAccessCerts(ctx context.Context, graceP
 	// Explanation:
 	// 1. Find the newest "stable" cert for each host (stable = issued before grace period)
 	// 2. Revoke all certs with serial < newest stable serial for that host
-	stmt := `
+	var stmt string
+	if ds.dialect.IsPostgres() {
+		stmt = `
+		UPDATE conditional_access_scep_certificates AS old_certs
+		SET revoked = true, updated_at = NOW()
+		FROM (
+			SELECT host_id, MAX(serial) as newest_stable_serial
+			FROM conditional_access_scep_certificates
+			WHERE not_valid_before < NOW() - make_interval(secs => ?)
+			  AND revoked = false
+			GROUP BY host_id
+		) stable_certs
+		WHERE old_certs.host_id = stable_certs.host_id
+		  AND old_certs.serial < stable_certs.newest_stable_serial
+		  AND old_certs.revoked = false
+		`
+	} else {
+		stmt = `
 		UPDATE conditional_access_scep_certificates old_certs
 		INNER JOIN (
 			SELECT host_id, MAX(serial) as newest_stable_serial
@@ -73,7 +90,8 @@ func (ds *Datastore) RevokeOldConditionalAccessCerts(ctx context.Context, graceP
 		SET old_certs.revoked = 1, old_certs.updated_at = NOW(6)
 		WHERE old_certs.serial < stable_certs.newest_stable_serial
 		  AND old_certs.revoked = 0
-	`
+		`
+	}
 
 	result, err := ds.writer(ctx).ExecContext(ctx, stmt, int(gracePeriod.Seconds()))
 	if err != nil {

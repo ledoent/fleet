@@ -49,7 +49,7 @@ func isWindowsHostConnectedToFleetMDM(ctx context.Context, q sqlx.QueryerContext
 	    JOIN host_mdm hm ON hm.host_id = h.id
 	  WHERE h.id = %d
 	    AND mwe.device_state = '`+microsoft_mdm.MDMDeviceStateEnrolled+`'
-	    AND hm.enrolled = 1 LIMIT 1
+	    AND hm.enrolled = true LIMIT 1
 	`, h.ID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -193,7 +193,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 			credentials_acknowledged)
 		VALUES
 			(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("mdm_hardware_id", `
 			mdm_device_id         = VALUES(mdm_device_id),
 			device_state          = VALUES(device_state),
 			device_type           = VALUES(device_type),
@@ -207,7 +207,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 			awaiting_configuration_at = VALUES(awaiting_configuration_at),
 			host_uuid             = VALUES(host_uuid),
 			credentials_hash      = VALUES(credentials_hash),
-			credentials_acknowledged = VALUES(credentials_acknowledged)
+			credentials_acknowledged = VALUES(credentials_acknowledged)`) + `
 	`
 	_, err := ds.writer(ctx).ExecContext(
 		ctx,
@@ -424,13 +424,13 @@ func (ds *Datastore) MDMWindowsInsertCommandAndUpsertHostProfilesForHosts(ctx co
 					detail, command_uuid, profile_name, checksum
 				)
 				VALUES %s
-				ON DUPLICATE KEY UPDATE
+				`+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 					status = VALUES(status),
 					operation_type = VALUES(operation_type),
 					detail = VALUES(detail),
 					profile_name = VALUES(profile_name),
 					checksum = VALUES(checksum),
-					command_uuid = VALUES(command_uuid)`,
+					command_uuid = VALUES(command_uuid)`),
 				strings.TrimSuffix(profileSB.String(), ","),
 			)
 			if _, err := tx.ExecContext(ctx, profileStmt, profileArgs...); err != nil {
@@ -809,18 +809,18 @@ func (ds *Datastore) MDMWindowsSaveResponse(ctx context.Context, enrolledDevice 
 			}
 		}
 
-		if err := updateMDMWindowsHostProfileStatusFromResponseDB(ctx, tx, potentialProfilePayloads); err != nil {
+		if err := updateMDMWindowsHostProfileStatusFromResponseDB(ctx, tx, ds.dialect, potentialProfilePayloads); err != nil {
 			return ctxerr.Wrap(ctx, err, "updating host profile status")
 		}
 
 		// store the command results
-		const insertResultsStmt = `
+		insertResultsStmt := `
 INSERT INTO windows_mdm_command_results
     (enrollment_id, command_uuid, raw_result, response_id, status_code)
 VALUES %s
-ON DUPLICATE KEY UPDATE
-    raw_result = COALESCE(VALUES(raw_result), raw_result),
-    status_code = COALESCE(VALUES(status_code), status_code)
+` + ds.dialect.OnDuplicateKey("enrollment_id,command_uuid", `
+    raw_result = COALESCE(VALUES(raw_result), windows_mdm_command_results.raw_result),
+    status_code = COALESCE(VALUES(status_code), windows_mdm_command_results.status_code)`) + `
 `
 		stmt = fmt.Sprintf(insertResultsStmt, strings.TrimSuffix(sb.String(), ","))
 		if _, err = tx.ExecContext(ctx, stmt, args...); err != nil {
@@ -830,7 +830,7 @@ ON DUPLICATE KEY UPDATE
 		// if we received a Wipe command result, update the host's status
 		if wipeCmdUUID != "" {
 			wipeSucceeded := strings.HasPrefix(wipeCmdStatus, "2")
-			rowsAffected, err := updateHostLockWipeStatusFromResultAndHostUUID(ctx, tx, enrolledDevice.HostUUID,
+			rowsAffected, err := updateHostLockWipeStatusFromResultAndHostUUID(ctx, tx, ds.dialect, enrolledDevice.HostUUID,
 				"wipe_ref", wipeCmdUUID, wipeSucceeded, false,
 			)
 			if err != nil {
@@ -869,6 +869,7 @@ ON DUPLICATE KEY UPDATE
 func updateMDMWindowsHostProfileStatusFromResponseDB(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	payloads []*fleet.MDMWindowsProfilePayload,
 ) error {
 	if len(payloads) == 0 {
@@ -879,15 +880,15 @@ func updateMDMWindowsHostProfileStatusFromResponseDB(
 	// should be inserted from a device MDM response, so we first check for
 	// matching entries and then perform the INSERT ... ON DUPLICATE KEY to
 	// update their detail and status.
-	const updateHostProfilesStmt = `
+	updateHostProfilesStmt := `
 		INSERT INTO host_mdm_windows_profiles
 			(host_uuid, profile_uuid, detail, status, retries, command_uuid, checksum)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE
+		` + dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 			checksum = VALUES(checksum),
 			detail = VALUES(detail),
 			status = VALUES(status),
-			retries = VALUES(retries)`
+			retries = VALUES(retries)`)
 
 	// MySQL will use the `host_uuid` part of the primary key as a first
 	// pass, and then filter that subset by `command_uuid`.
@@ -1062,9 +1063,9 @@ func (ds *Datastore) SetMDMWindowsAwaitingConfiguration(ctx context.Context, mdm
 // - host_disks: hd
 func (ds *Datastore) whereBitLockerStatus(ctx context.Context, status fleet.DiskEncryptionStatus, bitLockerPINRequired bool) string {
 	const (
-		whereNotServer        = `(hmdm.is_server IS NOT NULL AND hmdm.is_server = 0)`
-		whereKeyAvailable     = `(hdek.base64_encrypted IS NOT NULL AND hdek.base64_encrypted != '' AND hdek.decryptable IS NOT NULL AND hdek.decryptable = 1)`
-		whereEncrypted        = `(hd.encrypted IS NOT NULL AND hd.encrypted = 1)`
+		whereNotServer        = `(hmdm.is_server IS NOT NULL AND hmdm.is_server = false)`
+		whereKeyAvailable     = `(hdek.base64_encrypted IS NOT NULL AND hdek.base64_encrypted != '' AND hdek.decryptable IS NOT NULL AND hdek.decryptable = true)`
+		whereEncrypted        = `(hd.encrypted IS NOT NULL AND hd.encrypted = true)`
 		whereHostDisksUpdated = `(hd.updated_at IS NOT NULL AND hdek.updated_at IS NOT NULL AND hd.updated_at >= hdek.updated_at)`
 		whereClientError      = `(hdek.client_error IS NOT NULL AND hdek.client_error != '')`
 		withinGracePeriod     = `(hdek.updated_at IS NOT NULL AND hdek.updated_at >= DATE_SUB(NOW(6), INTERVAL 1 HOUR))`
@@ -1170,8 +1171,8 @@ FROM
 WHERE
     mwe.device_state = '%s' AND
     h.platform = 'windows' AND
-    hmdm.is_server = 0 AND
-    hmdm.enrolled = 1 AND
+    hmdm.is_server = false AND
+    hmdm.enrolled = true AND
     %s`
 
 	var args []interface{}
@@ -2022,8 +2023,8 @@ FROM
 WHERE
     mwe.device_state = '%s' AND
     h.platform = 'windows' AND
-    hmdm.is_server = 0 AND
-    hmdm.enrolled = 1 AND
+    hmdm.is_server = false AND
+    hmdm.enrolled = true AND
     %s
 GROUP BY
     final_status`,
@@ -2127,8 +2128,8 @@ FROM
 WHERE
     mwe.device_state = '%s' AND
     h.platform = 'windows' AND
-    hmdm.is_server = 0 AND
-    hmdm.enrolled = 1 AND
+    hmdm.is_server = false AND
+    hmdm.enrolled = true AND
     %s
 GROUP BY
     final_status`,
@@ -2198,7 +2199,7 @@ const windowsMDMProfilesDesiredStateQuery = `
 			JOIN mdm_windows_enrollments mwe
 				ON mwe.host_uuid = h.uuid
 			JOIN mdm_configuration_profile_labels mcpl
-				ON mcpl.windows_profile_uuid = mwcp.profile_uuid AND mcpl.exclude = 0 AND mcpl.require_all = 1
+				ON mcpl.windows_profile_uuid = mwcp.profile_uuid AND mcpl.exclude = false AND mcpl.require_all = true
 			LEFT OUTER JOIN label_membership lm
 				ON lm.label_id = mcpl.label_id AND lm.host_id = h.id
 	WHERE
@@ -2240,7 +2241,7 @@ const windowsMDMProfilesDesiredStateQuery = `
 			JOIN mdm_windows_enrollments mwe
 				ON mwe.host_uuid = h.uuid
 			JOIN mdm_configuration_profile_labels mcpl
-				ON mcpl.windows_profile_uuid = mwcp.profile_uuid AND mcpl.exclude = 1 AND mcpl.require_all = 0
+				ON mcpl.windows_profile_uuid = mwcp.profile_uuid AND mcpl.exclude = true AND mcpl.require_all = false
 			LEFT OUTER JOIN labels lbl
 				ON lbl.id = mcpl.label_id
 			LEFT OUTER JOIN label_membership lm
@@ -2276,7 +2277,7 @@ const windowsMDMProfilesDesiredStateQuery = `
 			JOIN mdm_windows_enrollments mwe
 				ON mwe.host_uuid = h.uuid
 			JOIN mdm_configuration_profile_labels mcpl
-				ON mcpl.windows_profile_uuid = mwcp.profile_uuid AND mcpl.exclude = 0 AND mcpl.require_all = 0
+				ON mcpl.windows_profile_uuid = mwcp.profile_uuid AND mcpl.exclude = false AND mcpl.require_all = false
 			LEFT OUTER JOIN label_membership lm
 				ON lm.label_id = mcpl.label_id AND lm.host_id = h.id
 	WHERE
@@ -2336,7 +2337,7 @@ const windowsProfilesToInstallQuery = `
 			ON hmwp.profile_uuid = ds.profile_uuid AND hmwp.host_uuid = ds.host_uuid
 	WHERE
 		-- profile or secret variables have been updated
-		( hmwp.checksum != ds.checksum ) OR IFNULL(hmwp.secrets_updated_at < ds.secrets_updated_at, FALSE) OR
+		( hmwp.checksum != ds.checksum ) OR COALESCE(hmwp.secrets_updated_at < ds.secrets_updated_at, FALSE) OR
 		-- profiles in A but not in B
 		( hmwp.profile_uuid IS NULL AND hmwp.host_uuid IS NULL ) OR
 		-- profiles in A and B with operation type "install" and NULL status
@@ -2668,13 +2669,13 @@ func (ds *Datastore) BulkUpsertMDMWindowsHostProfiles(ctx context.Context, paylo
 	      checksum
             )
             VALUES %s
-	    ON DUPLICATE KEY UPDATE
+	    `+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
               status = VALUES(status),
               operation_type = VALUES(operation_type),
               detail = VALUES(detail),
               profile_name = VALUES(profile_name),
               checksum = VALUES(checksum),
-              command_uuid = VALUES(command_uuid)`,
+              command_uuid = VALUES(command_uuid)`),
 			strings.TrimSuffix(valuePart, ","),
 		)
 
@@ -2855,7 +2856,7 @@ func (ds *Datastore) NewMDMWindowsConfigProfile(ctx context.Context, cp fleet.MD
 	insertProfileStmt := `
 INSERT INTO
     mdm_windows_configuration_profiles (profile_uuid, team_id, name, syncml, uploaded_at)
-(SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP() FROM DUAL WHERE
+(SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP` + ds.dialect.FromDual() + ` WHERE
 	NOT EXISTS (
 		SELECT 1 FROM mdm_apple_configuration_profiles WHERE name = ? AND team_id = ?
 	) AND NOT EXISTS (
@@ -2917,7 +2918,7 @@ INSERT INTO
 		if len(labels) == 0 {
 			profsWithoutLabel = append(profsWithoutLabel, profileUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profsWithoutLabel, "windows"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profsWithoutLabel, "windows"); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting windows profile label associations")
 		}
 
@@ -2929,7 +2930,7 @@ INSERT INTO
 					FleetVariables: usesFleetVars,
 				},
 			}
-			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, profilesVarsToUpsert, "windows", false); err != nil {
+			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, profilesVarsToUpsert, "windows", false); err != nil {
 				return ctxerr.Wrap(ctx, err, "inserting windows profile variable associations")
 			}
 		}
@@ -2953,7 +2954,7 @@ func (ds *Datastore) SetOrUpdateMDMWindowsConfigProfile(ctx context.Context, cp 
 	stmt := `
 INSERT INTO
 	mdm_windows_configuration_profiles (profile_uuid, team_id, name, syncml, uploaded_at)
-(SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP() FROM DUAL WHERE
+(SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP` + ds.dialect.FromDual() + ` WHERE
 	NOT EXISTS (
 		SELECT 1 FROM mdm_apple_configuration_profiles WHERE name = ? AND team_id = ?
 	) AND NOT EXISTS (
@@ -2962,9 +2963,11 @@ INSERT INTO
 		SELECT 1 FROM mdm_android_configuration_profiles WHERE name = ? AND team_id = ?
 	)
 )
-ON DUPLICATE KEY UPDATE
-	uploaded_at = IF(syncml = VALUES(syncml), uploaded_at, CURRENT_TIMESTAMP()),
-	syncml = VALUES(syncml)
+` + ds.dialect.OnDuplicateKey("team_id,name", `
+	uploaded_at = CASE WHEN mdm_windows_configuration_profiles.syncml = VALUES(syncml)
+	                   THEN mdm_windows_configuration_profiles.uploaded_at
+	                   ELSE CURRENT_TIMESTAMP END,
+	syncml = VALUES(syncml)`) + `
 `
 
 	var teamID uint
@@ -3053,19 +3056,18 @@ WHERE
 `
 
 	// For Windows profiles, if team_id and name are the same, we do an update. Otherwise, we do an insert.
-	const insertNewOrEditedProfile = `
+	// UUID is generated in Go so both MySQL and PostgreSQL receive it as a parameter.
+	insertNewOrEditedProfile := `
 INSERT INTO
   mdm_windows_configuration_profiles (
     profile_uuid, team_id, name, syncml, uploaded_at
   )
 VALUES
-  -- see https://stackoverflow.com/a/51393124/1094941
-  ( CONCAT('` + fleet.MDMWindowsProfileUUIDPrefix + `', CONVERT(UUID() USING utf8mb4)), ?, ?, ?, CURRENT_TIMESTAMP() )
-ON DUPLICATE KEY UPDATE
-  uploaded_at = IF(syncml = VALUES(syncml) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP()),
+  (?, ?, ?, ?, CURRENT_TIMESTAMP)
+` + ds.dialect.OnDuplicateKey("team_id,name", `
+  uploaded_at = CASE WHEN mdm_windows_configuration_profiles.syncml = VALUES(syncml) AND mdm_windows_configuration_profiles.name = VALUES(name) THEN mdm_windows_configuration_profiles.uploaded_at ELSE CURRENT_TIMESTAMP END,
   name = VALUES(name),
-  syncml = VALUES(syncml)
-`
+  syncml = VALUES(syncml)`)
 
 	// use a profile team id of 0 if no-team
 	var profTeamID uint
@@ -3323,7 +3325,8 @@ ON DUPLICATE KEY UPDATE
 
 	// insert the new profiles and the ones that have changed
 	for _, p := range incomingProfs {
-		if result, err = tx.ExecContext(ctx, insertNewOrEditedProfile, profTeamID, p.Name,
+		profileUUID := fleet.MDMWindowsProfileUUIDPrefix + uuid.New().String()
+		if result, err = tx.ExecContext(ctx, insertNewOrEditedProfile, profileUUID, profTeamID, p.Name,
 			p.SyncML); err != nil {
 			return false, ctxerr.Wrapf(ctx, err, "insert new/edited profile with name %q", p.Name)
 		}
@@ -3398,8 +3401,7 @@ func (ds *Datastore) WipeHostViaWindowsMDM(ctx context.Context, host *fleet.Host
 				fleet_platform
 			)
 			VALUES (?, ?, ?)
-			ON DUPLICATE KEY UPDATE
-				wipe_ref   = VALUES(wipe_ref)`
+			` + ds.dialect.OnDuplicateKey("host_id", `wipe_ref = VALUES(wipe_ref)`)
 
 		if _, err := tx.ExecContext(ctx, stmt, host.ID, cmd.CommandUUID, host.FleetPlatform()); err != nil {
 			return ctxerr.Wrap(ctx, err, "modifying host_mdm_actions for wipe_ref")
@@ -3538,9 +3540,23 @@ func (ds *Datastore) MDMWindowsAcknowledgeEnrolledDeviceCredentials(ctx context.
 
 func (ds *Datastore) CleanupWindowsMDMCommandQueue(ctx context.Context) error {
 	const batchSize = 1000
-	// Multi-table DELETE does not support LIMIT directly, so we use a
-	// subquery to select the rows to delete in batches.
-	const stmt = `
+	// MySQL uses multi-table DELETE with JOIN; PostgreSQL uses DELETE … WHERE … IN (subquery).
+	var stmt string
+	if ds.dialect.IsPostgres() {
+		stmt = `
+DELETE FROM windows_mdm_command_queue
+WHERE (enrollment_id, command_uuid) IN (
+    SELECT q2.enrollment_id, q2.command_uuid
+    FROM windows_mdm_command_queue q2
+    INNER JOIN windows_mdm_command_results r
+        ON r.enrollment_id = q2.enrollment_id AND r.command_uuid = q2.command_uuid
+    WHERE r.created_at < NOW() - INTERVAL '1 hour'
+    LIMIT ?
+)`
+	} else {
+		// Multi-table DELETE does not support LIMIT directly, so we use a
+		// subquery to select the rows to delete in batches.
+		stmt = `
 DELETE q FROM windows_mdm_command_queue q
 INNER JOIN (
     SELECT q2.enrollment_id, q2.command_uuid
@@ -3550,6 +3566,7 @@ INNER JOIN (
     WHERE r.created_at < NOW() - INTERVAL 1 HOUR
     LIMIT ?
 ) batch ON batch.enrollment_id = q.enrollment_id AND batch.command_uuid = q.command_uuid`
+	}
 	const maxBatches = 500 // cap total work per cron tick (500k rows)
 	var totalDeleted int64
 	exhausted := true

@@ -1478,7 +1478,7 @@ func testListMDMAndroidProfilesToSend(t *testing.T, ds *Datastore) {
 
 	// Turn off MDM on host 2 - it should no longer have any operations listed
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, `UPDATE host_mdm SET enrolled=0 WHERE host_id=?`, hosts[2].ID)
+		_, err := q.ExecContext(ctx, `UPDATE host_mdm SET enrolled = false WHERE host_id=?`, hosts[2].ID)
 		return err
 	})
 
@@ -1495,7 +1495,7 @@ func testListMDMAndroidProfilesToSend(t *testing.T, ds *Datastore) {
 
 	// Turn off MDM on host 0 - no more profiles to send
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, `UPDATE host_mdm SET enrolled=0 WHERE host_id=?`, hosts[0].ID)
+		_, err := q.ExecContext(ctx, `UPDATE host_mdm SET enrolled = false WHERE host_id=?`, hosts[0].ID)
 		return err
 	})
 	profs, toRemoveProfs, err = ds.ListMDMAndroidProfilesToSend(ctx)
@@ -2321,7 +2321,7 @@ func testAndroidBYODDetection(t *testing.T, ds *Datastore) {
 			`SELECT is_personal_enrollment FROM host_mdm WHERE host_id = ?`,
 			result.Host.ID)
 		require.NoError(t, err)
-		assert.True(t, isPersonalEnrollment, "BYOD device with UUID should have is_personal_enrollment = 1")
+		assert.True(t, isPersonalEnrollment, "BYOD device with UUID should have is_personal_enrollment = true")
 	})
 
 	// Test 2: Android host without UUID (company-owned device)
@@ -2339,7 +2339,7 @@ func testAndroidBYODDetection(t *testing.T, ds *Datastore) {
 			`SELECT is_personal_enrollment FROM host_mdm WHERE host_id = ?`,
 			result.Host.ID)
 		require.NoError(t, err)
-		assert.False(t, isPersonalEnrollment, "Company device  should have is_personal_enrollment = 0")
+		assert.False(t, isPersonalEnrollment, "Company device  should have is_personal_enrollment = false")
 	})
 
 	// Test 3: Verify update path also sets personal enrollment correctly
@@ -2371,7 +2371,7 @@ func testAndroidBYODDetection(t *testing.T, ds *Datastore) {
 			`SELECT is_personal_enrollment FROM host_mdm WHERE host_id = ?`,
 			result.Host.ID)
 		require.NoError(t, err)
-		assert.True(t, isPersonalEnrollment, "After update with UUID should have is_personal_enrollment = 1")
+		assert.True(t, isPersonalEnrollment, "After update with UUID should have is_personal_enrollment = true")
 	})
 }
 
@@ -2510,7 +2510,7 @@ func testBulkSetAndroidHostsUnenrolled(t *testing.T, ds *Datastore) {
 	enrolledCount := 0
 	androidHostProfileCount := 0
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		return sqlx.GetContext(testCtx(), q, &enrolledCount, `SELECT COUNT(*) FROM host_mdm WHERE enrolled = 1`)
+		return sqlx.GetContext(testCtx(), q, &enrolledCount, `SELECT COUNT(*) FROM host_mdm WHERE enrolled = true`)
 	})
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
 		return sqlx.GetContext(testCtx(), q, &androidHostProfileCount, `SELECT COUNT(*) FROM host_mdm_android_profiles`)
@@ -2527,7 +2527,7 @@ func testBulkSetAndroidHostsUnenrolled(t *testing.T, ds *Datastore) {
 	err = ds.BulkSetAndroidHostsUnenrolled(testCtx())
 	require.NoError(t, err)
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		return sqlx.GetContext(testCtx(), q, &enrolledCount, `SELECT COUNT(*) FROM host_mdm WHERE enrolled = 1`)
+		return sqlx.GetContext(testCtx(), q, &enrolledCount, `SELECT COUNT(*) FROM host_mdm WHERE enrolled = true`)
 	})
 	require.Equal(t, 1, enrolledCount)
 

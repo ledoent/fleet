@@ -42,9 +42,7 @@ func (ds *Datastore) NewTeam(ctx context.Context, team *fleet.Team) (*fleet.Team
       config
     ) VALUES (?, ?, ?, ?)
     `
-		result, err := tx.ExecContext(
-			ctx,
-			query,
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, query,
 			team.Name,
 			team.Filename,
 			team.Description,
@@ -54,7 +52,6 @@ func (ds *Datastore) NewTeam(ctx context.Context, team *fleet.Team) (*fleet.Team
 			return ctxerr.Wrap(ctx, err, "insert team")
 		}
 
-		id, _ := result.LastInsertId()
 		team.ID = uint(id) //nolint:gosec // dismiss G115
 		team.CreatedAt = time.Now().UTC().Truncate(time.Second)
 
@@ -143,6 +140,7 @@ var teamRefs = []string{
 	"mdm_windows_configuration_profiles",
 	"mdm_apple_declarations",
 	"mdm_android_configuration_profiles",
+	"android_app_configurations",
 	"certificate_templates",
 	"software_title_icons",
 	"software_title_display_names",
@@ -161,9 +159,6 @@ var teamLabelsRefs = []string{
 }
 
 func (ds *Datastore) DeleteTeam(ctx context.Context, tid uint) error {
-	// Enqueue <Delete> commands for Windows profiles. This must run
-	// first because the main transaction deletes the config profile rows
-	// (which contain the SyncML bytes needed to generate <Delete> commands).
 	if err := ds.enqueueWindowsDeleteCommandsForTeam(ctx, tid); err != nil {
 		return ctxerr.Wrapf(ctx, err, "enqueuing windows delete commands for team %d", tid)
 	}
@@ -680,7 +675,7 @@ func (ds *Datastore) SaveDefaultTeamConfig(ctx context.Context, config *fleet.Te
 
 	_, err = ds.writer(ctx).ExecContext(ctx,
 		`INSERT INTO default_team_config_json(id, json_value) VALUES(1, ?)
-		 ON DUPLICATE KEY UPDATE json_value = VALUES(json_value)`,
+		 `+ds.dialect.OnDuplicateKey("id", `json_value = VALUES(json_value)`),
 		configBytes,
 	)
 	return ctxerr.Wrap(ctx, err, "save default team config")
