@@ -24,10 +24,25 @@ interface Probe {
   group: string;
   name: string;
   path: string;
+  // Default GET. orbit/osquery endpoints use POST with a JSON body.
+  method?: "GET" | "POST";
+  body?: Record<string, unknown>;
+  // Some endpoints (orbit/osquery) authenticate via node_key, not the
+  // bearer token — our fake key is meant to FAIL auth, so 401/403 is the
+  // expected "no PG error" outcome. Setting this flag tells check() to
+  // accept 4xx as a pass when the body contains no PG-error markers.
+  expectAuthFail?: boolean;
 }
 
 async function check(request: APIRequestContext, probe: Probe) {
-  const res = await request.get(probe.path);
+  const method = probe.method ?? "GET";
+  const res =
+    method === "POST"
+      ? await request.post(probe.path, {
+          data: probe.body ?? {},
+          headers: { "content-type": "application/json" },
+        })
+      : await request.get(probe.path);
   const status = res.status();
   let body = "";
   try {
@@ -36,14 +51,14 @@ async function check(request: APIRequestContext, probe: Probe) {
     /* ignore */
   }
 
-  if (status === 401 || status === 403) {
+  if (!probe.expectAuthFail && (status === 401 || status === 403)) {
     throw new Error(`auth failure (${status}) on ${probe.path} — check FLEET_TOKEN`);
   }
 
   const matched = PG_ERROR_MARKERS.find((m) => body.includes(m));
   expect(
     matched,
-    `[${probe.group}] ${probe.name}\nGET ${probe.path}\nstatus=${status}\nbody snippet:\n${body.slice(0, 400)}`,
+    `[${probe.group}] ${probe.name}\n${method} ${probe.path}\nstatus=${status}\nbody snippet:\n${body.slice(0, 400)}`,
   ).toBeUndefined();
   expect(status, `HTTP ${status} on ${probe.path}`).toBeLessThan(500);
 }
@@ -256,6 +271,117 @@ function hostDetailProbes(hostIds: number[]): Probe[] {
   return ps;
 }
 
+// orbitProbes covers every POST endpoint orbit talks to during enrollment
+// + ongoing host operation. Each fires with a fake orbit_node_key. Auth
+// should fail (401) — that's the SUCCESS case for SQL-error detection:
+// it means the SQL query inside the auth middleware
+// (SELECT … FROM hosts WHERE orbit_node_key = ?) ran without an SQLSTATE
+// crash.
+//
+// LIMITATION: a fake key rejects at auth-time, so these probes do NOT
+// exercise the per-endpoint handler SQL. For example, the
+// setup_experience/init COALESCE bug fixed in df17814bc7 lives past the
+// auth gate — these probes alone wouldn't have caught it. Catching
+// post-auth SQL crashes requires a real enrolled host's orbit_node_key,
+// which means provisioning a throwaway host (or extracting a fixture key
+// from the test DB) and running an "authenticated orbit" probe set.
+// Tracked as a future harness expansion.
+//
+// Source list: server/service/handler.go:1006-1099. Update when new orbit
+// endpoints land upstream.
+function orbitProbes(): Probe[] {
+  const fakeKey = "pg-compat-harness-fake-orbit-node-key";
+  const fakeUUID = "00000000-0000-0000-0000-pgcompathar000";
+  const post = (name: string, path: string, extra?: Record<string, unknown>): Probe => ({
+    group: "orbit",
+    name,
+    path,
+    method: "POST",
+    body: { orbit_node_key: fakeKey, ...extra },
+    expectAuthFail: true,
+  });
+  return [
+    post("enroll", "/api/fleet/orbit/enroll", {
+      enroll_secret: "pg-compat-harness-fake-enroll-secret",
+      hardware_uuid: fakeUUID,
+      hardware_serial: "PG-HARNESS-001",
+      hostname: "pg-compat-harness-host",
+      platform: "darwin",
+      osquery_identifier: fakeUUID,
+    }),
+    post("config", "/api/fleet/orbit/config"),
+    post("ping", "/api/fleet/orbit/ping"),
+    post("device_token", "/api/fleet/orbit/device_token", {
+      device_auth_token: "pg-compat-harness-fake-device-token",
+    }),
+    post("scripts/request", "/api/fleet/orbit/scripts/request", {
+      execution_id: fakeUUID,
+    }),
+    post("scripts/result", "/api/fleet/orbit/scripts/result", {
+      execution_id: fakeUUID,
+      output: "",
+      exit_code: 0,
+    }),
+    post("software_install/result", "/api/fleet/orbit/software_install/result", {
+      install_uuid: fakeUUID,
+      install_script_exit_code: 0,
+    }),
+    post("software_install/package", "/api/fleet/orbit/software_install/package", {
+      install_uuid: fakeUUID,
+    }),
+    post("software_install/details", "/api/fleet/orbit/software_install/details", {
+      install_uuid: fakeUUID,
+    }),
+    post("setup_experience/init", "/api/fleet/orbit/setup_experience/init"),
+    post("setup_experience/status", "/api/fleet/orbit/setup_experience/status"),
+    post("disk_encryption_key", "/api/fleet/orbit/disk_encryption_key", {
+      encryption_key: "pg-compat-harness-fake-encryption-key",
+      client_error: "",
+    }),
+    post("luks_data", "/api/fleet/orbit/luks_data", {
+      passphrase: "pg-compat-harness-fake-luks-passphrase",
+      salt: "pg-compat-harness-fake-luks-salt",
+      key_slot: 1,
+      client_error: "",
+    }),
+  ];
+}
+
+// osqueryProbes covers the osquery agent endpoints (separate auth domain
+// from orbit — uses node_key, not orbit_node_key). Same SQL-error
+// detection contract.
+function osqueryProbes(): Probe[] {
+  const fakeKey = "pg-compat-harness-fake-osquery-node-key";
+  const fakeUUID = "00000000-0000-0000-0000-pgcompathar000";
+  const post = (name: string, path: string, extra?: Record<string, unknown>): Probe => ({
+    group: "osquery",
+    name,
+    path,
+    method: "POST",
+    body: { node_key: fakeKey, ...extra },
+    expectAuthFail: true,
+  });
+  return [
+    post("enroll", "/api/osquery/enroll", {
+      enroll_secret: "pg-compat-harness-fake-enroll-secret",
+      host_identifier: fakeUUID,
+      host_details: {},
+    }),
+    post("config", "/api/osquery/config"),
+    post("distributed/read", "/api/osquery/distributed/read"),
+    post("distributed/write", "/api/osquery/distributed/write", { queries: {} }),
+    post("carve/begin", "/api/osquery/carve/begin", {
+      block_count: 1,
+      block_size: 1024,
+      carve_size: 1024,
+      carve_id: fakeUUID,
+      request_id: fakeUUID,
+      carve_guid: fakeUUID,
+    }),
+    post("log", "/api/osquery/log", { log_type: "result", data: [] }),
+  ];
+}
+
 function miscProbes(): Probe[] {
   return [
     { group: "config", name: "config", path: `${API}/config` },
@@ -308,6 +434,8 @@ runAll("software (deprecated)", softwareProbes());
 runAll("vulnerabilities", vulnProbes());
 runAll("dashboard / host summary", dashboardProbes());
 runAll("labels", labelProbes());
+runAll("orbit (agent POSTs)", orbitProbes());
+runAll("osquery (agent POSTs)", osqueryProbes());
 runAll("misc", miscProbes());
 
 test.describe("host detail (dynamic)", () => {
