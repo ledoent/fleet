@@ -50,6 +50,32 @@ BEGIN
             NULL;
         END;
     END LOOP;
+
+    -- Functions need the same treatment: when an earlier baseline load ran
+    -- as `postgres`, public functions (notably fleet_set_updated_at) end up
+    -- owned by `postgres`. The next startup hits CREATE OR REPLACE FUNCTION
+    -- below and PG rejects with "must be owner of function ..." because the
+    -- application user can't replace something it doesn't own.
+    --
+    -- pg_proc.proname is unqualified; we look up by schema via pg_namespace.
+    -- format() with %I emits a quoted identifier for the function name and
+    -- pg_get_function_identity_arguments() emits the argument signature so
+    -- overloads resolve unambiguously.
+    FOR obj IN
+        SELECT p.oid, p.proname,
+               pg_get_function_identity_arguments(p.oid) AS args
+        FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'public'
+          AND pg_get_userbyid(p.proowner) != app_role
+    LOOP
+        BEGIN
+            EXECUTE format('ALTER FUNCTION public.%I(%s) OWNER TO %I',
+                obj.proname, obj.args, app_role);
+        EXCEPTION WHEN insufficient_privilege THEN
+            NULL;
+        END;
+    END LOOP;
 END $$;
 
 -- fleet_set_updated_at: trigger function used by per-table updated_at triggers.
