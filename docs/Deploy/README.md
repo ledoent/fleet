@@ -12,5 +12,8 @@ An opinionated view of running Fleet in a production environment, and configurat
 ### [Single sign-on (SSO)](./reference-architectures.md#monitoring-fleet)
 Learn how to connect Fleet to a SAML identity provider.
 
+### [PostgreSQL deployment (experimental)](./postgresql.md)
+Operator guide for running this fork against PostgreSQL 16 instead of MySQL.
+
 
 <meta name="description" value="An overview of the deployment documentation for Fleet.">
