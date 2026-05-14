@@ -16,3 +16,11 @@
 # If you cannot defend an entry with a comment, the right fix is to regenerate
 # pg_baseline_schema.sql (see its file header for the canonical pg_dump
 # command) or to actually fix the schema drift in production.
+
+# orbit_debug_until lands upstream in PR #45367 (commit bee5edaa0b on
+# aggregated, post-2026-05-14) which the PG baseline hasn't picked up yet
+# because that migration hasn't run on the prod source DB we dumped from.
+# The corresponding upstream migration will add the column to PG on next
+# fleet startup; once that lands, regenerate the baseline and remove this
+# allowlist entry.
+mysql-only: hosts.orbit_debug_until
