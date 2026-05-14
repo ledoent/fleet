@@ -121,7 +121,7 @@ func testEnqueueSetupExperienceLinuxScriptPackages(t *testing.T, ds *Datastore) 
 
 	// Mark all installers for setup experience
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id IN (?, ?, ?)",
+		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id IN (?, ?, ?)",
 			installerIDSh, installerIDDeb, installerIDTarGz)
 		return err
 	})
@@ -132,9 +132,9 @@ func testEnqueueSetupExperienceLinuxScriptPackages(t *testing.T, ds *Datastore) 
 
 		// Mark only .sh for setup experience, disable others temporarily
 		ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-			_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 0 WHERE id IN (?, ?)", installerIDDeb, installerIDTarGz)
+			_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = false WHERE id IN (?, ?)", installerIDDeb, installerIDTarGz)
 			require.NoError(t, err)
-			_, err = q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id = ?", installerIDSh)
+			_, err = q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id = ?", installerIDSh)
 			return err
 		})
 
@@ -155,7 +155,7 @@ func testEnqueueSetupExperienceLinuxScriptPackages(t *testing.T, ds *Datastore) 
 
 		// Re-enable all for next tests
 		ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-			_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id IN (?, ?, ?)",
+			_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id IN (?, ?, ?)",
 				installerIDSh, installerIDDeb, installerIDTarGz)
 			return err
 		})
@@ -166,9 +166,9 @@ func testEnqueueSetupExperienceLinuxScriptPackages(t *testing.T, ds *Datastore) 
 		hostRhelShOnly := "rhel-sh-only-" + uuid.NewString()
 
 		ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-			_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 0 WHERE id IN (?, ?)", installerIDDeb, installerIDTarGz)
+			_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = false WHERE id IN (?, ?)", installerIDDeb, installerIDTarGz)
 			require.NoError(t, err)
-			_, err = q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id = ?", installerIDSh)
+			_, err = q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id = ?", installerIDSh)
 			return err
 		})
 
@@ -186,7 +186,7 @@ func testEnqueueSetupExperienceLinuxScriptPackages(t *testing.T, ds *Datastore) 
 		require.Equal(t, "Script Package", rows[0].Name)
 
 		ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-			_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id IN (?, ?, ?)",
+			_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id IN (?, ?, ?)",
 				installerIDSh, installerIDDeb, installerIDTarGz)
 			return err
 		})
@@ -289,7 +289,7 @@ func testEnqueueSetupExperienceItemsWindows(t *testing.T, ds *Datastore) {
 	require.NoError(t, err)
 
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id IN (?, ?)", installerID1, installerID2)
+		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id IN (?, ?)", installerID1, installerID2)
 		return err
 	})
 
@@ -492,7 +492,7 @@ func testEnqueueSetupExperienceItems(t *testing.T, ds *Datastore) {
 	require.NoError(t, err)
 
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id IN (?, ?)", installerID1, installerID2)
+		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id IN (?, ?)", installerID1, installerID2)
 		return err
 	})
 
@@ -506,7 +506,7 @@ func testEnqueueSetupExperienceItems(t *testing.T, ds *Datastore) {
 	require.NoError(t, err)
 
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE vpp_apps_teams SET install_during_setup = 1 WHERE adam_id IN (?, ?)", vpp1.AdamID, vpp2.AdamID)
+		_, err := q.ExecContext(ctx, "UPDATE vpp_apps_teams SET install_during_setup = true WHERE adam_id IN (?, ?)", vpp1.AdamID, vpp2.AdamID)
 		return err
 	})
 
@@ -840,16 +840,16 @@ func testEnqueueSetupExperienceItemsWithDisplayName(t *testing.T, ds *Datastore)
 
 	// Mark both installers for setup experience
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id IN (?, ?)", installerID1, installerID2)
+		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id IN (?, ?)", installerID1, installerID2)
 		return err
 	})
 
 	// Set custom display names that invert the alphabetical order
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		if err := updateSoftwareTitleDisplayName(ctx, q, &team.ID, titleID1, "Zulu Custom"); err != nil {
+		if err := updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, titleID1, "Zulu Custom"); err != nil {
 			return err
 		}
-		return updateSoftwareTitleDisplayName(ctx, q, &team.ID, titleID2, "Alpha Custom")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, titleID2, "Alpha Custom")
 	})
 
 	// Create two VPP apps with titles that sort in a known order, then invert with display names.
@@ -871,16 +871,16 @@ func testEnqueueSetupExperienceItemsWithDisplayName(t *testing.T, ds *Datastore)
 
 	// Mark both VPP apps for setup experience
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE vpp_apps_teams SET install_during_setup = 1 WHERE adam_id IN (?, ?)", vpp1.AdamID, vpp2.AdamID)
+		_, err := q.ExecContext(ctx, "UPDATE vpp_apps_teams SET install_during_setup = true WHERE adam_id IN (?, ?)", vpp1.AdamID, vpp2.AdamID)
 		return err
 	})
 
 	// Set custom display names for VPP apps (invert order)
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		if err := updateSoftwareTitleDisplayName(ctx, q, &team.ID, vppApp1.TitleID, "Zulu VPP Custom"); err != nil {
+		if err := updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, vppApp1.TitleID, "Zulu VPP Custom"); err != nil {
 			return err
 		}
-		return updateSoftwareTitleDisplayName(ctx, q, &team.ID, vppApp2.TitleID, "Alpha VPP Custom")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, vppApp2.TitleID, "Alpha VPP Custom")
 	})
 
 	// Create a host assigned to the team and enqueue setup experience.
@@ -960,7 +960,7 @@ func testEnqueueSetupExperienceItemsWithDisplayName(t *testing.T, ds *Datastore)
 	require.NoError(t, err)
 
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id NOT IN (?, ?)", installerID1, installerID2)
+		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id NOT IN (?, ?)", installerID1, installerID2)
 		return err
 	})
 
@@ -973,7 +973,7 @@ func testEnqueueSetupExperienceItemsWithDisplayName(t *testing.T, ds *Datastore)
 	require.NoError(t, err)
 
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE vpp_apps_teams SET install_during_setup = 1 WHERE adam_id = ?", vpp3.AdamID)
+		_, err := q.ExecContext(ctx, "UPDATE vpp_apps_teams SET install_during_setup = true WHERE adam_id = ?", vpp3.AdamID)
 		return err
 	})
 
@@ -1150,7 +1150,7 @@ func testGetSetupExperienceTitles(t *testing.T, ds *Datastore) {
 	assert.NotNil(t, meta)
 
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = 1 WHERE id IN (?, ?, ?, ?)", installerID1, installerID3, installerID4, installerID5)
+		_, err := q.ExecContext(ctx, "UPDATE software_installers SET install_during_setup = true WHERE id IN (?, ?, ?, ?)", installerID1, installerID3, installerID4, installerID5)
 		return err
 	})
 
@@ -1190,7 +1190,7 @@ func testGetSetupExperienceTitles(t *testing.T, ds *Datastore) {
 	require.NoError(t, err)
 
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		_, err := q.ExecContext(ctx, "UPDATE vpp_apps_teams SET install_during_setup = 1 WHERE adam_id IN (?, ?, ?)", vpp1.AdamID, vpp2.AdamID, vpp3.AdamID)
+		_, err := q.ExecContext(ctx, "UPDATE vpp_apps_teams SET install_during_setup = true WHERE adam_id IN (?, ?, ?)", vpp1.AdamID, vpp2.AdamID, vpp3.AdamID)
 		return err
 	})
 

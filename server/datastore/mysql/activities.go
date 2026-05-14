@@ -50,28 +50,29 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 	// NOTE: Be sure to update both the count (above) and list statements (below)
 	// if the query condition is modified.
 
+	jsonObj := ds.dialect.JSONObjectFunc()
 	listStmts := []string{
 		// list pending scripts
-		`SELECT
+		fmt.Sprintf(`SELECT
 			ua.execution_id as uuid,
-			IF(ua.fleet_initiated, 'Fleet', COALESCE(u.name, ua.payload->>'$.user.name')) as name,
+			CASE WHEN ua.fleet_initiated THEN 'Fleet' ELSE COALESCE(u.name, ua.payload->>'$.user.name') END as name,
 			u.id as user_id,
 			u.api_only as api_only,
 			COALESCE(u.gravatar_url, ua.payload->>'$.user.gravatar_url') as gravatar_url,
 			COALESCE(u.email, ua.payload->>'$.user.email') as user_email,
 			:ran_script_type as activity_type,
 			ua.created_at as created_at,
-			JSON_OBJECT(
+			%s(
 				'host_id', ua.host_id,
 				'host_display_name', COALESCE(hdn.display_name, ''),
 				'script_name', COALESCE(ses.name, scr.name, ''),
 				'script_execution_id', ua.execution_id,
 				'batch_execution_id', bahr.batch_execution_id,
-				'async', NOT ua.payload->'$.sync_request',
+				'async', COALESCE(ua.payload->>'$.sync_request', '0') != '1',
 				'policy_id', sua.policy_id,
 				'policy_name', p.name
 			) as details,
-			IF(ua.activated_at IS NULL, 0, 1) as topmost,
+			CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as topmost,
 			ua.priority as priority,
 			ua.fleet_initiated as fleet_initiated
 		FROM
@@ -93,30 +94,30 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 		WHERE
 			ua.host_id = :host_id AND
 			ua.activity_type = 'script'
-`,
+`, jsonObj),
 		// list pending software installs
-		`SELECT
+		fmt.Sprintf(`SELECT
 			ua.execution_id as uuid,
-			IF(ua.fleet_initiated, 'Fleet', COALESCE(u.name, ua.payload->>'$.user.name')) AS name,
+			CASE WHEN ua.fleet_initiated THEN 'Fleet' ELSE COALESCE(u.name, ua.payload->>'$.user.name') END AS name,
 			ua.user_id as user_id,
 			u.api_only as api_only,
 			COALESCE(u.gravatar_url, ua.payload->>'$.user.gravatar_url') as gravatar_url,
 			COALESCE(u.email, ua.payload->>'$.user.email') as user_email,
 			:installed_software_type as activity_type,
 			ua.created_at as created_at,
-			JSON_OBJECT(
+			%s(
 				'host_id', ua.host_id,
 				'host_display_name', COALESCE(hdn.display_name, ''),
 				'software_title', COALESCE(st.name, ua.payload->>'$.software_title_name', ''),
 				'software_package', COALESCE(si.filename, ua.payload->>'$.installer_filename', ''),
 				'install_uuid', ua.execution_id,
 				'status', 'pending_install',
-				'self_service', ua.payload->'$.self_service' IS TRUE,
+				'self_service', COALESCE(ua.payload->>'$.self_service', '0') = '1',
 				'source', COALESCE(st.source, ua.payload->>'$.source'),
 				'policy_id', siua.policy_id,
 				'policy_name', p.name
 			) as details,
-			IF(ua.activated_at IS NULL, 0, 1) as topmost,
+			CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as topmost,
 			ua.priority as priority,
 			ua.fleet_initiated as fleet_initiated
 		FROM
@@ -136,29 +137,29 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 		WHERE
 			ua.host_id = :host_id AND
 			ua.activity_type = 'software_install'
-		`,
+		`, jsonObj),
 		// list pending software uninstalls
-		`SELECT
+		fmt.Sprintf(`SELECT
 			ua.execution_id as uuid,
-			IF(ua.fleet_initiated, 'Fleet', COALESCE(u.name, ua.payload->>'$.user.name')) AS name,
+			CASE WHEN ua.fleet_initiated THEN 'Fleet' ELSE COALESCE(u.name, ua.payload->>'$.user.name') END AS name,
 			ua.user_id as user_id,
 			u.api_only as api_only,
 			COALESCE(u.gravatar_url, ua.payload->>'$.user.gravatar_url') as gravatar_url,
 			COALESCE(u.email, ua.payload->>'$.user.email') as user_email,
 			:uninstalled_software_type as activity_type,
 			ua.created_at as created_at,
-			JSON_OBJECT(
+			%s(
 				'host_id', ua.host_id,
 				'host_display_name', COALESCE(hdn.display_name, ''),
 				'software_title', COALESCE(st.name, ua.payload->>'$.software_title_name', ''),
 				'script_execution_id', ua.execution_id,
 				'status', 'pending_uninstall',
-				'self_service', COALESCE(ua.payload->'$.self_service', FALSE) IS TRUE,
+				'self_service', COALESCE(ua.payload->>'$.self_service', '0') = '1',
 				'source', COALESCE(st.source, ua.payload->>'$.source'),
 				'policy_id', siua.policy_id,
 				'policy_name', p.name
 			) as details,
-			IF(ua.activated_at IS NULL, 0, 1) as topmost,
+			CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as topmost,
 			ua.priority as priority,
 			ua.fleet_initiated as fleet_initiated
 		FROM
@@ -178,28 +179,28 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 		WHERE
 			ua.host_id = :host_id AND
 			activity_type = 'software_uninstall'
-		`,
+		`, jsonObj),
 		// list pending VPP apps
-		`SELECT
+		fmt.Sprintf(`SELECT
 			ua.execution_id AS uuid,
-			IF(ua.fleet_initiated, 'Fleet', COALESCE(u.name, ua.payload->>'$.user.name')) AS name,
+			CASE WHEN ua.fleet_initiated THEN 'Fleet' ELSE COALESCE(u.name, ua.payload->>'$.user.name') END AS name,
 			u.id AS user_id,
 			u.api_only as api_only,
 			COALESCE(u.gravatar_url, ua.payload->>'$.user.gravatar_url') as gravatar_url,
 			COALESCE(u.email, ua.payload->>'$.user.email') as user_email,
 			:installed_app_store_app_type AS activity_type,
 			ua.created_at AS created_at,
-			JSON_OBJECT(
+			%s(
 				'host_id', ua.host_id,
 				'host_display_name', COALESCE(hdn.display_name, ''),
 				'software_title', COALESCE(st.name, ''),
 				'app_store_id', vaua.adam_id,
 				'command_uuid', ua.execution_id,
-				'self_service', ua.payload->'$.self_service' IS TRUE,
+				'self_service', COALESCE(ua.payload->>'$.self_service', '0') = '1',
 				'status', 'pending_install',
 				'host_platform', h.platform
 			) AS details,
-			IF(ua.activated_at IS NULL, 0, 1) as topmost,
+			CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as topmost,
 			ua.priority as priority,
 			ua.fleet_initiated as fleet_initiated
 		FROM
@@ -219,26 +220,26 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 		WHERE
 			ua.host_id = :host_id AND
 			ua.activity_type = 'vpp_app_install'
-		`,
+		`, jsonObj),
 		// list pending in-house apps
-		`SELECT
+		fmt.Sprintf(`SELECT
 			ua.execution_id AS uuid,
-			IF(ua.fleet_initiated, 'Fleet', COALESCE(u.name, ua.payload->>'$.user.name')) AS name,
+			CASE WHEN ua.fleet_initiated THEN 'Fleet' ELSE COALESCE(u.name, ua.payload->>'$.user.name') END AS name,
 			u.id AS user_id,
 			u.api_only as api_only,
 			COALESCE(u.gravatar_url, ua.payload->>'$.user.gravatar_url') as gravatar_url,
 			COALESCE(u.email, ua.payload->>'$.user.email') as user_email,
 			:installed_software_type as activity_type,
 			ua.created_at AS created_at,
-			JSON_OBJECT(
+			%s(
 				'host_id', ua.host_id,
 				'host_display_name', COALESCE(hdn.display_name, ''),
 				'software_title', COALESCE(st.name, ''),
 				'command_uuid', ua.execution_id,
-				'self_service', ua.payload->'$.self_service' IS TRUE,
+				'self_service', COALESCE(ua.payload->>'$.self_service', '0') = '1',
 				'status', 'pending_install'
 			) AS details,
-			IF(ua.activated_at IS NULL, 0, 1) as topmost,
+			CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as topmost,
 			ua.priority as priority,
 			ua.fleet_initiated as fleet_initiated
 		FROM
@@ -254,7 +255,7 @@ func (ds *Datastore) ListHostUpcomingActivities(ctx context.Context, hostID uint
 		WHERE
 			ua.host_id = :host_id AND
 			ua.activity_type = 'in_house_app_install'
-		`,
+		`, jsonObj),
 	}
 
 	listStmt := `
@@ -471,7 +472,7 @@ func (ds *Datastore) cancelHostUpcomingActivity(ctx context.Context, tx sqlx.Ext
 		COALESCE(hdn.display_name, '') as host_display_name,
 		COALESCE(ses.name, scr.name, '') as canceled_name, -- script name in this case
 		NULL as canceled_id, -- no ID for scripts in the canceled activity
-		IF(ua.activated_at IS NULL, 0, 1) as activated
+		CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as activated
 	FROM
 		upcoming_activities ua
 	INNER JOIN
@@ -495,7 +496,7 @@ func (ds *Datastore) cancelHostUpcomingActivity(ctx context.Context, tx sqlx.Ext
 		COALESCE(hdn.display_name, '') as host_display_name,
 		COALESCE(st.name, ua.payload->>'$.software_title_name', '') as canceled_name, -- software title name in this case
 		st.id as canceled_id,
-		IF(ua.activated_at IS NULL, 0, 1) as activated
+		CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as activated
 	FROM
 		upcoming_activities ua
 	INNER JOIN
@@ -519,7 +520,7 @@ func (ds *Datastore) cancelHostUpcomingActivity(ctx context.Context, tx sqlx.Ext
 		COALESCE(hdn.display_name, '') as host_display_name,
 		COALESCE(st.name, ua.payload->>'$.software_title_name', '') as canceled_name, -- software title name in this case
 		st.id as canceled_id,
-		IF(ua.activated_at IS NULL, 0, 1) as activated
+		CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as activated
 	FROM
 		upcoming_activities ua
 	INNER JOIN
@@ -543,7 +544,7 @@ func (ds *Datastore) cancelHostUpcomingActivity(ctx context.Context, tx sqlx.Ext
 		COALESCE(hdn.display_name, '') as host_display_name,
 		COALESCE(st.name, '') as canceled_name, -- software title name in this case
 		st.id as canceled_id,
-		IF(ua.activated_at IS NULL, 0, 1) as activated
+		CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as activated
 	FROM
 		upcoming_activities ua
 	INNER JOIN
@@ -567,7 +568,7 @@ func (ds *Datastore) cancelHostUpcomingActivity(ctx context.Context, tx sqlx.Ext
 		COALESCE(hdn.display_name, '') as host_display_name,
 		COALESCE(st.name, '') as canceled_name, -- software title name in this case
 		st.id as canceled_id,
-		IF(ua.activated_at IS NULL, 0, 1) as activated
+		CASE WHEN ua.activated_at IS NULL THEN 0 ELSE 1 END as activated
 	FROM
 		upcoming_activities ua
 	INNER JOIN
@@ -692,12 +693,12 @@ func cancelHostInHouseAppInstallUpcomingActivity(ctx context.Context, tx sqlx.Ex
 	// update for that in this case.
 
 	if act.Activated {
-		const updInHouseStmt = `UPDATE host_in_house_software_installs SET canceled = 1 WHERE command_uuid = ?`
+		const updInHouseStmt = `UPDATE host_in_house_software_installs SET canceled = true WHERE command_uuid = ?`
 		if _, err := tx.ExecContext(ctx, updInHouseStmt, executionID); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "update host_in_house_software_installs as canceled")
 		}
 
-		const updNanoStmt = `UPDATE nano_enrollment_queue SET active = 0 WHERE id = ? AND command_uuid = ?`
+		const updNanoStmt = `UPDATE nano_enrollment_queue SET active = false WHERE id = ? AND command_uuid = ?`
 		if _, err := tx.ExecContext(ctx, updNanoStmt, hostUUID, executionID); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "update nano_enrollment_queue as canceled")
 		}
@@ -730,12 +731,12 @@ func cancelHostVPPAppInstallUpcomingActivity(ctx context.Context, tx sqlx.ExtCon
 	}
 
 	if act.Activated {
-		const updVPPStmt = `UPDATE host_vpp_software_installs SET canceled = 1 WHERE command_uuid = ?`
+		const updVPPStmt = `UPDATE host_vpp_software_installs SET canceled = true WHERE command_uuid = ?`
 		if _, err := tx.ExecContext(ctx, updVPPStmt, executionID); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "update host_vpp_software_installs as canceled")
 		}
 
-		const updNanoStmt = `UPDATE nano_enrollment_queue SET active = 0 WHERE id = ? AND command_uuid = ?`
+		const updNanoStmt = `UPDATE nano_enrollment_queue SET active = false WHERE id = ? AND command_uuid = ?`
 		if _, err := tx.ExecContext(ctx, updNanoStmt, hostUUID, executionID); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "update nano_enrollment_queue as canceled")
 		}
@@ -765,12 +766,12 @@ func cancelHostSoftwareUninstallUpcomingActivity(ctx context.Context, tx sqlx.Ex
 	if act.Activated {
 		// uninstall is a combination of software install and script result,
 		// with the same execution id.
-		const updSoftwareStmt = `UPDATE host_software_installs SET canceled = 1 WHERE execution_id = ?`
+		const updSoftwareStmt = `UPDATE host_software_installs SET canceled = true WHERE execution_id = ?`
 		if _, err := tx.ExecContext(ctx, updSoftwareStmt, executionID); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "update host_software_installs as canceled")
 		}
 
-		const updScriptStmt = `UPDATE host_script_results SET canceled = 1 WHERE execution_id = ?`
+		const updScriptStmt = `UPDATE host_script_results SET canceled = true WHERE execution_id = ?`
 		if _, err := tx.ExecContext(ctx, updScriptStmt, executionID); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "update host_script_results as canceled")
 		}
@@ -798,7 +799,7 @@ func cancelHostSoftwareInstallUpcomingActivity(ctx context.Context, tx sqlx.ExtC
 	}
 
 	if act.Activated {
-		const updStmt = `UPDATE host_software_installs SET canceled = 1 WHERE execution_id = ?`
+		const updStmt = `UPDATE host_software_installs SET canceled = true WHERE execution_id = ?`
 		if _, err := tx.ExecContext(ctx, updStmt, executionID); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "update host_software_installs as canceled")
 		}
@@ -826,7 +827,7 @@ func cancelHostScriptUpcomingActivity(ctx context.Context, tx sqlx.ExtContext, a
 	}
 
 	if act.Activated {
-		const updStmt = `UPDATE host_script_results SET canceled = 1 WHERE execution_id = ?`
+		const updStmt = `UPDATE host_script_results SET canceled = true WHERE execution_id = ?`
 		if _, err := tx.ExecContext(ctx, updStmt, executionID); err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "update host_script_results as canceled")
 		}
@@ -865,10 +866,10 @@ func (ds *Datastore) GetHostUpcomingActivityMeta(ctx context.Context, hostID uin
 		ua.activated_at,
 		ua.activity_type,
 		CASE
-			WHEN hma.lock_ref = :execution_id THEN :lock_action
-			WHEN hma.unlock_ref = :execution_id THEN :unlock_action
-			WHEN hma.wipe_ref = :execution_id THEN :wipe_action
-			ELSE :none_action
+			WHEN hma.lock_ref = :execution_id THEN CAST(:lock_action AS SIGNED)
+			WHEN hma.unlock_ref = :execution_id THEN CAST(:unlock_action AS SIGNED)
+			WHEN hma.wipe_ref = :execution_id THEN CAST(:wipe_action AS SIGNED)
+			ELSE CAST(:none_action AS SIGNED)
 		END AS well_known_action
 	FROM
 		upcoming_activities ua
@@ -1002,7 +1003,7 @@ SELECT
 	execution_id,
 	activity_type,
 	activated_at,
-	IF(activated_at IS NULL, 0, 1) as topmost,
+	CASE WHEN activated_at IS NULL THEN 0 ELSE 1 END as topmost,
 	priority
 FROM
 	upcoming_activities
@@ -1126,9 +1127,9 @@ SELECT
 	sua.script_id,
 	sua.policy_id,
 	ua.user_id,
-	COALESCE(ua.payload->'$.sync_request', 0),
+	COALESCE(ua.payload->>'$.sync_request', '0') = '1',
 	sua.setup_experience_script_id,
-	COALESCE(ua.payload->'$.is_internal', 0)
+	COALESCE(ua.payload->>'$.is_internal', '0') = '1'
 FROM
 	upcoming_activities ua
 	INNER JOIN script_upcoming_activities sua
@@ -1164,7 +1165,7 @@ SELECT
 	ua.host_id,
 	siua.software_installer_id,
 	ua.user_id,
-	COALESCE(ua.payload->'$.self_service', 0),
+	COALESCE(ua.payload->>'$.self_service', '0') = '1',
 	siua.policy_id,
 	COALESCE(si.filename, ua.payload->>'$.installer_filename', '[deleted installer]'),
 	COALESCE(si.version, ua.payload->>'$.version', 'unknown'),
@@ -1176,13 +1177,13 @@ SELECT
 	-- the number of prior tries. +1 makes this the next attempt in sequence:
 	-- first install = 1, first retry = 2, second retry = 3, etc.
 	CASE
-		WHEN siua.policy_id IS NULL AND COALESCE(ua.payload->'$.with_retries', 0) = 1 THEN (
+		WHEN siua.policy_id IS NULL AND COALESCE(ua.payload->>'$.with_retries', '0') = '1' THEN (
 			SELECT COUNT(*) + 1
 			FROM host_software_installs hsi2
 			WHERE hsi2.host_id = ua.host_id
 			AND hsi2.software_installer_id = siua.software_installer_id
 			AND hsi2.policy_id IS NULL
-			AND hsi2.removed = 0 AND hsi2.canceled = 0 AND hsi2.host_deleted_at IS NULL
+			AND hsi2.removed = false AND hsi2.canceled = false AND hsi2.host_deleted_at IS NULL
 			AND (hsi2.attempt_number > 0 OR hsi2.attempt_number IS NULL)
 		)
 		ELSE NULL
@@ -1227,7 +1228,7 @@ SELECT
 	si.uninstall_script_content_id,
 	'',
 	ua.user_id,
-	1
+	TRUE
 FROM
 	upcoming_activities ua
 	INNER JOIN software_install_upcoming_activities siua
@@ -1251,11 +1252,11 @@ SELECT
 	ua.host_id,
 	siua.software_installer_id,
 	ua.user_id,
-	1,  -- uninstall
+	TRUE,  -- uninstall
 	'', -- no installer_filename for uninstalls
 	COALESCE(si.title_id, siua.software_title_id),
 	COALESCE(st.name, ua.payload->>'$.software_title_name', '[deleted title]'),
-	COALESCE(ua.payload->>'$.self_service', FALSE),
+	COALESCE(ua.payload->>'$.self_service', '0') = '1',
 	'unknown'
 FROM
 	upcoming_activities ua
@@ -1311,7 +1312,7 @@ SELECT
 	ua.execution_id,
 	ua.user_id,
 	ua.payload->>'$.associated_event_id',
-	COALESCE(ua.payload->'$.self_service', 0),
+	COALESCE(ua.payload->>'$.self_service', '0') = '1',
 	vaua.policy_id
 FROM
 	upcoming_activities ua
@@ -1356,7 +1357,7 @@ SELECT
 	ua.execution_id,
 	ua.user_id,
 	iha.platform,
-	COALESCE(ua.payload->'$.self_service', 0)
+	COALESCE(ua.payload->>'$.self_service', '0') = '1'
 FROM
 	upcoming_activities ua
 	INNER JOIN in_house_app_upcoming_activities ihua

@@ -14,6 +14,7 @@ import (
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
+	pg "github.com/fleetdm/fleet/v4/server/platform/postgres"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -86,6 +87,10 @@ func IsDuplicate(err error) bool {
 			return true
 		}
 	}
+	// Also check PostgreSQL unique violation (SQLSTATE 23505)
+	if pg.IsDuplicate(err) {
+		return true
+	}
 	return false
 }
 
@@ -114,9 +119,12 @@ func (e *foreignKeyError) IsForeignKey() bool {
 func isMySQLForeignKey(err error) bool {
 	err = ctxerr.Cause(err)
 	if driverErr, ok := err.(*mysql.MySQLError); ok {
-		if driverErr.Number == mysqlerr.ER_ROW_IS_REFERENCED_2 {
+		if driverErr.Number == mysqlerr.ER_ROW_IS_REFERENCED_2 || driverErr.Number == 1452 {
 			return true
 		}
+	}
+	if pg.IsForeignKey(err) {
+		return true
 	}
 	return false
 }
@@ -192,7 +200,8 @@ func isBadConnection(err error) bool {
 		return errors.Is(se.Err, syscall.ECONNRESET) || errors.Is(se.Err, syscall.EPIPE)
 	}
 
-	return false
+	// PG dialect: match pgconn-level connection errors via the shared helper.
+	return pg.IsBadConnection(err)
 }
 
 // ErrPartialResult indicates that a batch operation was completed,

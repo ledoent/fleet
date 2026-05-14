@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/md5" //nolint:gosec // MD5 used for non-cryptographic checksum only
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -82,7 +83,7 @@ func (ds *Datastore) NewGlobalPolicy(ctx context.Context, authorID *uint, args f
 	var newPolicy *fleet.Policy
 
 	if err := ds.withTx(ctx, func(tx sqlx.ExtContext) error {
-		p, err := newGlobalPolicy(ctx, tx, authorID, args)
+		p, err := newGlobalPolicy(ctx, tx, authorID, args, ds.dialect)
 		if err != nil {
 			return err
 		}
@@ -95,7 +96,7 @@ func (ds *Datastore) NewGlobalPolicy(ctx context.Context, authorID *uint, args f
 	return newPolicy, nil
 }
 
-func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, args fleet.PolicyPayload) (*fleet.Policy, error) {
+func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, args fleet.PolicyPayload, dialect DialectHelper) (*fleet.Policy, error) {
 	if args.SoftwareInstallerID != nil {
 		return nil, ctxerr.Wrap(ctx, errSoftwareTitleIDOnGlobalPolicy, "create policy")
 	}
@@ -103,7 +104,7 @@ func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, ar
 		return nil, ctxerr.Wrap(ctx, errScriptIDOnGlobalPolicy, "create policy")
 	}
 	if args.QueryID != nil {
-		q, err := query(ctx, db, *args.QueryID)
+		q, err := query(ctx, db, *args.QueryID, dialect)
 		if err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "fetching query from id")
 		}
@@ -113,12 +114,9 @@ func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, ar
 	}
 	// We must normalize the name for full Unicode support (Unicode equivalence).
 	nameUnicode := norm.NFC.String(args.Name)
-	res, err := db.ExecContext(ctx,
-		fmt.Sprintf(
-			`INSERT INTO policies (name, query, description, resolution, author_id, platforms, critical, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, %s)`,
-			policiesChecksumComputedColumn(),
-		),
-		nameUnicode, args.Query, args.Description, args.Resolution, authorID, args.Platform, args.Critical,
+	lastIdInt64, err := insertAndGetIDTx(ctx, db, dialect,
+		`INSERT INTO policies (name, query, description, resolution, author_id, platforms, critical, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		nameUnicode, args.Query, args.Description, args.Resolution, authorID, args.Platform, args.Critical, policyChecksum(nil, nameUnicode),
 	)
 	switch {
 	case err == nil:
@@ -127,10 +125,6 @@ func newGlobalPolicy(ctx context.Context, db sqlx.ExtContext, authorID *uint, ar
 		return nil, ctxerr.Wrap(ctx, alreadyExists("Policy", nameUnicode))
 	default:
 		return nil, ctxerr.Wrap(ctx, err, "inserting new policy")
-	}
-	lastIdInt64, err := res.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting last id after inserting policy")
 	}
 	policyID := uint(lastIdInt64) //nolint:gosec // dismiss G115
 
@@ -304,6 +298,17 @@ func policiesChecksumComputedColumn() string {
 	) `
 }
 
+// policyChecksum computes the checksum for a policy in Go (portable across databases).
+// The checksum is MD5(CONCAT_WS(\x00, COALESCE(team_id, ”), name)) as raw bytes.
+func policyChecksum(teamID *uint, name string) []byte {
+	var teamStr string
+	if teamID != nil {
+		teamStr = fmt.Sprintf("%d", *teamID)
+	}
+	h := md5.Sum([]byte(teamStr + "\x00" + name)) //nolint:gosec // MD5 used for non-cryptographic checksum
+	return h[:]
+}
+
 func (ds *Datastore) Policy(ctx context.Context, id uint) (*fleet.Policy, error) {
 	return policyDB(ctx, ds.reader(ctx), id, nil)
 }
@@ -365,7 +370,7 @@ func (ds *Datastore) PolicyLite(ctx context.Context, id uint) (*fleet.PolicyLite
 // Currently, SavePolicy does not allow updating the team of an existing policy.
 func (ds *Datastore) SavePolicy(ctx context.Context, p *fleet.Policy, shouldRemoveAllPolicyMemberships bool, removePolicyStats bool) error {
 	if err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return savePolicy(ctx, tx, ds.logger, p, shouldRemoveAllPolicyMemberships, removePolicyStats)
+		return savePolicy(ctx, tx, ds.logger, p, shouldRemoveAllPolicyMemberships, removePolicyStats, ds.dialect)
 	}); err != nil {
 		return ctxerr.Wrap(ctx, err, "updating policy")
 	}
@@ -373,7 +378,7 @@ func (ds *Datastore) SavePolicy(ctx context.Context, p *fleet.Policy, shouldRemo
 	return nil
 }
 
-func savePolicy(ctx context.Context, db sqlx.ExtContext, logger *slog.Logger, p *fleet.Policy, shouldRemoveAllPolicyMemberships bool, removePolicyStats bool) error {
+func savePolicy(ctx context.Context, db sqlx.ExtContext, logger *slog.Logger, p *fleet.Policy, shouldRemoveAllPolicyMemberships bool, removePolicyStats bool, dialect DialectHelper) error {
 	if p.TeamID == nil && p.SoftwareInstallerID != nil {
 		return ctxerr.Wrap(ctx, errSoftwareTitleIDOnGlobalPolicy, "save policy")
 	}
@@ -395,11 +400,11 @@ func savePolicy(ctx context.Context, db sqlx.ExtContext, logger *slog.Logger, p 
 			platforms = ?, critical = ?, calendar_events_enabled = ?,
 			software_installer_id = ?, script_id = ?, vpp_apps_teams_id = ?,
 			conditional_access_enabled = ?, continuous_automations_enabled = ?,
-			checksum = ` + policiesChecksumComputedColumn() + `
+			checksum = ?
 			WHERE id = ?
 	`
 	result, err := db.ExecContext(
-		ctx, updateStmt, p.Name, p.Query, p.Description, p.Resolution, p.Platform, p.Critical, p.CalendarEventsEnabled, p.SoftwareInstallerID, p.ScriptID, p.VPPAppsTeamsID, p.ConditionalAccessEnabled, p.ContinuousAutomationsEnabled, p.ID,
+		ctx, updateStmt, p.Name, p.Query, p.Description, p.Resolution, p.Platform, p.Critical, p.CalendarEventsEnabled, p.SoftwareInstallerID, p.ScriptID, p.VPPAppsTeamsID, p.ConditionalAccessEnabled, p.ContinuousAutomationsEnabled, policyChecksum(p.TeamID, p.Name), p.ID,
 	)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "updating policy")
@@ -422,7 +427,7 @@ func savePolicy(ctx context.Context, db sqlx.ExtContext, logger *slog.Logger, p 
 	}
 
 	return cleanupPolicy(
-		ctx, db, db, p.ID, p.Platform, shouldRemoveAllPolicyMemberships, removePolicyStats, logger,
+		ctx, db, db, p.ID, p.Platform, shouldRemoveAllPolicyMemberships, removePolicyStats, logger, dialect,
 	)
 }
 
@@ -544,14 +549,14 @@ func assertTeamMatches(ctx context.Context, db sqlx.QueryerContext, teamID uint,
 func cleanupPolicy(
 	ctx context.Context, queryerContext sqlx.QueryerContext, extContext sqlx.ExtContext, policyID uint, policyPlatform string,
 	shouldRemoveAllPolicyMemberships bool,
-	removePolicyStats bool, logger *slog.Logger,
+	removePolicyStats bool, logger *slog.Logger, dialect DialectHelper,
 ) error {
 	var err error
 
 	if shouldRemoveAllPolicyMemberships {
-		err = cleanupPolicyMembershipForPolicy(ctx, queryerContext, extContext, policyID)
+		err = cleanupPolicyMembershipForPolicy(ctx, queryerContext, extContext, dialect, policyID)
 	} else {
-		err = cleanupPolicyMembershipOnPolicyUpdate(ctx, queryerContext, extContext, policyID, policyPlatform)
+		err = cleanupPolicyMembershipOnPolicyUpdate(ctx, queryerContext, extContext, policyID, policyPlatform, dialect)
 	}
 	if err != nil {
 		return err
@@ -723,12 +728,14 @@ func (ds *Datastore) RecordPolicyQueryExecutions(ctx context.Context, host *flee
 	err = ds.withTx(ctx, func(tx sqlx.ExtContext) error {
 		if len(vals) > 0 {
 			query := fmt.Sprintf(
-				// INSERT IGNORE skips rows whose policy_id no longer exists (policy deleted
-				// after query was distributed but before results arrived).
-				`INSERT IGNORE INTO policy_membership (updated_at, policy_id, host_id, passes)
-			VALUES %s ON DUPLICATE KEY UPDATE updated_at=VALUES(updated_at), passes=VALUES(passes)`,
+				// INSERT IGNORE (MySQL) skips rows whose policy_id no longer exists (policy
+				// deleted after query was distributed but before results arrived). On
+				// PostgreSQL this renders as a plain INSERT; the deleted-policy race
+				// surfaces as an FK error there, matching pre-existing PG behavior.
+				ds.dialect.InsertIgnoreInto()+` policy_membership (updated_at, policy_id, host_id, passes)
+			VALUES %s `,
 				strings.Join(bindvars, ","),
-			)
+			) + ds.dialect.OnDuplicateKey("policy_id,host_id", "updated_at=VALUES(updated_at), passes=VALUES(passes)")
 			if _, err := tx.ExecContext(ctx, query, vals...); err != nil {
 				return ctxerr.Wrapf(ctx, err, "insert policy_membership (%v)", vals)
 			}
@@ -1149,34 +1156,35 @@ func deletePolicyDB(ctx context.Context, q sqlx.ExtContext, ids []uint, teamID *
 //
 // Scope encoding in policy_labels:
 //
-//	exclude=0, require_all=0 -> include_any
-//	exclude=0, require_all=1 -> include_all
-//	exclude=1, require_all=0 -> exclude_any
+//	exclude=false, require_all=false -> include_any
+//	exclude=false, require_all=true -> include_all
+//	exclude=true, require_all=false -> exclude_any
 //
-// Placeholder order: lm.host_id, team_id, platform. policyQueriesForHostInScope appends "AND p.id IN (?)" (and its arg) to
-// restrict to specific policies.
+// The %s placeholder is filled with the dialect's set-membership match for the host platform
+// (FIND_IN_SET on MySQL). Placeholder order: lm.host_id, team_id, platform.
+// policyQueriesForHostInScope appends "AND p.id IN (?)" (and its arg) to restrict to specific policies.
 const policyQueriesForHostStmt = `
 		SELECT p.id, p.query
 		FROM policies p
 		LEFT JOIN (
 			SELECT pl.policy_id,
 				-- 1 if this policy has any include_any labels
-				MAX(CASE WHEN pl.exclude = 0 AND pl.require_all = 0 THEN 1 ELSE 0 END) AS has_include_any,
+				MAX(CASE WHEN pl.exclude = false AND pl.require_all = false THEN 1 ELSE 0 END) AS has_include_any,
 				-- 1 if this host is a member of at least one include_any label
-				MAX(CASE WHEN pl.exclude = 0 AND pl.require_all = 0 AND lm.host_id IS NOT NULL THEN 1 ELSE 0 END) AS host_in_include_any,
+				MAX(CASE WHEN pl.exclude = false AND pl.require_all = false AND lm.host_id IS NOT NULL THEN 1 ELSE 0 END) AS host_in_include_any,
 				-- count of include_all labels on this policy
-				SUM(CASE WHEN pl.exclude = 0 AND pl.require_all = 1 THEN 1 ELSE 0 END) AS include_all_count,
+				SUM(CASE WHEN pl.exclude = false AND pl.require_all = true THEN 1 ELSE 0 END) AS include_all_count,
 				-- count of include_all labels this host is a member of
-				SUM(CASE WHEN pl.exclude = 0 AND pl.require_all = 1 AND lm.host_id IS NOT NULL THEN 1 ELSE 0 END) AS host_include_all_count,
+				SUM(CASE WHEN pl.exclude = false AND pl.require_all = true AND lm.host_id IS NOT NULL THEN 1 ELSE 0 END) AS host_include_all_count,
 				-- 1 if this host is a member of at least one exclude_any label
-				MAX(CASE WHEN pl.exclude = 1 AND lm.host_id IS NOT NULL THEN 1 ELSE 0 END) AS host_in_exclude
+				MAX(CASE WHEN pl.exclude = true AND lm.host_id IS NOT NULL THEN 1 ELSE 0 END) AS host_in_exclude
 			FROM policy_labels pl
 			LEFT JOIN label_membership lm ON lm.label_id = pl.label_id AND lm.host_id = ?
 			GROUP BY pl.policy_id
 		) pl_agg ON pl_agg.policy_id = p.id
 		WHERE
 			(p.team_id IS NULL OR p.team_id = COALESCE(?, 0)) AND
-			(p.platforms = '' OR FIND_IN_SET(?, p.platforms)) AND
+			(p.platforms = '' OR %s) AND
 			-- Policy has no include_any labels, or host is in at least one
 			(COALESCE(pl_agg.has_include_any, 0) = 0 OR pl_agg.host_in_include_any = 1) AND
 			-- Policy has no include_all labels, or host is in all of them
@@ -1199,10 +1207,10 @@ func (ds *Datastore) policyQueriesForHostInScope(ctx context.Context, host *flee
 		ds.logger.ErrorContext(ctx, "unrecognized platform", "hostID", host.ID, "platform", host.Platform)
 	}
 
-	stmt := policyQueriesForHostStmt
+	stmt := fmt.Sprintf(policyQueriesForHostStmt, ds.dialect.FindInSet("?", "p.platforms"))
 	args := []any{host.ID, host.TeamID, host.FleetPlatform()}
 	if restrictToPolicyIDs != nil {
-		stmt = policyQueriesForHostStmt + " AND p.id IN (?)"
+		stmt += " AND p.id IN (?)"
 		args = append(args, restrictToPolicyIDs)
 		var err error
 		if stmt, args, err = sqlx.In(stmt, args...); err != nil {
@@ -1303,7 +1311,7 @@ func (ds *Datastore) NewTeamPolicy(ctx context.Context, teamID uint, authorID *u
 	}
 
 	if err := ds.withTx(ctx, func(tx sqlx.ExtContext) error {
-		p, err := newTeamPolicy(ctx, tx, teamID, authorID, args)
+		p, err := newTeamPolicy(ctx, tx, teamID, authorID, args, ds.dialect)
 		if err != nil {
 			return err
 		}
@@ -1316,9 +1324,9 @@ func (ds *Datastore) NewTeamPolicy(ctx context.Context, teamID uint, authorID *u
 	return newPolicy, nil
 }
 
-func newTeamPolicy(ctx context.Context, db sqlx.ExtContext, teamID uint, authorID *uint, args fleet.PolicyPayload) (*fleet.Policy, error) {
+func newTeamPolicy(ctx context.Context, db sqlx.ExtContext, teamID uint, authorID *uint, args fleet.PolicyPayload, dialect DialectHelper) (*fleet.Policy, error) {
 	if args.QueryID != nil {
-		q, err := query(ctx, db, *args.QueryID)
+		q, err := query(ctx, db, *args.QueryID, dialect)
 		if err != nil {
 			return nil, ctxerr.Wrap(ctx, err, "fetching query from id")
 		}
@@ -1345,19 +1353,17 @@ func newTeamPolicy(ctx context.Context, db sqlx.ExtContext, teamID uint, authorI
 		return nil, ctxerr.Wrap(ctx, err, "create team policy")
 	}
 
-	res, err := db.ExecContext(ctx,
-		fmt.Sprintf(
-			`INSERT INTO policies (
-				name, query, description, team_id, resolution, author_id,
-				platforms, critical, calendar_events_enabled, software_installer_id,
-				script_id, vpp_apps_teams_id, conditional_access_enabled, checksum,
-				type, patch_software_title_id, continuous_automations_enabled
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, ?, ?)`,
-			policiesChecksumComputedColumn(),
-		),
+	lastIdInt64, err := insertAndGetIDTx(ctx, db, dialect,
+		`INSERT INTO policies (
+			name, query, description, team_id, resolution, author_id,
+			platforms, critical, calendar_events_enabled, software_installer_id,
+			script_id, vpp_apps_teams_id, conditional_access_enabled, checksum,
+			type, patch_software_title_id, continuous_automations_enabled
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nameUnicode, args.Query, args.Description, teamID, args.Resolution, authorID, args.Platform, args.Critical,
 		args.CalendarEventsEnabled, args.SoftwareInstallerID, args.ScriptID, args.VPPAppsTeamsID,
-		args.ConditionalAccessEnabled, args.Type, args.PatchSoftwareTitleID, args.ContinuousAutomationsEnabled,
+		args.ConditionalAccessEnabled, policyChecksum(&teamID, nameUnicode), args.Type, args.PatchSoftwareTitleID,
+		args.ContinuousAutomationsEnabled,
 	)
 	switch {
 	case err == nil:
@@ -1370,10 +1376,6 @@ func newTeamPolicy(ctx context.Context, db sqlx.ExtContext, teamID uint, authorI
 		return nil, ctxerr.Wrap(ctx, alreadyExists("Policy", nameUnicode))
 	default:
 		return nil, ctxerr.Wrap(ctx, err, "inserting new policy")
-	}
-	lastIdInt64, err := res.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting last id after inserting policy")
 	}
 
 	policyID := uint(lastIdInt64) //nolint:gosec // dismiss G115
@@ -1631,8 +1633,7 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 		// Reset on retry so we don't accumulate duplicate cleanup entries.
 		pendingCleanups = pendingCleanups[:0]
 
-		query := fmt.Sprintf(
-			`
+		query := `
 		INSERT INTO policies (
 			name,
 			query,
@@ -1651,9 +1652,8 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			type,
 			patch_software_title_id,
 			continuous_automations_enabled
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			query = VALUES(query),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		` + ds.dialect.OnDuplicateKey("checksum", `query = VALUES(query),
 			description = VALUES(description),
 			author_id = VALUES(author_id),
 			resolution = VALUES(resolution),
@@ -1666,9 +1666,7 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			conditional_access_enabled = VALUES(conditional_access_enabled),
 			type = VALUES(type),
 			patch_software_title_id = VALUES(patch_software_title_id),
-			continuous_automations_enabled = VALUES(continuous_automations_enabled)
-		`, policiesChecksumComputedColumn(),
-		)
+			continuous_automations_enabled = VALUES(continuous_automations_enabled)`)
 		for teamID, teamPolicySpecs := range teamIDToPolicies {
 			for _, spec := range teamPolicySpecs {
 				var softwareInstallerID *uint
@@ -1732,7 +1730,8 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 					query,
 					spec.Name, spec.Query, spec.Description, authorID, spec.Resolution, teamID, spec.Platform, spec.Critical,
 					spec.CalendarEventsEnabled, softwareInstallerID, vppAppsTeamsID, scriptID, spec.ConditionalAccessEnabled,
-					spec.Type, patchSoftwareTitleIDArg, spec.ContinuousAutomationsEnabled,
+					policyChecksum(teamID, norm.NFC.String(spec.Name)), spec.Type, patchSoftwareTitleIDArg,
+					spec.ContinuousAutomationsEnabled,
 				)
 				if err != nil {
 					return ctxerr.Wrap(ctx, err, "exec ApplyPolicySpecs insert")
@@ -1818,13 +1817,13 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 				// in case we fail and don't retry
 				if shouldRemoveAllPolicyMemberships {
 					if _, err := tx.ExecContext(ctx,
-						`UPDATE policies SET needs_full_membership_cleanup = 1 WHERE id = ?`,
+						`UPDATE policies SET needs_full_membership_cleanup = true WHERE id = ?`,
 						policyID); err != nil {
 						return ctxerr.Wrap(ctx, err, "setting needs_full_membership_cleanup flag")
 					}
 				}
 				if shouldUpdatePatchPolicyName {
-					if _, err := tx.ExecContext(ctx, `UPDATE policies SET name = ?, checksum = `+policiesChecksumComputedColumn()+` WHERE id = ?`, spec.Name, policyID); err != nil {
+					if _, err := tx.ExecContext(ctx, `UPDATE policies SET name = ?, checksum = ? WHERE id = ?`, spec.Name, policyChecksum(teamID, spec.Name), policyID); err != nil {
 						return ctxerr.Wrap(ctx, err, "setting name for patch policy")
 					}
 				}
@@ -1862,13 +1861,14 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			args.shouldRemoveAllPolicyMemberships,
 			args.removePolicyStats,
 			ds.logger,
+			ds.dialect,
 		); err != nil {
 			return err
 		}
 
 		if args.shouldRemoveAllPolicyMemberships {
 			if _, err := ds.writer(ctx).ExecContext(ctx,
-				`UPDATE policies SET needs_full_membership_cleanup = 0 WHERE id = ?`,
+				`UPDATE policies SET needs_full_membership_cleanup = false WHERE id = ?`,
 				args.policyID); err != nil {
 				return ctxerr.Wrap(ctx, err, "clearing needs_full_membership_cleanup flag")
 			}
@@ -1894,10 +1894,10 @@ func (ds *Datastore) AsyncBatchInsertPolicyMembership(ctx context.Context, batch
 	// INSERT IGNORE, to avoid failing if policy / host does not exist (as this
 	// runs asynchronously, they could get deleted in between the data being
 	// received and being upserted).
-	sql := `INSERT IGNORE INTO policy_membership (policy_id, host_id, passes) VALUES `
+	sql := ds.dialect.InsertIgnoreInto() + ` policy_membership (policy_id, host_id, passes) VALUES `
 	sql += strings.Repeat(`(?, ?, ?),`, len(batch))
 	sql = strings.TrimSuffix(sql, ",")
-	sql += ` ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at), passes = VALUES(passes)`
+	sql += ` ` + ds.dialect.OnDuplicateKey("policy_id,host_id", "updated_at = VALUES(updated_at), passes = VALUES(passes)")
 
 	vals := make([]interface{}, 0, len(batch)*3)
 	hostIDs := make([]uint, 0, len(batch))
@@ -1983,19 +1983,19 @@ func (ds *Datastore) AsyncBatchUpdatePolicyTimestamp(ctx context.Context, ids []
 	})
 }
 
-func deleteAllPolicyMemberships(ctx context.Context, tx sqlx.ExtContext, hostID uint) error {
+func deleteAllPolicyMemberships(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hostID uint) error {
 	query := `DELETE FROM policy_membership WHERE host_id = ?`
 	if _, err := tx.ExecContext(ctx, query, hostID); err != nil {
 		return ctxerr.Wrap(ctx, err, "exec delete policies")
 	}
 	// Use the single host method for better performance and no unnecessary locking
-	if err := updateHostIssuesFailingPoliciesForSingleHost(ctx, tx, hostID); err != nil {
+	if err := updateHostIssuesFailingPoliciesForSingleHost(ctx, tx, dialect, hostID); err != nil {
 		return err
 	}
 	return nil
 }
 
-func cleanupPolicyMembershipOnTeamChange(ctx context.Context, tx sqlx.ExtContext, hostIDs []uint) error {
+func cleanupPolicyMembershipOnTeamChange(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hostIDs []uint) error {
 	// hosts can only be in one team, so if there's a policy that has a team id and a result from one of our hosts
 	// it can only be from the previous team they are being transferred from
 	query, args, err := sqlx.In(`DELETE FROM policy_membership
@@ -2008,7 +2008,7 @@ func cleanupPolicyMembershipOnTeamChange(ctx context.Context, tx sqlx.ExtContext
 	}
 	// This method is currently called for a batch of hosts. Performance should be monitored. If performance becomes a concern,
 	// we can reduce batch size or move this method outside the transaction.
-	if err = updateHostIssuesFailingPolicies(ctx, tx, hostIDs); err != nil {
+	if err = updateHostIssuesFailingPolicies(ctx, tx, dialect, hostIDs); err != nil {
 		return err
 	}
 	return nil
@@ -2058,7 +2058,7 @@ func cleanupConditionalAccessOnTeamChange(ctx context.Context, tx sqlx.ExtContex
 }
 
 func cleanupPolicyMembershipOnPolicyUpdate(
-	ctx context.Context, queryerContext sqlx.QueryerContext, db sqlx.ExecerContext, policyID uint, platforms string,
+	ctx context.Context, queryerContext sqlx.QueryerContext, db sqlx.ExecerContext, policyID uint, platforms string, dialect DialectHelper,
 ) error {
 	// Clean up hosts that don't match the platform criteria.
 	// Page through rows using the (policy_id, host_id) PK as a cursor so each SELECT+DELETE
@@ -2073,14 +2073,14 @@ func cleanupPolicyMembershipOnPolicyUpdate(
 		var afterHostID uint
 		for {
 			var batchHostIDs []uint
-			err := sqlx.SelectContext(ctx, queryerContext, &batchHostIDs, `
+			err := sqlx.SelectContext(ctx, queryerContext, &batchHostIDs, fmt.Sprintf(`
 				SELECT pm.host_id
 				FROM policy_membership pm
 				INNER JOIN hosts h ON pm.host_id = h.id
-				WHERE pm.policy_id = ? AND FIND_IN_SET(h.platform, ?) = 0
+				WHERE pm.policy_id = ? AND %s = 0
 				  AND pm.host_id > ?
 				ORDER BY pm.host_id ASC
-				LIMIT ?`, policyID, expandedPlatformsStr, afterHostID, policyMembershipDeleteBatchSize)
+				LIMIT ?`, dialect.FindInSet("h.platform", "?")), policyID, expandedPlatformsStr, afterHostID, policyMembershipDeleteBatchSize)
 			if err != nil {
 				return ctxerr.Wrap(ctx, err, "select batch of hosts to cleanup policy membership for platform")
 			}
@@ -2098,16 +2098,15 @@ func cleanupPolicyMembershipOnPolicyUpdate(
 			if _, err = db.ExecContext(ctx, batchStmt, args...); err != nil {
 				return ctxerr.Wrap(ctx, err, "batch cleanup policy membership for platform")
 			}
-			if err := updateHostIssuesFailingPolicies(ctx, db, batchHostIDs); err != nil {
+			if err := updateHostIssuesFailingPolicies(ctx, db, dialect, batchHostIDs); err != nil {
 				return err
 			}
 			afterHostID = batchHostIDs[len(batchHostIDs)-1]
 		}
 		// Clean up orphaned memberships (host_id refs to deleted hosts, not covered by INNER JOIN above)
 		if _, err := db.ExecContext(ctx, `
-			DELETE pm FROM policy_membership pm
-			LEFT JOIN hosts h ON pm.host_id = h.id
-			WHERE pm.policy_id = ? AND h.id IS NULL`, policyID); err != nil {
+			DELETE FROM policy_membership
+			WHERE policy_id = ? AND NOT EXISTS (SELECT 1 FROM hosts WHERE hosts.id = policy_membership.host_id)`, policyID); err != nil {
 			return ctxerr.Wrap(ctx, err, "cleanup orphaned policy membership for platform")
 		}
 	}
@@ -2126,35 +2125,35 @@ func cleanupPolicyMembershipOnPolicyUpdate(
 			      -- If the policy has no include_any labels, all hosts match this part.
 			      NOT EXISTS (
 			        SELECT 1 FROM policy_labels pl
-			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = 0 AND pl.require_all = 0
+			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = false AND pl.require_all = false
 			      )
 			      -- If the policy has include_any labels, the host must be in at least one of them.
 			      OR EXISTS (
 			        SELECT 1 FROM policy_labels pl
 			        JOIN label_membership lm ON lm.label_id = pl.label_id AND lm.host_id = pm.host_id
-			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = 0 AND pl.require_all = 0
+			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = false AND pl.require_all = false
 			      )
 			    )
 			    -- If the policy has include_all labels, the host must be in all of them.
 			    AND (
 			      NOT EXISTS (
 			        SELECT 1 FROM policy_labels pl
-			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = 0 AND pl.require_all = 1
+			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = false AND pl.require_all = true
 			      )
 			      OR (
 			        SELECT COUNT(*) FROM policy_labels pl
-			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = 0 AND pl.require_all = 1
+			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = false AND pl.require_all = true
 			      ) = (
 			        SELECT COUNT(*) FROM policy_labels pl
 			        JOIN label_membership lm ON lm.label_id = pl.label_id AND lm.host_id = pm.host_id
-			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = 0 AND pl.require_all = 1
+			        WHERE pl.policy_id = pm.policy_id AND pl.exclude = false AND pl.require_all = true
 			      )
 			    )
 			    -- If the policy has exclude_any labels, the host must not be in any of them.
 			    AND NOT EXISTS (
 			      SELECT 1 FROM policy_labels pl
 			      JOIN label_membership lm ON lm.label_id = pl.label_id AND lm.host_id = pm.host_id
-			      WHERE pl.policy_id = pm.policy_id AND pl.exclude = 1
+			      WHERE pl.policy_id = pm.policy_id AND pl.exclude = true
 			    )
 			  )
 			ORDER BY pm.host_id ASC
@@ -2176,7 +2175,7 @@ func cleanupPolicyMembershipOnPolicyUpdate(
 		if _, err = db.ExecContext(ctx, batchStmt, args...); err != nil {
 			return ctxerr.Wrap(ctx, err, "batch cleanup policy membership for labels")
 		}
-		if err := updateHostIssuesFailingPolicies(ctx, db, batchHostIDs); err != nil {
+		if err := updateHostIssuesFailingPolicies(ctx, db, dialect, batchHostIDs); err != nil {
 			return err
 		}
 		afterLabelHostID = batchHostIDs[len(batchHostIDs)-1]
@@ -2191,6 +2190,7 @@ func cleanupPolicyMembershipForPolicy(
 	ctx context.Context,
 	queryerContext sqlx.QueryerContext,
 	exec sqlx.ExecerContext,
+	dialect DialectHelper,
 	policyID uint,
 ) error {
 	// Page through policy_membership using (policy_id, host_id) as a cursor. Selecting and deleting one
@@ -2223,16 +2223,15 @@ func cleanupPolicyMembershipForPolicy(
 		if _, err = exec.ExecContext(ctx, batchStmt, args...); err != nil {
 			return ctxerr.Wrap(ctx, err, "batch cleanup policy membership")
 		}
-		if err := updateHostIssuesFailingPolicies(ctx, exec, batchHostIDs); err != nil {
+		if err := updateHostIssuesFailingPolicies(ctx, exec, dialect, batchHostIDs); err != nil {
 			return err
 		}
 		afterHostID = batchHostIDs[len(batchHostIDs)-1]
 	}
 	// Clean up orphaned memberships (host_id refs to deleted hosts, not covered by INNER JOIN above)
 	if _, err := exec.ExecContext(ctx, `
-		DELETE pm FROM policy_membership pm
-		LEFT JOIN hosts h ON pm.host_id = h.id
-		WHERE pm.policy_id = ? AND h.id IS NULL`, policyID); err != nil {
+		DELETE FROM policy_membership
+		WHERE policy_id = ? AND NOT EXISTS (SELECT 1 FROM hosts WHERE hosts.id = policy_membership.host_id)`, policyID); err != nil {
 		return ctxerr.Wrap(ctx, err, "cleanup orphaned policy membership")
 	}
 
@@ -2256,17 +2255,17 @@ func (ds *Datastore) CleanupPolicyMembership(ctx context.Context, now time.Time)
 			FROM
 				policies p
 			WHERE
-				p.updated_at >= DATE_SUB(?, INTERVAL ? SECOND) AND
+				p.updated_at >= ? AND
 				p.created_at < p.updated_at`
 	)
 
 	var pols []*fleet.Policy
-	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &pols, updatedPoliciesStmt, now, int(recentlyUpdatedPoliciesInterval.Seconds())); err != nil {
+	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &pols, updatedPoliciesStmt, now.Add(-recentlyUpdatedPoliciesInterval)); err != nil {
 		return ctxerr.Wrap(ctx, err, "select recently updated policies")
 	}
 
 	for _, pol := range pols {
-		if err := cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform); err != nil {
+		if err := cleanupPolicyMembershipOnPolicyUpdate(ctx, ds.reader(ctx), ds.writer(ctx), pol.ID, pol.Platform, ds.dialect); err != nil {
 			return ctxerr.Wrapf(ctx, err, "delete outdated hosts membership for policy: %d; platforms: %v", pol.ID, pol.Platform)
 		}
 	}
@@ -2275,16 +2274,16 @@ func (ds *Datastore) CleanupPolicyMembership(ctx context.Context, now time.Time)
 	// in case the cleanup process couldn't complete due to server crashes or other unexpected events.
 	var fullCleanupPolIDs []uint
 	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &fullCleanupPolIDs,
-		`SELECT id FROM policies WHERE needs_full_membership_cleanup = 1`,
+		`SELECT id FROM policies WHERE needs_full_membership_cleanup = true`,
 	); err != nil {
 		return ctxerr.Wrap(ctx, err, "select policies needing full membership cleanup")
 	}
 	for _, polID := range fullCleanupPolIDs {
-		if err := cleanupPolicyMembershipForPolicy(ctx, ds.reader(ctx), ds.writer(ctx), polID); err != nil {
+		if err := cleanupPolicyMembershipForPolicy(ctx, ds.reader(ctx), ds.writer(ctx), ds.dialect, polID); err != nil {
 			return ctxerr.Wrapf(ctx, err, "full membership cleanup for policy %d", polID)
 		}
 		if _, err := ds.writer(ctx).ExecContext(ctx,
-			`UPDATE policies SET needs_full_membership_cleanup = 0 WHERE id = ?`, polID,
+			`UPDATE policies SET needs_full_membership_cleanup = false WHERE id = ?`, polID,
 		); err != nil {
 			return ctxerr.Wrapf(ctx, err, "clear full membership cleanup flag for policy %d", polID)
 		}
@@ -2305,7 +2304,7 @@ type PolicyViolationDays struct {
 
 func (ds *Datastore) IncrementPolicyViolationDays(ctx context.Context) error {
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return incrementViolationDaysDB(ctx, tx)
+		return incrementViolationDaysDB(ctx, tx, ds.dialect)
 	})
 }
 
@@ -2335,8 +2334,8 @@ func (ds *Datastore) IncreasePolicyAutomationIteration(ctx context.Context, poli
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO policy_automation_iterations (policy_id, iteration) VALUES (?,1)
-			ON DUPLICATE KEY UPDATE iteration = iteration + 1;
-		`, policyID)
+			`+ds.dialect.OnDuplicateKey("policy_id", "iteration = policy_automation_iterations.iteration + 1"),
+			policyID)
 		return err
 	})
 }
@@ -2378,7 +2377,7 @@ func (ds *Datastore) OutdatedAutomationBatch(ctx context.Context) ([]fleet.Polic
 			return nil
 		}
 		query := `
-			UPDATE policy_membership pm SET pm.automation_iteration = (
+			UPDATE policy_membership pm SET automation_iteration = (
 				SELECT ai.iteration
 				FROM policy_automation_iterations ai
 				WHERE pm.policy_id = ai.policy_id
@@ -2396,7 +2395,7 @@ func (ds *Datastore) OutdatedAutomationBatch(ctx context.Context) ([]fleet.Polic
 	return failures, nil
 }
 
-func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) error {
+func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper) error {
 	const (
 		statsID        = 0
 		globalStats    = true
@@ -2452,7 +2451,7 @@ func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) error {
 	// `policy_membership`
 	var newCounts PolicyViolationDays
 	if err := sqlx.GetContext(ctx, tx, &newCounts, `
-		 SELECT	(select count(*) from policy_membership where passes=0) as failing_host_count,
+		 SELECT	(select count(*) from policy_membership where passes = false) as failing_host_count,
 	   		(select count(*) from policy_membership) as total_host_count`,
 	); err != nil {
 		return ctxerr.Wrap(ctx, err, "count policy violation days")
@@ -2469,8 +2468,7 @@ func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) error {
 		INSERT INTO
 			aggregated_stats (id, global_stats, type, json_value)
 		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			json_value = VALUES(json_value)`
+		` + dialect.OnDuplicateKey("id,type,global_stats", "json_value = VALUES(json_value), updated_at = NOW()")
 	if _, err := tx.ExecContext(ctx, upsertStmt, statsID, globalStats, statsType, statsJSON); err != nil {
 		return ctxerr.Wrap(ctx, err, "update policy violation days aggregated stats")
 	}
@@ -2480,11 +2478,11 @@ func incrementViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) error {
 
 func (ds *Datastore) InitializePolicyViolationDays(ctx context.Context) error {
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return initializePolicyViolationDaysDB(ctx, tx)
+		return initializePolicyViolationDaysDB(ctx, tx, ds.dialect)
 	})
 }
 
-func initializePolicyViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) error {
+func initializePolicyViolationDaysDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper) error {
 	const (
 		statsID     = 0
 		globalStats = true
@@ -2500,9 +2498,8 @@ func initializePolicyViolationDaysDB(ctx context.Context, tx sqlx.ExtContext) er
 		INSERT INTO
 			aggregated_stats (id, global_stats, type, json_value)
 		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			json_value = VALUES(json_value),
-			created_at = CURRENT_TIMESTAMP`
+		` + dialect.OnDuplicateKey("id,type,global_stats", `json_value = VALUES(json_value),
+			created_at = CURRENT_TIMESTAMP`)
 	if _, err := tx.ExecContext(ctx, stmt, statsID, globalStats, statsType, statsJSON); err != nil {
 		return ctxerr.Wrap(ctx, err, "initialize policy violation days aggregated stats")
 	}
@@ -2643,10 +2640,9 @@ func (ds *Datastore) UpdateHostPolicyCounts(ctx context.Context) error {
 
 			insertStmt := `INSERT INTO policy_stats (policy_id, inherited_team_id, passing_host_count, failing_host_count)
 			VALUES (:policy_id, :inherited_team_id, :passing_host_count, :failing_host_count)
-			ON DUPLICATE KEY UPDATE
-				updated_at = NOW(),
+			` + ds.dialect.OnDuplicateKey("policy_id,inherited_team_id_char", `updated_at = NOW(),
 				passing_host_count = VALUES(passing_host_count),
-				failing_host_count = VALUES(failing_host_count)`
+				failing_host_count = VALUES(failing_host_count)`)
 			_, err = sqlx.NamedExecContext(ctx, db, insertStmt, policyStats)
 			if err != nil {
 				// INSERT may fail due to rare race conditions. We log and proceed.
@@ -2659,22 +2655,28 @@ func (ds *Datastore) UpdateHostPolicyCounts(ctx context.Context) error {
 
 	// Update Counts for Global and Team Policies
 	// The performance of this query is linear with the number of policies.
+	var passingExpr, failingExpr string
+	if ds.dialect.IsPostgres() {
+		passingExpr = "COALESCE(SUM(CASE WHEN pm.passes IS NULL THEN 0 WHEN pm.passes = true THEN 1 ELSE 0 END), 0)" //nolint:gosec
+		failingExpr = "COALESCE(SUM(CASE WHEN pm.passes IS NULL THEN 0 WHEN pm.passes = false THEN 1 ELSE 0 END), 0)"
+	} else {
+		passingExpr = "COALESCE(SUM(IF(pm.passes IS NULL, 0, pm.passes = 1)), 0)" //nolint:gosec
+		failingExpr = "COALESCE(SUM(IF(pm.passes IS NULL, 0, pm.passes = 0)), 0)"
+	}
 	_, err = db.ExecContext(
-		ctx, `
+		ctx, fmt.Sprintf(`
 		INSERT INTO policy_stats (policy_id, inherited_team_id, passing_host_count, failing_host_count)
 		SELECT
 			p.id,
-			NULL AS inherited_team_id, -- using NULL to represent global scope
-			COALESCE(SUM(IF(pm.passes IS NULL, 0, pm.passes = 1)), 0),
-			COALESCE(SUM(IF(pm.passes IS NULL, 0, pm.passes = 0)), 0)
+			NULL AS inherited_team_id,
+			%s,
+			%s
 		FROM policies p
 		LEFT JOIN policy_membership pm ON p.id = pm.policy_id
 		GROUP BY p.id
-		ON DUPLICATE KEY UPDATE
-			updated_at = NOW(),
+		`, passingExpr, failingExpr)+ds.dialect.OnDuplicateKey("policy_id,inherited_team_id_char", `updated_at = NOW(),
 			passing_host_count = VALUES(passing_host_count),
-			failing_host_count = VALUES(failing_host_count);
-    `)
+			failing_host_count = VALUES(failing_host_count)`))
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "update host policy counts for global and team policies")
 	}
@@ -2758,7 +2760,7 @@ func (ds *Datastore) GetTeamHostsPolicyMemberships(
 	policyIDs []uint,
 	hostID *uint,
 ) ([]fleet.HostPolicyMembershipData, error) {
-	query := `
+	query := fmt.Sprintf(`
 	SELECT
 		COALESCE(sh.email, '') AS email,
 		COALESCE(pm.passing, 1) AS passing,
@@ -2768,11 +2770,11 @@ func (ds *Datastore) GetTeamHostsPolicyMemberships(
 		h.hardware_serial AS host_hardware_serial
 	FROM hosts h
 	LEFT JOIN (
-		SELECT host_id, 0 AS passing, GROUP_CONCAT(policy_id) AS failing_policy_ids
+		SELECT host_id, 0 AS passing, %s AS failing_policy_ids
 		FROM policy_membership
-		WHERE policy_id IN (?) AND passes = 0
+		WHERE policy_id IN (?) AND passes = false
 		GROUP BY host_id
-	) pm ON h.id = pm.host_id
+	) pm ON h.id = pm.host_id`, ds.dialect.GroupConcat("policy_id", ",")) + `
 	LEFT JOIN (
 		SELECT host_id, email
 		FROM (
@@ -2797,7 +2799,7 @@ func (ds *Datastore) GetTeamHostsPolicyMemberships(
 	) sh ON h.id = sh.host_id
 	LEFT JOIN host_display_names hdn ON h.id = hdn.host_id
 	LEFT JOIN host_calendar_events hce ON h.id = hce.host_id
-	WHERE h.team_id = ? AND ((pm.passing IS NOT NULL AND NOT pm.passing) OR (COALESCE(pm.passing, 1) AND hce.host_id IS NOT NULL))
+	WHERE h.team_id = ? AND ((pm.passing IS NOT NULL AND pm.passing = 0) OR (COALESCE(pm.passing, 1) = 1 AND hce.host_id IS NOT NULL))
 `
 
 	query, args, err := sqlx.In(query,

@@ -20,41 +20,31 @@ var maintainedAppsAllowedOrderKeys = common_mysql.OrderKeyAllowlist{
 }
 
 func (ds *Datastore) UpsertMaintainedApp(ctx context.Context, app *fleet.MaintainedApp) (*fleet.MaintainedApp, error) {
-	const upsertStmt = `
+	upsertStmt := `
 INSERT INTO
 	fleet_maintained_apps (name, slug, platform, unique_identifier)
 VALUES
 	(?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-	name = VALUES(name),
+` + ds.dialect.OnDuplicateKey("slug", `name = VALUES(name),
 	platform = VALUES(platform),
-	unique_identifier = VALUES(unique_identifier)
-`
+	unique_identifier = VALUES(unique_identifier)`)
 
 	var appID uint
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		var err error
 
 		// upsert the maintained app
-		res, err := tx.ExecContext(ctx, upsertStmt, app.Name, app.Slug, app.Platform, app.UniqueIdentifier)
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, upsertStmt, app.Name, app.Slug, app.Platform, app.UniqueIdentifier)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "upsert maintained app")
 		}
-		id, _ := res.LastInsertId()
 		appID = uint(id) //nolint:gosec // dismiss G115
 
 		// For darwin apps, update existing software_titles and software entries
 		// to use the FMA canonical name. This ensures consistency when an FMA
 		// is added for software that was previously ingested with osquery-reported names.
-		//
-		// We only run these UPDATEs when the FMA was actually inserted or modified.
-		// MySQL's ON DUPLICATE KEY UPDATE returns RowsAffected:
-		//   0 = duplicate key, no changes (existing FMA with same values)
-		//   1 = new row inserted
-		//   2 = duplicate key, values changed
-		// Skip if RowsAffected == 0 since nothing changed.
-		rowsAffected, _ := res.RowsAffected()
-		if app.Platform == "darwin" && app.UniqueIdentifier != "" && rowsAffected > 0 {
+		// These UPDATEs are idempotent and safe to run unconditionally.
+		if app.Platform == "darwin" && app.UniqueIdentifier != "" {
 			_, err = tx.ExecContext(ctx, `
 				UPDATE software_titles
 				SET name = ?
@@ -225,30 +215,6 @@ func (ds *Datastore) ListAvailableFleetMaintainedApps(ctx context.Context, teamI
 	return avail, meta, nil
 }
 
-func (ds *Datastore) GetFMANamesByIdentifier(ctx context.Context) (map[string]string, error) {
-	query := `SELECT unique_identifier, name FROM fleet_maintained_apps WHERE platform = 'darwin'`
-
-	rows, err := ds.reader(ctx).QueryContext(ctx, query)
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "query FMA names by identifier")
-	}
-	defer rows.Close()
-
-	result := make(map[string]string)
-	for rows.Next() {
-		var identifier, name string
-		if err := rows.Scan(&identifier, &name); err != nil {
-			return nil, ctxerr.Wrap(ctx, err, "scan FMA name row")
-		}
-		result[identifier] = name
-	}
-	if err := rows.Err(); err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "iterate FMA name rows")
-	}
-
-	return result, nil
-}
-
 func (ds *Datastore) ClearRemovedFleetMaintainedApps(ctx context.Context, slugsToKeep []string) error {
 	stmt := `DELETE FROM fleet_maintained_apps WHERE slug NOT IN (?)`
 
@@ -270,4 +236,27 @@ func (ds *Datastore) ClearRemovedFleetMaintainedApps(ctx context.Context, slugsT
 	}
 
 	return nil
+}
+
+func (ds *Datastore) GetFMANamesByIdentifier(ctx context.Context) (map[string]string, error) {
+	query := `SELECT unique_identifier, name FROM fleet_maintained_apps WHERE platform = 'darwin'`
+
+	rows, err := ds.reader(ctx).QueryContext(ctx, query)
+	if err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "query FMA names by identifier")
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var identifier, name string
+		if err := rows.Scan(&identifier, &name); err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "scan FMA name row")
+		}
+		result[identifier] = name
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ctxerr.Wrap(ctx, err, "iterating FMA name rows")
+	}
+	return result, nil
 }

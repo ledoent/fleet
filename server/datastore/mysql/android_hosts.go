@@ -66,7 +66,7 @@ func (ds *AndroidDatastore) insertDevice(ctx context.Context, device *android.De
 			applied_policy_version
 		)
 		VALUES (?, ?, ?, ?, ?, ?)`
-	result, err := tx.ExecContext(ctx, stmt,
+	id, err := insertAndGetIDTx(ctx, tx, ds.dialect, stmt,
 		device.HostID,
 		device.DeviceID,
 		device.EnterpriseSpecificID,
@@ -76,10 +76,6 @@ func (ds *AndroidDatastore) insertDevice(ctx context.Context, device *android.De
 	)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "inserting device")
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting android_devices last insert ID")
 	}
 	device.ID = uint(id) // nolint:gosec
 	return device, nil

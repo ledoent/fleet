@@ -87,12 +87,12 @@ func (ds *Datastore) Vulnerability(ctx context.Context, cve string, teamID *uint
 	args = append(args, cve, cve)
 
 	if teamID != nil {
-		eeSelectStmt += " AND vhc.team_id = ? AND vhc.global_stats = 0"
-		freeSelectStmt += " AND vhc.team_id = ? AND vhc.global_stats = 0"
+		eeSelectStmt += " AND vhc.team_id = ? AND vhc.global_stats = false"
+		freeSelectStmt += " AND vhc.team_id = ? AND vhc.global_stats = false"
 		args = append(args, *teamID)
 	} else {
-		eeSelectStmt += " AND vhc.team_id = 0 AND vhc.global_stats = 1"
-		freeSelectStmt += " AND vhc.team_id = 0 AND vhc.global_stats = 1"
+		eeSelectStmt += " AND vhc.team_id = 0 AND vhc.global_stats = true"
+		freeSelectStmt += " AND vhc.team_id = 0 AND vhc.global_stats = true"
 	}
 
 	var selectStmt string
@@ -212,12 +212,12 @@ func (ds *Datastore) SoftwareByCVE(ctx context.Context, cve string, teamID *uint
 
 	switch {
 	case teamID != nil && *teamID > 0:
-		selectStmt += " AND shc.team_id = ? AND shc.global_stats = 0"
+		selectStmt += " AND shc.team_id = ? AND shc.global_stats = false"
 		args = append(args, *teamID)
 	case teamID != nil && *teamID == 0:
-		selectStmt += " AND shc.team_id = 0 AND shc.global_stats = 0"
+		selectStmt += " AND shc.team_id = 0 AND shc.global_stats = false"
 	case teamID == nil:
-		selectStmt += " AND shc.team_id = 0 AND shc.global_stats = 1"
+		selectStmt += " AND shc.team_id = 0 AND shc.global_stats = true"
 	}
 
 	err = sqlx.SelectContext(ctx, ds.reader(ctx), &vs, selectStmt, args...)
@@ -485,13 +485,13 @@ func buildListVulnerabilitiesLegacySQL(opt *fleet.VulnListOptions) (string, []an
 
 	var args []any
 	if opt.TeamID == nil {
-		selectStmt += " AND vhc.global_stats = 1"
+		selectStmt += " AND vhc.global_stats = true"
 	} else {
-		selectStmt += " AND vhc.global_stats = 0 AND vhc.team_id = ?"
+		selectStmt += " AND vhc.global_stats = false AND vhc.team_id = ?"
 		args = append(args, *opt.TeamID)
 	}
 	if opt.KnownExploit {
-		selectStmt += " AND cm.cisa_known_exploit = 1"
+		selectStmt += " AND cm.cisa_known_exploit = true"
 	}
 	if match := opt.ListOptions.MatchQuery; match != "" {
 		selectStmt, args = searchLike(selectStmt, args, match, "vhc.cve")
@@ -528,13 +528,13 @@ func (ds *Datastore) CountVulnerabilities(ctx context.Context, opt fleet.VulnLis
 	`
 	var args []any
 	if opt.TeamID == nil {
-		selectStmt += " AND vhc.global_stats = 1"
+		selectStmt += " AND vhc.global_stats = true"
 	} else {
-		selectStmt += " AND vhc.global_stats = 0 AND vhc.team_id = ?"
+		selectStmt += " AND vhc.global_stats = false AND vhc.team_id = ?"
 		args = append(args, *opt.TeamID)
 	}
 	if opt.KnownExploit {
-		selectStmt += " AND cm.cisa_known_exploit = 1"
+		selectStmt += " AND cm.cisa_known_exploit = true"
 	}
 	if match := opt.ListOptions.MatchQuery; match != "" {
 		selectStmt, args = searchLike(selectStmt, args, match, "vhc.cve")
@@ -766,8 +766,7 @@ type vulnerabilityCounts struct {
 }
 
 const (
-	vulnerabilityHostCountsSwapTable       = "vulnerability_host_counts_swap"
-	vulnerabilityHostCountsSwapTableSchema = `CREATE TABLE IF NOT EXISTS ` + vulnerabilityHostCountsSwapTable + ` LIKE vulnerability_host_counts`
+	vulnerabilityHostCountsSwapTable = "vulnerability_host_counts_swap"
 )
 
 // atomicTableSwapVulnerabilityCounts implements atomic table swap pattern
@@ -777,12 +776,13 @@ const (
 func (ds *Datastore) atomicTableSwapVulnerabilityCounts(ctx context.Context, counts vulnerabilityCounts) error {
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		// Create/recreate the swap table fresh
+		swapSchema := ds.dialect.CreateTableLike(vulnerabilityHostCountsSwapTable, "vulnerability_host_counts")
 		_, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS "+vulnerabilityHostCountsSwapTable)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "dropping existing swap table")
 		}
 
-		_, err = tx.ExecContext(ctx, vulnerabilityHostCountsSwapTableSchema)
+		_, err = tx.ExecContext(ctx, swapSchema)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "creating swap table")
 		}
@@ -815,19 +815,16 @@ func (ds *Datastore) atomicTableSwapVulnerabilityCounts(ctx context.Context, cou
 		return err
 	}
 
-	// Atomic table swap using RENAME TABLE
+	// Atomic table swap
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			RENAME TABLE
-				vulnerability_host_counts TO vulnerability_host_counts_old,
-				%s TO vulnerability_host_counts
-		`, vulnerabilityHostCountsSwapTable))
-		if err != nil {
-			return ctxerr.Wrap(ctx, err, "atomic table swap")
+		for _, stmt := range ds.dialect.AtomicTableSwap("vulnerability_host_counts", vulnerabilityHostCountsSwapTable) {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return ctxerr.Wrap(ctx, err, "atomic table swap")
+			}
 		}
 
 		// Clean up old table (drop it)
-		_, err = tx.ExecContext(ctx, "DROP TABLE vulnerability_host_counts_old")
+		_, err := tx.ExecContext(ctx, "DROP TABLE vulnerability_host_counts_old")
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "dropping old table")
 		}

@@ -124,9 +124,9 @@ func (ds *Datastore) insertInHouseAppDB(ctx context.Context, tx sqlx.ExtContext,
 	)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-	res, err := tx.ExecContext(ctx, stmt, args...)
+	id64, err := insertAndGetIDTx(ctx, tx, ds.dialect, stmt, args...)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			teamName, err := ds.getTeamName(ctx, payload.TeamID)
 			if err != nil {
 				return 0, ctxerr.Wrap(ctx, err)
@@ -136,13 +136,9 @@ func (ds *Datastore) insertInHouseAppDB(ctx context.Context, tx sqlx.ExtContext,
 		}
 		return 0, ctxerr.Wrap(ctx, err, "insertInHouseAppDB")
 	}
-	id64, err := res.LastInsertId()
 	installerID := uint(id64) //nolint:gosec // dismiss G115
-	if err != nil {
-		return 0, ctxerr.Wrap(ctx, err, "insertInHouseAppDB")
-	}
 
-	if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, installerID, *payload.ValidatedLabels, softwareTypeInHouseApp); err != nil {
+	if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, ds.dialect, installerID, *payload.ValidatedLabels, softwareTypeInHouseApp); err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "insertInHouseAppDB")
 	}
 
@@ -309,7 +305,7 @@ func (ds *Datastore) SaveInHouseAppUpdates(ctx context.Context, payload *fleet.U
 		}
 
 		if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
-			if IsDuplicate(err) {
+			if ds.dialect.IsDuplicate(err) {
 				teamName, err := ds.getTeamName(ctx, payload.TeamID)
 				if err != nil {
 					return ctxerr.Wrap(ctx, err)
@@ -320,7 +316,7 @@ func (ds *Datastore) SaveInHouseAppUpdates(ctx context.Context, payload *fleet.U
 		}
 
 		if payload.ValidatedLabels != nil {
-			if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, payload.InstallerID, *payload.ValidatedLabels, softwareTypeInHouseApp); err != nil {
+			if err := setOrUpdateSoftwareInstallerLabelsDB(ctx, tx, ds.dialect, payload.InstallerID, *payload.ValidatedLabels, softwareTypeInHouseApp); err != nil {
 				return ctxerr.Wrap(ctx, err, "upsert in house app labels")
 			}
 		}
@@ -332,7 +328,7 @@ func (ds *Datastore) SaveInHouseAppUpdates(ctx context.Context, payload *fleet.U
 		}
 
 		if payload.DisplayName != nil {
-			if err := updateSoftwareTitleDisplayName(ctx, tx, payload.TeamID, payload.TitleID, *payload.DisplayName); err != nil {
+			if err := updateSoftwareTitleDisplayName(ctx, tx, ds.dialect, payload.TeamID, payload.TitleID, *payload.DisplayName); err != nil {
 				return ctxerr.Wrap(ctx, err, "update in house app display name")
 			}
 		}
@@ -395,7 +391,7 @@ func (ds *Datastore) RemovePendingInHouseAppInstalls(ctx context.Context, inHous
 			host_in_house_software_installs
 		WHERE
 			in_house_app_id = ? AND
-			canceled = 0 AND
+			canceled = false AND
 			verification_at IS NULL AND
 			verification_failed_at IS NULL
 `, inHouseAppID)
@@ -469,23 +465,23 @@ past AS (
 		LEFT JOIN host_in_house_software_installs hihsi2
 			ON hihsi.host_id = hihsi2.host_id AND
 				 hihsi.in_house_app_id = hihsi2.in_house_app_id AND
-				 hihsi2.removed = 0 AND
-				 hihsi2.canceled = 0 AND
+				 hihsi2.removed = false AND
+				 hihsi2.canceled = false AND
 				 (hihsi.created_at < hihsi2.created_at OR (hihsi.created_at = hihsi2.created_at AND hihsi.id < hihsi2.id))
 	WHERE
 		hihsi2.id IS NULL
 		AND hihsi.in_house_app_id = :in_house_app_id
 		AND (h.team_id = :team_id OR (h.team_id IS NULL AND :team_id = 0))
 		AND hihsi.host_id NOT IN (SELECT host_id FROM upcoming) -- antijoin to exclude hosts with upcoming activities
-		AND hihsi.removed = 0
-		AND hihsi.canceled = 0
+		AND hihsi.removed = false
+		AND hihsi.canceled = false
 )
 
 -- count each status
 SELECT
-	COALESCE(SUM( IF(status = :software_status_pending, 1, 0)), 0) AS pending,
-	COALESCE(SUM( IF(status = :software_status_failed, 1, 0)), 0) AS failed,
-	COALESCE(SUM( IF(status = :software_status_installed, 1, 0)), 0) AS installed
+	COALESCE(SUM( CASE WHEN status = :software_status_pending THEN 1 ELSE 0 END), 0) AS pending,
+	COALESCE(SUM( CASE WHEN status = :software_status_failed THEN 1 ELSE 0 END), 0) AS failed,
+	COALESCE(SUM( CASE WHEN status = :software_status_installed THEN 1 ELSE 0 END), 0) AS installed
 FROM (
 
 -- union most recent past and upcoming activities after joining to get statuses for most recent activities
@@ -531,18 +527,19 @@ func (ds *Datastore) IsInHouseAppLabelScoped(ctx context.Context, inHouseAppID, 
 }
 
 func (ds *Datastore) InsertHostInHouseAppInstall(ctx context.Context, hostID uint, inHouseAppID, softwareTitleID uint, commandUUID string, opts fleet.HostSoftwareInstallOptions) error {
-	const (
-		insertUAStmt = `
+	jsonObj := ds.dialect.JSONObjectFunc()
+	insertUAStmt := fmt.Sprintf(`
 INSERT INTO upcoming_activities
 		(host_id, priority, user_id, fleet_initiated, activity_type, execution_id, payload)
 VALUES
 		(?, ?, ?, ?, 'in_house_app_install', ?,
-			JSON_OBJECT(
+			%s(
 				'self_service', ?,
-				'user', (SELECT JSON_OBJECT('name', name, 'email', email, 'gravatar_url', gravatar_url) FROM users WHERE id = ?)
+				'user', (SELECT %s('name', name, 'email', email, 'gravatar_url', gravatar_url) FROM users WHERE id = ?)
 			)
-		)`
+		)`, jsonObj, jsonObj)
 
+	const (
 		insertIHAUAStmt = `
 INSERT INTO in_house_app_upcoming_activities
 		(upcoming_activity_id, in_house_app_id, software_title_id)
@@ -569,7 +566,7 @@ VALUES
 	}
 
 	err = ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		res, err := tx.ExecContext(ctx, insertUAStmt,
+		activityID, err := insertAndGetIDTx(ctx, tx, ds.dialect, insertUAStmt,
 			hostID,
 			opts.Priority(),
 			userID,
@@ -581,8 +578,6 @@ VALUES
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "insert in house app install request")
 		}
-
-		activityID, _ := res.LastInsertId()
 		_, err = tx.ExecContext(ctx, insertIHAUAStmt,
 			activityID,
 			inHouseAppID,
@@ -709,7 +704,7 @@ FROM
 	LEFT OUTER JOIN software_titles st ON st.id = iha.title_id
 WHERE
 	hihsi.command_uuid = :command_uuid AND
-	hihsi.canceled = 0
+	hihsi.canceled = false
 	`
 
 	type result struct {
@@ -829,17 +824,17 @@ WHERE iha.id = ?`
 }
 
 func (ds *Datastore) BatchSetInHouseAppsInstallers(ctx context.Context, tmID *uint, installers []*fleet.UploadSoftwareInstallerPayload) error {
-	const upsertSoftwareTitles = `
+	upsertSoftwareTitles := `
 INSERT INTO software_titles
   (name, source, extension_for, bundle_identifier)
 VALUES
   %s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("unique_identifier, source, extension_for", `
   name = VALUES(name),
   source = VALUES(source),
   extension_for = VALUES(extension_for),
   bundle_identifier = VALUES(bundle_identifier)
-`
+`)
 
 	const loadSoftwareTitles = `
 SELECT
@@ -862,7 +857,7 @@ WHERE
 UPDATE
 	host_in_house_software_installs
 SET
-	canceled = 1
+	canceled = true
 WHERE
 	verification_at IS NULL AND
 	verification_failed_at IS NULL AND
@@ -875,7 +870,7 @@ WHERE
 UPDATE
 	nano_enrollment_queue
 SET
-	active = 0
+	active = false
 WHERE
 	command_uuid IN (
 		SELECT command_uuid
@@ -931,7 +926,7 @@ WHERE
 UPDATE
 	host_in_house_software_installs
 SET
-	canceled = 1
+	canceled = true
 WHERE
 	verification_at IS NULL AND
 	verification_failed_at IS NULL AND
@@ -944,7 +939,7 @@ WHERE
 UPDATE
 	nano_enrollment_queue
 SET
-	active = 0
+	active = false
 WHERE
 	command_uuid IN (
 		SELECT command_uuid
@@ -1011,7 +1006,7 @@ WHERE
 	title_id = ?
 `
 
-	const insertNewOrEditedInstaller = `
+	insertNewOrEditedInstaller := `
 INSERT INTO in_house_apps (
 	title_id,
 	team_id,
@@ -1026,7 +1021,7 @@ INSERT INTO in_house_apps (
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("global_or_team_id, filename, platform", `
   filename = VALUES(filename),
   version = VALUES(version),
   storage_id = VALUES(storage_id),
@@ -1034,7 +1029,7 @@ ON DUPLICATE KEY UPDATE
   bundle_identifier = VALUES(bundle_identifier),
   self_service = VALUES(self_service),
   url = VALUES(url)
-`
+`)
 
 	const loadInHouseInstallerID = `
 SELECT
@@ -1063,7 +1058,7 @@ WHERE
 	in_house_app_id = ?
 `
 
-	const upsertInHouseLabels = `
+	upsertInHouseLabels := `
 INSERT INTO
 	in_house_app_labels (
 		in_house_app_id,
@@ -1073,10 +1068,10 @@ INSERT INTO
 	)
 VALUES
 	%s
-ON DUPLICATE KEY UPDATE
+` + ds.dialect.OnDuplicateKey("in_house_app_id, label_id", `
 	exclude = VALUES(exclude),
 	require_all = VALUES(require_all)
-`
+`)
 
 	const loadExistingInHouseLabels = `
 SELECT
@@ -1104,8 +1099,7 @@ WHERE
 	software_category_id NOT IN (?)
 `
 
-	const upsertInHouseCategories = `
-INSERT IGNORE INTO
+	const upsertInHouseCategoriesSuffix = `
 	in_house_app_software_categories (
 		in_house_app_id,
 		software_category_id
@@ -1125,7 +1119,7 @@ WHERE
 	stdn.team_id = ?
 `
 
-	const deleteDisplayNamesNotInList = `
+	deleteDisplayNamesNotInList := `
 DELETE
 	stdn
 FROM
@@ -1135,6 +1129,15 @@ INNER JOIN
 WHERE
 	stdn.team_id = ? AND stdn.software_title_id NOT IN (?)
 `
+	if ds.dialect.IsPostgres() {
+		deleteDisplayNamesNotInList = `
+DELETE FROM software_title_display_names
+USING in_house_apps iha
+WHERE software_title_display_names.software_title_id = iha.title_id
+	AND software_title_display_names.team_id = iha.global_or_team_id
+	AND software_title_display_names.team_id = ? AND software_title_display_names.software_title_id NOT IN (?)
+`
+	}
 
 	// use a team id of 0 if no-team
 	var globalOrTeamID uint
@@ -1503,7 +1506,7 @@ WHERE
 					upsertCategoriesArgs = append(upsertCategoriesArgs, installerID, catID)
 				}
 				upsertCategoriesValues := strings.TrimSuffix(strings.Repeat("(?,?),", len(installer.CategoryIDs)), ",")
-				_, err = tx.ExecContext(ctx, fmt.Sprintf(upsertInHouseCategories, upsertCategoriesValues), upsertCategoriesArgs...)
+				_, err = tx.ExecContext(ctx, ds.dialect.InsertIgnoreInto()+fmt.Sprintf(upsertInHouseCategoriesSuffix, upsertCategoriesValues)+ds.dialect.OnConflictDoNothing("in_house_app_id,software_category_id"), upsertCategoriesArgs...)
 				if err != nil {
 					return ctxerr.Wrapf(ctx, err, "insert new/edited categories for in-house with name %q", installer.Filename)
 				}
@@ -1512,7 +1515,7 @@ WHERE
 			// update display name for the software title if it needs to be updated or inserted
 			// no deletions will happen, display names will be set to empty if needed
 			if name, ok := displayNameIDMap[titleID]; (ok && name != installer.DisplayName) || (!ok && installer.DisplayName != "") {
-				if err := updateSoftwareTitleDisplayName(ctx, tx, tmID, titleID, installer.DisplayName); err != nil {
+				if err := updateSoftwareTitleDisplayName(ctx, tx, ds.dialect, tmID, titleID, installer.DisplayName); err != nil {
 					return ctxerr.Wrapf(ctx, err, "update software title display name for in-house app with name %q", installer.Filename)
 				}
 			}
@@ -1547,7 +1550,7 @@ func (ds *Datastore) runInHouseUpdateSideEffectsInTransaction(ctx context.Contex
 UPDATE
 	host_in_house_software_installs
 SET
-	canceled = 1
+	canceled = true
 WHERE
 	verification_at IS NULL AND
 	verification_failed_at IS NULL AND
@@ -1562,7 +1565,7 @@ WHERE
 UPDATE
 	nano_enrollment_queue
 SET
-	active = 0
+	active = false
 WHERE
 	command_uuid IN (
 		SELECT command_uuid

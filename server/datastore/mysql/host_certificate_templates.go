@@ -27,7 +27,7 @@ func (ds *Datastore) ListAndroidHostUUIDsWithDeliverableCertificateTemplates(ctx
 			AND host_certificate_templates.certificate_template_id = certificate_templates.id
 		WHERE
 			hosts.platform = '%s' AND
-			host_mdm.enrolled = 1 AND
+			host_mdm.enrolled = true AND
 			host_certificate_templates.id IS NULL
 		ORDER BY hosts.uuid
 		LIMIT ? OFFSET ?
@@ -221,11 +221,15 @@ func (ds *Datastore) GetCertificateTemplateStatusesByNameForHosts(ctx context.Co
 func (ds *Datastore) RetryHostCertificateTemplate(ctx context.Context, hostUUID string, certificateTemplateID uint, detail string) error {
 	return ds.withTx(ctx, func(tx sqlx.ExtContext) error {
 		// Delete associated challenges
-		_, err := tx.ExecContext(ctx, `
-			DELETE c FROM challenges c
+		deleteChallengeStmt := `DELETE c FROM challenges c
 			INNER JOIN host_certificate_templates hct ON hct.fleet_challenge = c.challenge
-			WHERE hct.host_uuid = ? AND hct.certificate_template_id = ?
-		`, hostUUID, certificateTemplateID)
+			WHERE hct.host_uuid = ? AND hct.certificate_template_id = ?`
+		if ds.dialect.IsPostgres() {
+			deleteChallengeStmt = `DELETE FROM challenges WHERE challenge IN (
+				SELECT fleet_challenge FROM host_certificate_templates
+				WHERE host_uuid = ? AND certificate_template_id = ?)`
+		}
+		_, err := tx.ExecContext(ctx, deleteChallengeStmt, hostUUID, certificateTemplateID)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "delete challenges for certificate retry")
 		}
@@ -337,11 +341,13 @@ func (ds *Datastore) DeleteHostCertificateTemplate(ctx context.Context, hostUUID
 func (ds *Datastore) DeleteAllHostCertificateTemplates(ctx context.Context, hostUUID string) error {
 	return ds.withTx(ctx, func(tx sqlx.ExtContext) error {
 		// Delete challenges linked to this host's certificate templates before the host rows go away.
-		const deleteChallenges = `
-			DELETE c FROM challenges c
+		deleteChallenges := `DELETE c FROM challenges c
 			INNER JOIN host_certificate_templates hct ON hct.fleet_challenge = c.challenge
-			WHERE hct.host_uuid = ?
-		`
+			WHERE hct.host_uuid = ?`
+		if ds.dialect.IsPostgres() {
+			deleteChallenges = `DELETE FROM challenges WHERE challenge IN (
+				SELECT fleet_challenge FROM host_certificate_templates WHERE host_uuid = ?)`
+		}
 		if _, err := tx.ExecContext(ctx, deleteChallenges, hostUUID); err != nil {
 			return ctxerr.Wrap(ctx, err, "delete challenges for host certificate templates")
 		}
@@ -723,7 +729,7 @@ func (ds *Datastore) GetAndroidCertificateTemplatesForRenewal(
 				(DATEDIFF(not_valid_after, not_valid_before) > 30 AND not_valid_after < DATE_ADD(?, INTERVAL 30 DAY))
 				OR
 				(DATEDIFF(not_valid_after, not_valid_before) > 2 AND DATEDIFF(not_valid_after, not_valid_before) <= 30
-					AND not_valid_after < DATE_ADD(?, INTERVAL DATEDIFF(not_valid_after, not_valid_before)/2 DAY))
+					AND not_valid_after < DATE_ADD(?, INTERVAL DATEDIFF(not_valid_after, not_valid_before)/2.0 DAY))
 			)
 		ORDER BY not_valid_after ASC
 		LIMIT ?
