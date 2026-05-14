@@ -195,13 +195,21 @@ WHERE host_uuid = ? AND %s`
 	includeVPPApps := fleetPlatform == "darwin" || fleetPlatform == "ios" || fleetPlatform == "ipados"
 
 	if includeSoftwareInstallers {
+		// CAST(NULL AS UNSIGNED) gives the NULL literal an explicit type on
+		// both dialects: MySQL leaves it as unsigned-int NULL; the PG rebind
+		// driver rewrites AS UNSIGNED → AS integer. Without this cast, the
+		// outer ORDER BY COALESCE(software_installer_id, vpp_app_team_id, 0)
+		// fails on PG with "COALESCE types integer and text cannot be
+		// matched" (SQLSTATE 42804) — the untyped NULL in this UNION leg
+		// gets resolved to text by PG before the COALESCE composes with
+		// the typed int from the other leg.
 		installerSelect := `
 SELECT
 	? AS host_uuid,
 	st.name AS name,
 	'pending' AS status,
 	si.id AS software_installer_id,
-	NULL AS vpp_app_team_id,
+	CAST(NULL AS UNSIGNED) AS vpp_app_team_id,
 	-- policy_gated: true when the installer has at least one policy whose install-software automation points at it (a gating policy
 	-- used as a gate during setup experience). A policy's software_installer_id already uniquely identifies the installer (and its
 	-- team), so no team check is needed; only gate on Windows/Linux. The specific policy ids are derived from the installer at
@@ -258,12 +266,14 @@ AND %s`
 	}
 
 	if includeVPPApps {
+		// CAST(NULL AS UNSIGNED) — same reasoning as the installer leg above.
+		// Cross-dialect typed-NULL so PG can resolve the outer COALESCE.
 		vppSelect := `
 SELECT
 	? AS host_uuid,
 	st.name AS name,
 	'pending' AS status,
-	NULL AS software_installer_id,
+	CAST(NULL AS UNSIGNED) AS software_installer_id,
 	vat.id AS vpp_app_team_id,
 	FALSE AS policy_gated,
 	COALESCE(stdn.display_name, st.name) AS sort_name
@@ -738,7 +748,7 @@ SELECT DISTINCT p.id
 FROM setup_experience_status_results sesr
 JOIN policies p ON p.software_installer_id = sesr.software_installer_id
 WHERE sesr.host_uuid = ?
-	AND sesr.policy_gated = 1
+	AND sesr.policy_gated = true
 	AND sesr.status IN ('pending', 'running')
 	AND sesr.host_software_installs_execution_id IS NULL`
 	var ids []uint
