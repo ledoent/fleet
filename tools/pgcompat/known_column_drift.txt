@@ -1,0 +1,18 @@
+# Allowlist of known column-level differences between MySQL schema.sql and
+# the embedded PG baseline. Use sparingly — most "drift" indicates a migration
+# that was seeded as applied via seedPGMigrationHistory but never actually
+# changed the PG schema, which means production has the wrong shape.
+#
+# Each line is one of:
+#   mysql-only: <table>.<column>    — column exists in MySQL but not in PG baseline
+#   pg-only:    <table>.<column>    — column exists in PG baseline but not in MySQL
+#
+# Add an entry only when:
+#   1. The difference is intentional (PG has its own infrastructure column,
+#      or MySQL has a recently-added column the baseline hasn't picked up yet
+#      and a regen is scheduled), AND
+#   2. A comment above the entry explains why.
+#
+# If you cannot defend an entry with a comment, the right fix is to regenerate
+# pg_baseline_schema.sql (see its file header for the canonical pg_dump
+# command) or to actually fix the schema drift in production.
