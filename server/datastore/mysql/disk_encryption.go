@@ -10,7 +10,6 @@ import (
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/mdm/apple/mobileconfig"
-	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -50,12 +49,10 @@ VALUES
 		if err == nil {
 			return archived, nil
 		}
-		var mysqlErr *mysql.MySQLError
-		switch {
-		case errors.As(err, &mysqlErr) && mysqlErr.Number == 1062:
+		if ds.dialect.IsDuplicate(err) {
 			ds.logger.ErrorContext(ctx, "Primary key already exists in host_disk_encryption_keys. Falling back to update", "host_id", host.ID)
 			// This should never happen unless there is a bug in the code or an infra issue (like huge replication lag).
-		default:
+		} else {
 			return false, ctxerr.Wrap(ctx, err, "inserting key")
 		}
 	}
@@ -63,11 +60,7 @@ VALUES
 	_, err = ds.writer(ctx).ExecContext(ctx, `
 UPDATE host_disk_encryption_keys SET
   /* if the key has changed, set decrypted to its initial value so it can be calculated again if necessary (if null) */
-  decryptable = IF(
-    base64_encrypted = ? AND base64_encrypted != '',
-    decryptable,
-    ?
-  ),
+  decryptable = CASE WHEN base64_encrypted = ? AND base64_encrypted != '' THEN decryptable ELSE ? END,
   base64_encrypted = ?,
   client_error = ?
 WHERE host_id = ?
@@ -166,14 +159,12 @@ VALUES
 		if err == nil {
 			return archived, nil
 		}
-		var mysqlErr *mysql.MySQLError
-		switch {
-		case errors.As(err, &mysqlErr) && mysqlErr.Number == 1062:
+		if ds.dialect.IsDuplicate(err) {
 			ds.logger.ErrorContext(ctx, "Primary key already exists in LUKS host_disk_encryption_keys. Falling back to update",
 				"host_id",
 				host)
 			// This should never happen unless there is a bug in the code or an infra issue (like huge replication lag).
-		default:
+		} else {
 			return false, ctxerr.Wrap(ctx, err, "inserting LUKS key")
 		}
 	}
@@ -209,7 +200,7 @@ func (ds *Datastore) ClearPendingEscrow(ctx context.Context, hostID uint) error 
 func (ds *Datastore) ReportEscrowError(ctx context.Context, hostID uint, errorMessage string) error {
 	_, err := ds.writer(ctx).ExecContext(ctx, `
 INSERT INTO host_disk_encryption_keys
-  (host_id, base64_encrypted, client_error) VALUES (?, '', ?) ON DUPLICATE KEY UPDATE client_error = VALUES(client_error)
+  (host_id, base64_encrypted, client_error) VALUES (?, '', ?) `+ds.dialect.OnDuplicateKey("host_id", `client_error = VALUES(client_error)`)+`
 `, hostID, errorMessage)
 	return err
 }
@@ -217,7 +208,7 @@ INSERT INTO host_disk_encryption_keys
 func (ds *Datastore) QueueEscrow(ctx context.Context, hostID uint) error {
 	_, err := ds.writer(ctx).ExecContext(ctx, `
 INSERT INTO host_disk_encryption_keys
-  (host_id, base64_encrypted, reset_requested) VALUES (?, '', TRUE) ON DUPLICATE KEY UPDATE reset_requested = TRUE
+  (host_id, base64_encrypted, reset_requested) VALUES (?, '', TRUE) `+ds.dialect.OnDuplicateKey("host_id", `reset_requested = TRUE`)+`
 `, hostID)
 	return err
 }

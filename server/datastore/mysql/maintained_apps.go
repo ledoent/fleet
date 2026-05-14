@@ -21,24 +21,22 @@ var maintainedAppsAllowedOrderKeys = common_mysql.OrderKeyAllowlist{
 }
 
 func (ds *Datastore) UpsertMaintainedApp(ctx context.Context, app *fleet.MaintainedApp) (*fleet.MaintainedApp, error) {
-	const upsertStmt = `
+	upsertStmt := `
 INSERT INTO
 	fleet_maintained_apps (name, slug, platform, unique_identifier)
 VALUES
 	(?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-	name = VALUES(name),
+` + ds.dialect.OnDuplicateKey("slug", `name = VALUES(name),
 	platform = VALUES(platform),
-	unique_identifier = VALUES(unique_identifier)
-`
+	unique_identifier = VALUES(unique_identifier)`)
 
 	var appID uint
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		res, err := tx.ExecContext(ctx, upsertStmt, app.Name, app.Slug, app.Platform, app.UniqueIdentifier)
+		// upsert the maintained app
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, upsertStmt, app.Name, app.Slug, app.Platform, app.UniqueIdentifier)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "upsert maintained app")
 		}
-		id, _ := res.LastInsertId()
 		appID = uint(id) //nolint:gosec // dismiss G115
 
 		return nil
@@ -396,3 +394,4 @@ func (ds *Datastore) ClearRemovedFleetMaintainedApps(ctx context.Context, slugsT
 
 	return nil
 }
+

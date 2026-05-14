@@ -16,7 +16,7 @@ import (
 )
 
 func TestCampaigns(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
@@ -341,7 +341,10 @@ func testCompletedCampaigns(t *testing.T, ds *Datastore) {
 	assert.NoError(t, err)
 	assert.Len(t, result, 0)
 
-	result, err = ds.GetCompletedCampaigns(context.Background(), []uint{234, 1, 1, 34455455453})
+	// 2147483647 = int32 max; deliberately larger than any seeded id but
+	// within PG's `integer` range (PG columns are int4 on this fork; MySQL
+	// columns are int unsigned).
+	result, err = ds.GetCompletedCampaigns(context.Background(), []uint{234, 1, 1, 2147483647})
 	assert.NoError(t, err)
 	assert.Len(t, result, 0)
 

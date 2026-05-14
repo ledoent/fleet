@@ -929,7 +929,7 @@ var mdmQueries = map[string]DetailQuery{
 	"mdm_disk_encryption_key_file_lines_darwin": {
 		Query: fmt.Sprintf(`
 	WITH
-		de AS (SELECT IFNULL((%s), 0) as encrypted),
+		de AS (SELECT COALESCE((%s), 0) as encrypted),
 		fl AS (SELECT line FROM file_lines WHERE path = '/var/db/FileVaultPRK.dat')
 	SELECT encrypted, hex(line) as hex_line FROM de LEFT JOIN fl;`, usesMacOSDiskEncryptionQuery),
 		Platforms:        []string{"darwin"},
@@ -939,7 +939,7 @@ var mdmQueries = map[string]DetailQuery{
 	"mdm_disk_encryption_key_file_darwin": {
 		Query: fmt.Sprintf(`
 	WITH
-		de AS (SELECT IFNULL((%s), 0) as encrypted),
+		de AS (SELECT COALESCE((%s), 0) as encrypted),
 		fv AS (SELECT base64_encrypted as filevault_key FROM filevault_prk)
 	SELECT encrypted, filevault_key FROM de LEFT JOIN fv;`, usesMacOSDiskEncryptionQuery),
 		Platforms:        []string{"darwin"},

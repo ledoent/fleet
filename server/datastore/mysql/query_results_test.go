@@ -15,7 +15,7 @@ import (
 )
 
 func TestQueryResults(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
@@ -791,7 +791,7 @@ func testCleanupExcessQueryResultRowsManyQueries(t *testing.T, ds *Datastore) {
 				(SELECT id FROM users LIMIT 1),
 				'snapshot',
 				false,
-				1
+				true
 			FROM (
 				SELECT a.N + b.N*10 + c.N*100 + d.N*1000 + e.N*10000 as seq
 				FROM

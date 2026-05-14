@@ -25,7 +25,7 @@ func TestInsertUpdateCronStats(t *testing.T) {
 		instanceID   = "test_instance"
 	)
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	id, err := ds.InsertCronStats(ctx, fleet.CronStatsTypeScheduled, scheduleName, instanceID, fleet.CronStatsStatusPending)
 	require.NoError(t, err)
@@ -72,7 +72,7 @@ func TestGetLatestCronStats(t *testing.T) {
 		instanceID   = "test_instance"
 	)
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	insertTestCS := func(name string, statsType fleet.CronStatsType, status fleet.CronStatsStatus, createdAt time.Time) {
 		stmt := `INSERT INTO cron_stats (stats_type, name, instance, status, created_at) VALUES (?, ?, ?, ?, ?)`
@@ -130,7 +130,7 @@ func TestGetLatestCronStats(t *testing.T) {
 
 func TestCleanupCronStats(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	insertCronStats := func(t *testing.T, name, instance string, status fleet.CronStatsStatus, createdAt time.Time) {
 		t.Helper()
@@ -308,7 +308,7 @@ func TestCleanupCronStats(t *testing.T) {
 
 func TestUpdateAllCronStatsForInstance(t *testing.T) {
 	ctx := context.Background()
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		instance     string

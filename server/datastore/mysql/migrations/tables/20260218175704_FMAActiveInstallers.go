@@ -23,7 +23,7 @@ func Up_20260218175704(tx *sql.Tx) error {
 
 	// At migration time, the 1-installer-per-title rule is still enforced,
 	// so every existing installer is the active one for its title.
-	_, err = tx.Exec(`UPDATE software_installers SET is_active = 1`)
+	_, err = tx.Exec(`UPDATE software_installers SET is_active = true`)
 	if err != nil {
 		return fmt.Errorf("setting is_active for existing installers: %w", err)
 	}

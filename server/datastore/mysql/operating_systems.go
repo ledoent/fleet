@@ -57,7 +57,7 @@ func (ds *Datastore) UpdateHostOperatingSystem(ctx context.Context, hostID uint,
 		if err != nil {
 			return err
 		}
-		return upsertHostOperatingSystemDB(ctx, tx, hostID, os.ID)
+		return upsertHostOperatingSystemDB(ctx, tx, ds.dialect, hostID, os.ID)
 	})
 }
 
@@ -175,13 +175,13 @@ func isHostOperatingSystemUpdateNeeded(ctx context.Context, qc sqlx.QueryerConte
 
 // upsertHostOperatingSystemDB upserts the host operating system table
 // with the operating system id for the given host ID
-func upsertHostOperatingSystemDB(ctx context.Context, tx sqlx.ExtContext, hostID uint, osID uint) error {
+func upsertHostOperatingSystemDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hostID uint, osID uint) error {
 	// We do not use the `UPDATE` then `INSERT` pattern here because it causes a deadlock when multiple hosts are enrolled concurrently.
 	// This method will rarely be called -- only when the host_operating_system needs to be updated.
 	_, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO host_operating_system (host_id, os_id) VALUES (?, ?)
-				ON DUPLICATE KEY UPDATE os_id = VALUES(os_id)`, hostID, osID,
+				`+dialect.OnDuplicateKey("host_id", "os_id = VALUES(os_id)"), hostID, osID,
 	)
 	return err
 }
@@ -211,13 +211,9 @@ func getHostOperatingSystemDB(ctx context.Context, tx sqlx.QueryerContext, hostI
 
 func (ds *Datastore) CleanupHostOperatingSystems(ctx context.Context) error {
 	// delete operating_systems records that are not associated with any host (e.g., all hosts have
-	// upgraded from a prior version)
-	stmt := `
-	DELETE op
-	FROM operating_systems op
-	LEFT JOIN host_operating_system hop ON op.id = hop.os_id
-	WHERE hop.os_id IS NULL
-	`
+	// upgraded from a prior version).
+	// Cross-dialect: avoid MySQL-only "DELETE alias FROM table alias JOIN" syntax.
+	stmt := `DELETE FROM operating_systems WHERE id NOT IN (SELECT os_id FROM host_operating_system WHERE os_id IS NOT NULL)`
 	if _, err := ds.writer(ctx).ExecContext(ctx, stmt); err != nil {
 		return ctxerr.Wrap(ctx, err, "clean up host operating systems")
 	}

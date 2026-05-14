@@ -249,6 +249,7 @@ func mockDatastore(t *testing.T) (sqlmock.Sqlmock, *Datastore) {
 		primary: dbmock,
 		replica: dbmock,
 		logger:  slog.New(slog.DiscardHandler),
+		dialect: mysqlDialect{},
 	}
 
 	return mock, ds
@@ -1147,14 +1148,14 @@ func TestWhereFilterTeamWithGlobalStats(t *testing.T) {
 			filter: fleet.TeamFilter{
 				User: &fleet.User{GlobalRole: ptr.String(fleet.RoleAdmin)},
 			},
-			expected: "hosts.team_id = 0 AND hosts.global_stats = 1",
+			expected: "hosts.team_id = 0 AND hosts.global_stats = true",
 		},
 		{
 			name: "global maintainer",
 			filter: fleet.TeamFilter{
 				User: &fleet.User{GlobalRole: ptr.String(fleet.RoleMaintainer)},
 			},
-			expected: "hosts.team_id = 0 AND hosts.global_stats = 1",
+			expected: "hosts.team_id = 0 AND hosts.global_stats = true",
 		},
 		{
 			name: "global observer",
@@ -1169,7 +1170,7 @@ func TestWhereFilterTeamWithGlobalStats(t *testing.T) {
 				User:            &fleet.User{GlobalRole: ptr.String(fleet.RoleObserver)},
 				IncludeObserver: true,
 			},
-			expected: "hosts.team_id = 0 AND hosts.global_stats = 1",
+			expected: "hosts.team_id = 0 AND hosts.global_stats = true",
 		},
 
 		// Team roles

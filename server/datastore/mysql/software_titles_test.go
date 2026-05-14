@@ -1942,10 +1942,10 @@ func testListSoftwareTitlesSortByDisplayName(t *testing.T, ds *Datastore) {
 	//   bravo              -> no display name         (falls back to "bravo")
 	//   zzz-script-only.pkg -> display "AAA Script"   (should sort first despite filename)
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		if err := updateSoftwareTitleDisplayName(ctx, q, &team.ID, alphaID, "Zulu"); err != nil {
+		if err := updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, alphaID, "Zulu"); err != nil {
 			return err
 		}
-		return updateSoftwareTitleDisplayName(ctx, q, &team.ID, scriptID, "AAA Script")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, scriptID, "AAA Script")
 	})
 
 	// Sort by name ASC — expected: AAA Script (zzz-script-only.pkg), bravo, Zulu (alpha).

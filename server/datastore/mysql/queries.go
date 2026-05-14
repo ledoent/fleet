@@ -65,7 +65,7 @@ func (ds *Datastore) applyQueriesInTx(
 		}
 	}
 
-	const upsertQueriesSQL = `
+	upsertQueriesSQL := `
 		INSERT INTO queries (
 			name,
 			description,
@@ -82,8 +82,7 @@ func (ds *Datastore) applyQueriesInTx(
 			logging_type,
 			discard_data
 		) VALUES %s
-		ON DUPLICATE KEY UPDATE
-			name = VALUES(name),
+		` + ds.dialect.OnDuplicateKey("name, team_id_char", `name = VALUES(name),
 			description = VALUES(description),
 			query = VALUES(query),
 			author_id = VALUES(author_id),
@@ -96,7 +95,7 @@ func (ds *Datastore) applyQueriesInTx(
 			schedule_interval = VALUES(schedule_interval),
 			automations_enabled = VALUES(automations_enabled),
 			logging_type = VALUES(logging_type),
-			discard_data = VALUES(discard_data)`
+			discard_data = VALUES(discard_data)`)
 
 	// 'queries' are uniquely identified by {name, team_id}
 	unqKeyGen := func(name string, teamID *uint) string {
@@ -279,8 +278,9 @@ func (ds *Datastore) NewQuery(
 		) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )
 	`
 
-	result, err := ds.writer(ctx).ExecContext(
+	id, err := ds.insertAndGetID(
 		ctx,
+		ds.writer(ctx),
 		queryStatement,
 		query.Name,
 		query.Description,
@@ -300,13 +300,12 @@ func (ds *Datastore) NewQuery(
 		query.UpdatedAt,
 	)
 
-	if err != nil && IsDuplicate(err) {
+	if err != nil && ds.dialect.IsDuplicate(err) {
 		return nil, ctxerr.Wrap(ctx, alreadyExists("Query", query.Name))
 	} else if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "creating new Query")
 	}
 
-	id, _ := result.LastInsertId()
 	query.ID = uint(id) //nolint:gosec // dismiss G115
 	query.Packs = []fleet.Pack{}
 
@@ -546,7 +545,7 @@ func (ds *Datastore) DeleteQuery(ctx context.Context, teamID *uint, name string)
 	deleteStmt := "DELETE FROM queries WHERE id = ?"
 	result, err := ds.writer(ctx).ExecContext(ctx, deleteStmt, queryID)
 	if err != nil {
-		if isMySQLForeignKey(err) {
+		if ds.dialect.IsForeignKey(err) {
 			return ctxerr.Wrap(ctx, foreignKey("queries", name))
 		}
 		return ctxerr.Wrap(ctx, err, "delete queries")
@@ -621,11 +620,11 @@ func (ds *Datastore) deleteQueryStats(ctx context.Context, queryIDs []uint) {
 
 // Query returns a single Query identified by id, if such exists.
 func (ds *Datastore) Query(ctx context.Context, id uint) (*fleet.Query, error) {
-	return query(ctx, ds.reader(ctx), id)
+	return query(ctx, ds.reader(ctx), id, ds.dialect)
 }
 
-func query(ctx context.Context, db sqlx.QueryerContext, id uint) (*fleet.Query, error) {
-	sqlQuery := `
+func query(ctx context.Context, db sqlx.QueryerContext, id uint, dialect DialectHelper) (*fleet.Query, error) {
+	sqlQuery := fmt.Sprintf(`
 		SELECT
 			q.id,
 			q.team_id,
@@ -646,18 +645,24 @@ func query(ctx context.Context, db sqlx.QueryerContext, id uint) (*fleet.Query, 
 			q.discard_data,
 			COALESCE(NULLIF(u.name, ''), u.email, '') AS author_name,
 			COALESCE(u.email, '') AS author_email,
-			JSON_EXTRACT(json_value, '$.user_time_p50') as user_time_p50,
-			JSON_EXTRACT(json_value, '$.user_time_p95') as user_time_p95,
-			JSON_EXTRACT(json_value, '$.system_time_p50') as system_time_p50,
-			JSON_EXTRACT(json_value, '$.system_time_p95') as system_time_p95,
-			JSON_EXTRACT(json_value, '$.total_executions') as total_executions
+			%s as user_time_p50,
+			%s as user_time_p95,
+			%s as system_time_p50,
+			%s as system_time_p95,
+			%s as total_executions
 		FROM queries q
 		LEFT JOIN users u
 			ON q.author_id = u.id
 		LEFT JOIN aggregated_stats ag
 			ON (ag.id = q.id AND ag.global_stats = ? AND ag.type = ?)
 		WHERE q.id = ?
-	`
+	`,
+		dialect.JSONExtract("json_value", "$.user_time_p50"),
+		dialect.JSONExtract("json_value", "$.user_time_p95"),
+		dialect.JSONExtract("json_value", "$.system_time_p50"),
+		dialect.JSONExtract("json_value", "$.system_time_p95"),
+		dialect.JSONExtract("json_value", "$.total_executions"),
+	)
 	query := &fleet.Query{}
 	if err := sqlx.GetContext(ctx, db, query, sqlQuery, false, fleet.AggregatedStatsTypeScheduledQuery, id); err != nil {
 		if err == sql.ErrNoRows {
@@ -681,7 +686,7 @@ func query(ctx context.Context, db sqlx.QueryerContext, id uint) (*fleet.Query, 
 // determined by passed in fleet.ListOptions, count of total queries returned without limits, and
 // pagination metadata
 func (ds *Datastore) ListQueries(ctx context.Context, opt fleet.ListQueryOptions) (queries []*fleet.Query, total int, inherited int, metadata *fleet.PaginationMetadata, err error) {
-	getQueriesStmt := `
+	getQueriesStmt := fmt.Sprintf(`
 		SELECT
 			q.id,
 			q.team_id,
@@ -701,15 +706,21 @@ func (ds *Datastore) ListQueries(ctx context.Context, opt fleet.ListQueryOptions
 			q.updated_at,
 			COALESCE(u.name, '<deleted>') AS author_name,
 			COALESCE(u.email, '') AS author_email,
-			JSON_EXTRACT(json_value, '$.user_time_p50') as user_time_p50,
-			JSON_EXTRACT(json_value, '$.user_time_p95') as user_time_p95,
-			JSON_EXTRACT(json_value, '$.system_time_p50') as system_time_p50,
-			JSON_EXTRACT(json_value, '$.system_time_p95') as system_time_p95,
-			JSON_EXTRACT(json_value, '$.total_executions') as total_executions
+			%s as user_time_p50,
+			%s as user_time_p95,
+			%s as system_time_p50,
+			%s as system_time_p95,
+			%s as total_executions
 		FROM queries q
 		LEFT JOIN users u ON (q.author_id = u.id)
 		LEFT JOIN aggregated_stats ag ON (ag.id = q.id AND ag.global_stats = ? AND ag.type = ?)
-	`
+	`,
+		ds.dialect.JSONExtract("json_value", "$.user_time_p50"),
+		ds.dialect.JSONExtract("json_value", "$.user_time_p95"),
+		ds.dialect.JSONExtract("json_value", "$.system_time_p50"),
+		ds.dialect.JSONExtract("json_value", "$.system_time_p95"),
+		ds.dialect.JSONExtract("json_value", "$.total_executions"),
+	)
 
 	args := []interface{}{false, fleet.AggregatedStatsTypeScheduledQuery}
 	whereClauses := "WHERE saved = true"
@@ -727,9 +738,9 @@ func (ds *Datastore) ListQueries(ctx context.Context, opt fleet.ListQueryOptions
 
 	if opt.IsScheduled != nil {
 		if *opt.IsScheduled {
-			whereClauses += " AND (q.schedule_interval>0 AND q.automations_enabled=1)"
+			whereClauses += " AND (q.schedule_interval>0 AND q.automations_enabled=true)"
 		} else {
-			whereClauses += " AND (q.schedule_interval=0 OR q.automations_enabled=0)"
+			whereClauses += " AND (q.schedule_interval=0 OR q.automations_enabled=false)"
 		}
 	}
 
@@ -1051,9 +1062,18 @@ func (ds *Datastore) UpdateLiveQueryStats(ctx context.Context, queryID uint, sta
 
 	// Bulk insert/update
 	const valueStr = "(?,?,?,?,?,?,?,?,?,?,?,?),"
-	stmt := "REPLACE INTO scheduled_query_stats (scheduled_query_id, host_id, query_type, executions, average_memory, system_time, user_time, wall_time, output_size, denylisted, schedule_interval, last_executed) VALUES " +
+	stmt := ds.dialect.ReplaceInto() + " scheduled_query_stats (scheduled_query_id, host_id, query_type, executions, average_memory, system_time, user_time, wall_time, output_size, denylisted, schedule_interval, last_executed) VALUES " +
 		strings.Repeat(valueStr, len(stats))
 	stmt = strings.TrimSuffix(stmt, ",")
+	// MySQL REPLACE INTO handles upsert natively; PG INSERT INTO needs explicit conflict resolution.
+	if ds.dialect.IsPostgres() {
+		stmt += " ON CONFLICT (host_id, scheduled_query_id, query_type) DO UPDATE SET " +
+			"executions = EXCLUDED.executions, average_memory = EXCLUDED.average_memory, " +
+			"system_time = EXCLUDED.system_time, user_time = EXCLUDED.user_time, " +
+			"wall_time = EXCLUDED.wall_time, output_size = EXCLUDED.output_size, " +
+			"denylisted = EXCLUDED.denylisted, schedule_interval = EXCLUDED.schedule_interval, " +
+			"last_executed = EXCLUDED.last_executed"
+	}
 
 	var args []interface{}
 	for _, s := range stats {
@@ -1064,7 +1084,7 @@ func (ds *Datastore) UpdateLiveQueryStats(ctx context.Context, queryID uint, sta
 		}
 		args = append(
 			args, queryID, s.HostID, statsLiveQueryType, s.Executions, s.AverageMemory, s.SystemTime, s.UserTime, s.WallTime, s.OutputSize,
-			0, 0, lastExecuted,
+			false, 0, lastExecuted,
 		)
 	}
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, args...)

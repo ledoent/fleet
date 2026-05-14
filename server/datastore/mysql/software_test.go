@@ -7982,12 +7982,12 @@ func testListHostSoftwareWithLabelScoping(t *testing.T, ds *Datastore) {
 	time.Sleep(time.Second)
 
 	// assign the label to the software installers
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), installerID1, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, installerID1, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{label1.Name: {LabelName: label1.Name, LabelID: label1.ID}},
 	}, softwareTypeInstaller)
 	require.NoError(t, err)
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), selfServiceInstallerID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, selfServiceInstallerID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{label1.Name: {LabelName: label1.Name, LabelID: label1.ID}},
 	}, softwareTypeInstaller)
@@ -8040,7 +8040,7 @@ func testListHostSoftwareWithLabelScoping(t *testing.T, ds *Datastore) {
 	require.Len(t, software, 0)
 
 	// Update the label to be "include any"
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), installerID1, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, installerID1, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName:     map[string]fleet.LabelIdent{label1.Name: {LabelName: label1.Name, LabelID: label1.ID}},
 	}, softwareTypeInstaller)
@@ -8094,7 +8094,7 @@ func testListHostSoftwareWithLabelScoping(t *testing.T, ds *Datastore) {
 	label3, err := ds.NewLabel(ctx, &fleet.Label{Name: "label3" + t.Name(), LabelMembershipType: fleet.LabelMembershipTypeManual})
 	require.NoError(t, err)
 
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), installerID2, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, installerID2, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName: map[string]fleet.LabelIdent{
 			label2.Name: {LabelName: label2.Name, LabelID: label2.ID},
@@ -8157,7 +8157,7 @@ func testListHostSoftwareWithLabelScoping(t *testing.T, ds *Datastore) {
 	label4, err := ds.NewLabel(ctx, &fleet.Label{Name: "label4" + t.Name(), LabelMembershipType: fleet.LabelMembershipTypeDynamic})
 	require.NoError(t, err)
 
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), installerID3, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, installerID3, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{label4.Name: {LabelName: label4.Name, LabelID: label4.ID}},
 	}, softwareTypeInstaller)
@@ -8201,7 +8201,7 @@ func testListHostSoftwareWithLabelScoping(t *testing.T, ds *Datastore) {
 	require.True(t, scoped)
 
 	// Now include hosts with label4. No host has this label, so we shouldn't see installerID3 anymore.
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), installerID3, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, installerID3, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName:     map[string]fleet.LabelIdent{label4.Name: {LabelName: label4.Name, LabelID: label4.ID}},
 	}, softwareTypeInstaller)
@@ -8251,7 +8251,7 @@ func testListHostSoftwareWithLabelScoping(t *testing.T, ds *Datastore) {
 	label5, err := ds.NewLabel(ctx, &fleet.Label{Name: "label5" + t.Name(), LabelMembershipType: fleet.LabelMembershipTypeManual})
 	require.NoError(t, err)
 
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), installerID4, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, installerID4, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{label5.Name: {LabelName: label5.Name, LabelID: label5.ID}},
 	}, softwareTypeInstaller)
@@ -8271,7 +8271,7 @@ func testListHostSoftwareWithLabelScoping(t *testing.T, ds *Datastore) {
 
 		// Scope installer1 to include_all: [label1, label4].
 		// hostIncludeAll has neither label yet, so installer1 should be out of scope.
-		err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), installerID1, fleet.LabelIdentsWithScope{
+		err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, installerID1, fleet.LabelIdentsWithScope{
 			LabelScope: fleet.LabelScopeIncludeAll,
 			ByName:     map[string]fleet.LabelIdent{label1.Name: {LabelName: label1.Name, LabelID: label1.ID}, label4.Name: {LabelName: label4.Name, LabelID: label4.ID}},
 		}, softwareTypeInstaller)
@@ -9183,7 +9183,7 @@ func testListHostSoftwareWithLabelScopingVPP(t *testing.T, ds *Datastore) {
 	time.Sleep(time.Second)
 
 	// assign the label to the software installer
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), installerID1, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, installerID1, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{label1.Name: {LabelName: label1.Name, LabelID: label1.ID}},
 	}, softwareTypeInstaller)
@@ -9263,7 +9263,7 @@ func testListHostSoftwareWithLabelScopingVPP(t *testing.T, ds *Datastore) {
 	require.True(t, scoped)
 
 	// Assign the label to the VPP app. Now we should have an empty list
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), vppAppTeamID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, vppAppTeamID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{label1.Name: {LabelName: label1.Name, LabelID: label1.ID}},
 	}, softwareTypeVPP)
@@ -9345,13 +9345,13 @@ func testListHostSoftwareWithLabelScopingVPP(t *testing.T, ds *Datastore) {
 	opts.OnlyAvailableForInstall = false
 
 	// Make the label include any. We should have both of them back.
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), installerID1, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, installerID1, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName:     map[string]fleet.LabelIdent{label1.Name: {LabelName: label1.Name, LabelID: label1.ID}},
 	}, softwareTypeInstaller)
 	require.NoError(t, err)
 
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), vppAppTeamID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, vppAppTeamID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName:     map[string]fleet.LabelIdent{label1.Name: {LabelName: label1.Name, LabelID: label1.ID}},
 	}, softwareTypeVPP)
@@ -9363,7 +9363,7 @@ func testListHostSoftwareWithLabelScopingVPP(t *testing.T, ds *Datastore) {
 
 	// Give the VPP app a different label. Only the installer should show up now, since the host
 	// only has label1.
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), vppAppTeamID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, vppAppTeamID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName:     map[string]fleet.LabelIdent{label2.Name: {LabelName: label2.Name, LabelID: label2.ID}},
 	}, softwareTypeVPP)
@@ -9377,7 +9377,7 @@ func testListHostSoftwareWithLabelScopingVPP(t *testing.T, ds *Datastore) {
 	require.NoError(t, err)
 	require.False(t, scoped)
 
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), vppAppTeamID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, vppAppTeamID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName:     map[string]fleet.LabelIdent{label2.Name: {LabelName: label2.Name, LabelID: label2.ID}, label1.Name: {LabelName: label1.Name, LabelID: label1.ID}},
 	}, softwareTypeVPP)
@@ -9396,7 +9396,7 @@ func testListHostSoftwareWithLabelScopingVPP(t *testing.T, ds *Datastore) {
 	label3, err := ds.NewLabel(ctx, &fleet.Label{Name: "label3" + t.Name()})
 	require.NoError(t, err)
 
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), vppAppTeamID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, vppAppTeamID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{label3.Name: {LabelName: label3.Name, LabelID: label3.ID}},
 	}, softwareTypeVPP)
@@ -9430,7 +9430,7 @@ func testListHostSoftwareWithLabelScopingVPP(t *testing.T, ds *Datastore) {
 	label4, err := ds.NewLabel(ctx, &fleet.Label{Name: "label4" + t.Name(), LabelMembershipType: fleet.LabelMembershipTypeManual})
 	require.NoError(t, err)
 
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), vppAppTeamID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, vppAppTeamID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{label4.Name: {LabelName: label4.Name, LabelID: label4.ID}},
 	}, softwareTypeVPP)
@@ -9451,7 +9451,7 @@ func testListHostSoftwareWithLabelScopingVPP(t *testing.T, ds *Datastore) {
 
 	// Scope the VPP app to include_all: [label5, label6].
 	// host currently has label1 but not label5 or label6.
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), vppAppTeamID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, vppAppTeamID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAll,
 		ByName: map[string]fleet.LabelIdent{
 			label5.Name: {LabelName: label5.Name, LabelID: label5.ID},
@@ -9758,13 +9758,13 @@ func testListHostSoftwareSelfServiceWithLabelScopingHostInstalled(t *testing.T, 
 	err = ds.UpdateHost(ctx, host)
 	require.NoError(t, err)
 	// label software
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), selfServiceInstallerID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, selfServiceInstallerID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{excludeLabel.Name: {LabelName: excludeLabel.Name, LabelID: excludeLabel.ID}},
 	}, softwareTypeInstaller)
 	require.NoError(t, err)
 	// label vpp app
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), vPPApp.VPPAppTeam.AppTeamID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, vPPApp.VPPAppTeam.AppTeamID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName:     map[string]fleet.LabelIdent{excludeLabel.Name: {LabelName: excludeLabel.Name, LabelID: excludeLabel.ID}},
 	}, softwareTypeVPP)
@@ -10027,7 +10027,7 @@ func testLabelScopingTimestampLogic(t *testing.T, ds *Datastore) {
 	}
 
 	// Dynamic label exclude any
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), selfServiceInstallerID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, selfServiceInstallerID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName: map[string]fleet.LabelIdent{
 			label1.Name: {LabelName: label1.Name, LabelID: label1.ID},
@@ -10046,7 +10046,7 @@ func testLabelScopingTimestampLogic(t *testing.T, ds *Datastore) {
 	require.Len(t, software, 0)
 
 	// manual label exclude any
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), selfServiceInstallerID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, selfServiceInstallerID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeExcludeAny,
 		ByName: map[string]fleet.LabelIdent{
 			label2.Name: {LabelName: label2.Name, LabelID: label2.ID},
@@ -10089,7 +10089,7 @@ func testLabelScopingTimestampLogic(t *testing.T, ds *Datastore) {
 	require.Len(t, software, 0)
 
 	// manual label include any
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), selfServiceInstallerID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, selfServiceInstallerID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName: map[string]fleet.LabelIdent{
 			label2.Name: {LabelName: label2.Name, LabelID: label2.ID},
@@ -10122,7 +10122,7 @@ func testLabelScopingTimestampLogic(t *testing.T, ds *Datastore) {
 	require.Greater(t, label2.CreatedAt, host.LabelUpdatedAt)
 
 	// Dynamic label include any
-	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), selfServiceInstallerID, fleet.LabelIdentsWithScope{
+	err = setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, selfServiceInstallerID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName: map[string]fleet.LabelIdent{
 			label1.Name: {LabelName: label1.Name, LabelID: label1.ID},
