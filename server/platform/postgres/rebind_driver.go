@@ -2227,6 +2227,7 @@ var knownPrimaryKeys = map[string]string{
 	"mdm_windows_enrollments":            "id",
 	"mdm_windows_configuration_profiles": "profile_uuid",
 	"windows_mdm_command_results":        "id",
+	"windows_mdm_commands":               "command_uuid",
 	"host_mdm_actions":                   "host_id",
 	// Runtime upsert sites (non-dialect)
 	"users_deleted":                        "id",
