@@ -1,0 +1,13 @@
+{
+  "name": "pg-compat-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API-mode Playwright matrix that exercises every Fleet URL filter against a live server and flags Postgres compatibility regressions.",
+  "scripts": {
+    "test": "playwright test",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1"
+  }
+}
