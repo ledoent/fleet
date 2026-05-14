@@ -63,8 +63,18 @@ func (pg PostgresDialect) insertVersionSql(name string) string {
 }
 
 func (pg PostgresDialect) dbVersionQuery(db *sql.DB, name string) (*sql.Rows, error) {
+	// ORDER BY version_id DESC, id DESC (not id DESC alone) so the current
+	// version is determined by migration version, not insertion order.
+	// The PG baseline-seed path (seedPGMigrationHistory) inserts pre-applied
+	// migration rows out of version order — e.g. id 523 carries
+	// version_id 20260422181702 while id 521 carries 20260506171058 — which
+	// would make `ORDER BY id DESC` return the older version as "current",
+	// causing the migration runner to attempt every migration from there
+	// forward (including ones long-since applied). Tie-break by id DESC so
+	// up/down history for the same version still resolves to the most
+	// recent state.
 	/* #nosec G202 -- name is actually well defined */
-	rows, err := db.Query("SELECT version_id, is_applied from " + name + " ORDER BY id DESC")
+	rows, err := db.Query("SELECT version_id, is_applied from " + name + " ORDER BY version_id DESC, id DESC")
 	if err != nil {
 		return nil, err
 	}
