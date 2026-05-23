@@ -24,6 +24,11 @@ func SetDialect(driver string) {
 	if err := MigrationClient.SetDialect(driver); err != nil {
 		panic(fmt.Sprintf("migrations/tables: unsupported dialect %q: %v", driver, err))
 	}
+	if driver == "postgres" || driver == "pgx" {
+		defaultMigrationHelper = pgMigrationHelper{}
+	} else {
+		defaultMigrationHelper = mysqlMigrationHelper{}
+	}
 }
 
 // can override in tests
@@ -122,10 +127,112 @@ type migrationHelper interface {
 	columnExists(tx *sql.Tx, table, column string) bool
 	columnsExists(tx *sql.Tx, table string, columns ...string) bool
 	tableExists(tx *sql.Tx, table string) bool
+	isPostgres() bool
 }
 
 // mysqlMigrationHelper implements migrationHelper using MySQL information_schema.
 type mysqlMigrationHelper struct{}
+
+func (mysqlMigrationHelper) isPostgres() bool {
+	return false
+}
+
+// pgMigrationHelper implements migrationHelper using PostgreSQL pg_catalog and information_schema.
+type pgMigrationHelper struct{}
+
+func (pgMigrationHelper) isPostgres() bool {
+	return true
+}
+
+func (pgMigrationHelper) fkExists(tx *sql.Tx, table, name string) bool {
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(1)
+		FROM pg_constraint con
+		JOIN pg_class rel ON rel.oid = con.conrelid
+		JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+		WHERE nsp.nspname = 'public'
+		AND rel.relname = ?
+		AND con.conname = ?
+	`, table, name).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}
+
+func (pgMigrationHelper) constraintExists(tx *sql.Tx, table, name string) bool {
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(1)
+		FROM pg_constraint con
+		JOIN pg_class rel ON rel.oid = con.conrelid
+		JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+		WHERE nsp.nspname = 'public'
+		AND rel.relname = ?
+		AND con.conname = ?
+	`, table, name).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}
+
+func (pgMigrationHelper) columnExists(tx *sql.Tx, table, column string) bool {
+	return pgMigrationHelper{}.columnsExists(tx, table, column)
+}
+
+func (pgMigrationHelper) columnsExists(tx *sql.Tx, table string, columns ...string) bool {
+	if len(columns) == 0 {
+		return false
+	}
+	inColumns := strings.TrimRight(strings.Repeat("?,", len(columns)), ",")
+	args := make([]interface{}, 0, len(columns)+1)
+	args = append(args, table)
+	for _, column := range columns {
+		args = append(args, column)
+	}
+
+	var count int
+	err := tx.QueryRow(
+		fmt.Sprintf(`
+SELECT
+    count(*)
+FROM
+    information_schema.columns
+WHERE
+    table_schema = 'public'
+    AND table_name = ?
+    AND column_name IN (%s)
+`, inColumns), args...,
+	).Scan(&count)
+	if err != nil {
+		return false
+	}
+
+	return count == len(columns)
+}
+
+func (pgMigrationHelper) tableExists(tx *sql.Tx, table string) bool {
+	var count int
+	err := tx.QueryRow(
+		`
+SELECT
+    count(*)
+FROM
+    information_schema.tables
+WHERE
+    table_schema = 'public'
+    AND table_name = ?
+`,
+		table,
+	).Scan(&count)
+	if err != nil {
+		return false
+	}
+
+	return count > 0
+}
 
 // defaultMigrationHelper is the migration helper used by all current migrations.
 // It defaults to MySQL since that's the only supported database.
@@ -142,6 +249,10 @@ func constraintExists(tx *sql.Tx, table, name string) bool {
 
 func columnExists(tx *sql.Tx, table, column string) bool {
 	return defaultMigrationHelper.columnExists(tx, table, column)
+}
+
+func isPostgres() bool {
+	return defaultMigrationHelper.isPostgres()
 }
 
 func (mysqlMigrationHelper) fkExists(tx *sql.Tx, table, name string) bool {
