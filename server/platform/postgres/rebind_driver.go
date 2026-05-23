@@ -2238,6 +2238,7 @@ var knownPrimaryKeys = map[string]string{
 	"host_scd_data":                        "dataset,entity_id,valid_from",
 	"in_house_app_configurations":          "in_house_app_id",
 	"vpp_app_configurations":               "team_id,application_id,platform",
+	"vpp_client_users":                     "vpp_token_id,managed_apple_id",
 	// Historical migration upsert sites — these migrations have already been
 	// applied to production and won't re-run on fresh PG installs (which start
 	// from pg_baseline_schema.sql). Entries are defense-in-depth in case the
