@@ -10,6 +10,9 @@ func init() {
 }
 
 func Up_20260522195230(tx *sql.Tx) error {
+	if columnExists(tx, "certificate_templates", "subject_alternative_name") {
+		return nil
+	}
 	_, err := tx.Exec(`
 		ALTER TABLE certificate_templates
 		ADD COLUMN subject_alternative_name TEXT

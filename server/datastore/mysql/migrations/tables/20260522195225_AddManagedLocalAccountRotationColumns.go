@@ -10,6 +10,9 @@ func init() {
 }
 
 func Up_20260522195225(tx *sql.Tx) error {
+	if columnExists(tx, "host_managed_local_account_passwords", "account_uuid") {
+		return nil
+	}
 	if _, err := tx.Exec(`
 		ALTER TABLE host_managed_local_account_passwords
 			ADD COLUMN account_uuid                VARCHAR(36)  COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
