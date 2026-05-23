@@ -10,6 +10,9 @@ func init() {
 }
 
 func Up_20260522195232(tx *sql.Tx) error {
+	if tableExists(tx, "vpp_client_users") {
+		return nil
+	}
 	if _, err := tx.Exec(`
 		CREATE TABLE vpp_client_users (
 			id                INT UNSIGNED NOT NULL AUTO_INCREMENT,

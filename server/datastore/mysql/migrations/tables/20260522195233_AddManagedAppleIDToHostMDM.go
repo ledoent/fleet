@@ -10,27 +10,54 @@ func init() {
 }
 
 func Up_20260522195233(tx *sql.Tx) error {
-	if _, err := tx.Exec(`
-		ALTER TABLE host_mdm
-		ADD COLUMN managed_apple_id VARCHAR(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL AFTER fleet_enroll_ref
-	`); err != nil {
-		return fmt.Errorf("adding managed_apple_id to host_mdm: %w", err)
+	if !columnExists(tx, "host_mdm", "managed_apple_id") {
+		var sql string
+		if isPostgres() {
+			sql = `
+				ALTER TABLE host_mdm
+				ADD COLUMN managed_apple_id VARCHAR(255) DEFAULT NULL
+			`
+		} else {
+			sql = `
+				ALTER TABLE host_mdm
+				ADD COLUMN managed_apple_id VARCHAR(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL AFTER fleet_enroll_ref
+			`
+		}
+		if _, err := tx.Exec(sql); err != nil {
+			return fmt.Errorf("adding managed_apple_id to host_mdm: %w", err)
+		}
 	}
 
 	// Backfill existing personal (User Enrollment / BYOD) hosts from the IDP
 	// account email they were enrolled with. This mirrors what TokenUpdate does
 	// for new enrollments, so already-enrolled hosts don't need to re-enroll to
 	// participate in VPP user provisioning.
-	if _, err := tx.Exec(`
-		UPDATE host_mdm hm
-		JOIN hosts h ON h.id = hm.host_id
-		JOIN host_mdm_idp_accounts hmia ON hmia.host_uuid = h.uuid
-		JOIN mdm_idp_accounts mia ON mia.uuid = hmia.account_uuid
-		SET hm.managed_apple_id = mia.email
-		WHERE hm.managed_apple_id IS NULL
-			AND hm.is_personal_enrollment = 1
-			AND mia.email <> ''
-	`); err != nil {
+	var err error
+	if isPostgres() {
+		_, err = tx.Exec(`
+			UPDATE host_mdm hm
+			SET managed_apple_id = mia.email
+			FROM hosts h
+			JOIN host_mdm_idp_accounts hmia ON hmia.host_uuid = h.uuid
+			JOIN mdm_idp_accounts mia ON mia.uuid = hmia.account_uuid
+			WHERE h.id = hm.host_id
+				AND hm.managed_apple_id IS NULL
+				AND hm.is_personal_enrollment = true
+				AND mia.email <> ''
+		`)
+	} else {
+		_, err = tx.Exec(`
+			UPDATE host_mdm hm
+			JOIN hosts h ON h.id = hm.host_id
+			JOIN host_mdm_idp_accounts hmia ON hmia.host_uuid = h.uuid
+			JOIN mdm_idp_accounts mia ON mia.uuid = hmia.account_uuid
+			SET hm.managed_apple_id = mia.email
+			WHERE hm.managed_apple_id IS NULL
+				AND hm.is_personal_enrollment = 1
+				AND mia.email <> ''
+		`)
+	}
+	if err != nil {
 		return fmt.Errorf("backfilling managed_apple_id on host_mdm: %w", err)
 	}
 	return nil

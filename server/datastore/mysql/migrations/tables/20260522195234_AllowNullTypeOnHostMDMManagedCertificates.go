@@ -18,12 +18,21 @@ func Up_20260522195234(tx *sql.Tx) error {
 	// unaffected; new INSERTs that don't specify type will get NULL instead of
 	// 'ndes'. All existing INSERT call sites specify type explicitly, so removing
 	// the default is safe.
-	_, err := tx.Exec(`
-		ALTER TABLE host_mdm_managed_certificates
-		MODIFY COLUMN type ENUM('digicert', 'custom_scep_proxy', 'ndes', 'smallstep')
-		CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
-		NULL DEFAULT NULL
-	`)
+	var err error
+	if isPostgres() {
+		_, err = tx.Exec(`
+			ALTER TABLE host_mdm_managed_certificates
+			ALTER COLUMN type DROP DEFAULT,
+			ALTER COLUMN type DROP NOT NULL
+		`)
+	} else {
+		_, err = tx.Exec(`
+			ALTER TABLE host_mdm_managed_certificates
+			MODIFY COLUMN type ENUM('digicert', 'custom_scep_proxy', 'ndes', 'smallstep')
+			CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+			NULL DEFAULT NULL
+		`)
+	}
 	if err != nil {
 		return errors.Wrap(err, "alter host_mdm_managed_certificates.type to allow NULL")
 	}

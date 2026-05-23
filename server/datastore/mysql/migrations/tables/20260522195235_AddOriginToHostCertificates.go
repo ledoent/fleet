@@ -19,6 +19,9 @@ func Up_20260522195235(tx *sql.Tx) error {
 	//
 	// Existing rows default to 'osquery' since osquery has been the only
 	// ingestion source until this change.
+	if columnExists(tx, "host_certificates", "origin") {
+		return nil
+	}
 	_, err := tx.Exec(`
 		ALTER TABLE host_certificates
 		ADD COLUMN origin ENUM('osquery', 'mdm') NOT NULL DEFAULT 'osquery'
