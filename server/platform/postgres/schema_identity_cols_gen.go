@@ -125,6 +125,7 @@ var schemaIdentityCols = map[string]string{
 	"vpp_app_team_labels":                       "id",
 	"vpp_app_team_software_categories":          "id",
 	"vpp_apps_teams":                            "id",
+	"vpp_client_users":                          "id",
 	"vpp_token_teams":                           "id",
 	"vpp_tokens":                                "id",
 	"windows_mdm_responses":                     "id",

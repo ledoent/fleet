@@ -24,3 +24,9 @@
 # fleet startup; once that lands, regenerate the baseline and remove this
 # allowlist entry.
 mysql-only: hosts.orbit_debug_until
+
+# The following columns land upstream in migrations post-2026-05-13 which
+# the PG baseline hasn't picked up yet. They will be added to PG on next startup.
+mysql-only: host_certificates.origin
+mysql-only: host_mdm.managed_apple_id
+mysql-only: host_scd_data.encoding_type
