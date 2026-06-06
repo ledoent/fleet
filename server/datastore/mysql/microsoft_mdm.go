@@ -2224,7 +2224,8 @@ const windowsMDMProfilesDesiredStateQuery = `
 	GROUP BY
 		mwcp.profile_uuid, mwcp.name, h.uuid
 	HAVING
-		count_profile_labels > 0 AND count_host_labels = count_profile_labels
+		-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
+		COUNT(*) > 0 AND COUNT(lm.label_id) = COUNT(*)
 
 	UNION
 
@@ -2267,7 +2268,12 @@ const windowsMDMProfilesDesiredStateQuery = `
 	GROUP BY
 		mwcp.profile_uuid, mwcp.name, h.uuid
 	HAVING
-		count_profile_labels > 0 AND count_profile_labels = count_non_broken_labels AND count_profile_labels = count_host_updated_after_labels AND count_host_labels = 0
+		-- considers only the profiles with labels, without any broken label, with results reported after all labels were created and with the host not in any label
+		-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
+		COUNT(*) > 0 AND COUNT(*) = COUNT(mcpl.label_id) AND COUNT(*) = SUM(
+			CASE WHEN lbl.label_membership_type <> 1 AND lbl.created_at IS NOT NULL AND h.label_updated_at >= lbl.created_at THEN 1
+			WHEN lbl.label_membership_type = 1 AND lbl.created_at IS NOT NULL THEN 1
+			ELSE 0 END) AND COUNT(lm.label_id) = 0
 
 	UNION
 
@@ -2305,7 +2311,8 @@ const windowsMDMProfilesDesiredStateQuery = `
 	GROUP BY
 		mwcp.profile_uuid, mwcp.name, h.uuid
 	HAVING
-		count_profile_labels > 0 AND count_host_labels >= 1
+		-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
+		COUNT(*) > 0 AND COUNT(lm.label_id) >= 1
 
 	UNION
 
@@ -2356,9 +2363,15 @@ const windowsMDMProfilesDesiredStateQuery = `
 		mwcp.profile_uuid, mwcp.name, h.uuid
 	HAVING
 		-- include gate: host in all include labels (no broken include labels)
-		count_profile_labels > 0 AND count_non_broken_labels = count_profile_labels AND count_host_labels = count_profile_labels AND
-		-- exclude gate: host not in any exclude label, no broken/unscanned exclude labels (reusing count_host_updated_after_labels)
-		count_host_updated_after_labels = 0
+		-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
+		SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) > 0 AND
+		SUM(CASE WHEN mcpl.exclude = false AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) = SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) AND
+		SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) = SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) AND
+		-- exclude gate: host not in any exclude label, no broken/unscanned exclude labels
+		SUM(CASE WHEN mcpl.exclude = true AND lm_exc.label_id IS NOT NULL THEN 1
+			WHEN mcpl.exclude = true AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) THEN 1
+			WHEN mcpl.exclude = true AND mcpl.label_id IS NULL THEN 1
+			ELSE 0 END) = 0
 
 	UNION
 
@@ -2408,9 +2421,13 @@ const windowsMDMProfilesDesiredStateQuery = `
 		mwcp.profile_uuid, mwcp.name, h.uuid
 	HAVING
 		-- include gate: host in at least one include label
-		count_host_labels >= 1 AND
+		-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
+		SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) >= 1 AND
 		-- exclude gate: host not in any exclude label, no broken/unscanned exclude labels
-		count_host_updated_after_labels = 0
+		SUM(CASE WHEN mcpl.exclude = true AND lm_exc.label_id IS NOT NULL THEN 1
+			WHEN mcpl.exclude = true AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) THEN 1
+			WHEN mcpl.exclude = true AND mcpl.label_id IS NULL THEN 1
+			ELSE 0 END) = 0
 `
 
 func (ds *Datastore) ListMDMWindowsProfilesToInstall(ctx context.Context) ([]*fleet.MDMWindowsProfilePayload, error) {
