@@ -19,4 +19,4 @@
     - remote: fork
       ref: patches/premium-license
     - remote: fork
-      ref: feat/pg-compat-clean
+      ref: feat/pg-compat-rebased
