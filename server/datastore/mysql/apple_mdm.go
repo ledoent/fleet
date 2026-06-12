@@ -2959,9 +2959,14 @@ func (ds *Datastore) acmeProfileUUIDs(ctx context.Context, payload []*fleet.MDMA
 		return map[string]struct{}{}, nil
 	}
 
+	// LOCATE is MySQL-only; PG uses POSITION over the bytea mobileconfig column.
+	acmeMatch := `LOCATE('com.apple.security.acme', mobileconfig) > 0`
+	if ds.dialect.IsPostgres() {
+		acmeMatch = `POSITION('com.apple.security.acme'::bytea IN mobileconfig) > 0`
+	}
 	stmt, args, err := sqlx.In(
 		`SELECT profile_uuid FROM mdm_apple_configuration_profiles
-			WHERE profile_uuid IN (?) AND LOCATE('com.apple.security.acme', mobileconfig) > 0`,
+			WHERE profile_uuid IN (?) AND `+acmeMatch,
 		uuids,
 	)
 	if err != nil {
@@ -3029,7 +3034,7 @@ func (ds *Datastore) BulkUpsertMDMAppleHostProfiles(ctx context.Context, payload
               -- preserve the install-time flag on remove ops (the config profile is gone by then)
               -- CASE instead of MySQL IF() so the dialect rewrite works on PostgreSQL too
               has_acme_payload = CASE WHEN VALUES(operation_type) = '%s' THEN host_mdm_apple_profiles.has_acme_payload ELSE VALUES(has_acme_payload) END`,
-			fleet.MDMOperationTypeRemove, fleet.MDMOperationTypeRemove)),
+				fleet.MDMOperationTypeRemove, fleet.MDMOperationTypeRemove)),
 		)
 
 		// We need to run with retry due to deadlocks.

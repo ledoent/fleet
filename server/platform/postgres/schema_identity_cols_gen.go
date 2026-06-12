@@ -62,6 +62,7 @@ var schemaIdentityCols = map[string]string{
 	"legacy_host_mdm_enroll_refs":               "id",
 	"legacy_host_mdm_idp_accounts":              "id",
 	"locks":                                     "id",
+	"mdm_adue_enrollment_challenges":            "id",
 	"mdm_android_configuration_profiles":        "auto_increment",
 	"mdm_apple_configuration_profiles":          "profile_id",
 	"mdm_apple_declarations":                    "auto_increment",
