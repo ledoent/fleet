@@ -28,6 +28,51 @@ func Up_20260603101320(tx *sql.Tx) error {
 		}
 	}
 
+	if isPostgres() {
+		// PG: introspect FK names via pg_constraint and use DROP CONSTRAINT
+		// (MySQL's information_schema columns / DROP FOREIGN KEY don't exist).
+		for _, table := range []string{"mdm_configuration_profile_labels", "mdm_declaration_labels"} {
+			// The PG baseline never carried the old ON DELETE SET NULL FK to
+			// labels, so the drop is conditional rather than required.
+			rows, err := tx.Query(`
+				SELECT con.conname
+				FROM pg_constraint con
+				JOIN pg_class rel ON rel.oid = con.conrelid
+				JOIN pg_class frel ON frel.oid = con.confrelid
+				WHERE con.contype = 'f' AND rel.relname = $1 AND frel.relname = 'labels'
+			`, table)
+			if err != nil {
+				return fmt.Errorf("querying %s foreign keys to labels: %w", table, err)
+			}
+			var connames []string
+			for rows.Next() {
+				var conname string
+				if err := rows.Scan(&conname); err != nil {
+					rows.Close()
+					return fmt.Errorf("scanning %s foreign key name: %w", table, err)
+				}
+				connames = append(connames, conname)
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("iterating %s foreign key names: %w", table, err)
+			}
+			for _, conname := range connames {
+				if _, err := tx.Exec(fmt.Sprintf(`ALTER TABLE %s DROP CONSTRAINT %s`, table, conname)); err != nil {
+					return fmt.Errorf("dropping %s label_id foreign key: %w", table, err)
+				}
+			}
+			newName := table + "_ibfk_label"
+			if constraintExists(tx, table, newName) {
+				continue
+			}
+			if _, err := tx.Exec(fmt.Sprintf(`ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (label_id) REFERENCES labels (id) ON DELETE RESTRICT`, table, newName)); err != nil {
+				return fmt.Errorf("adding %s RESTRICT foreign key: %w", table, err)
+			}
+		}
+		return nil
+	}
+
 	// mdm_configuration_profile_labels
 	cpConstraints, err := constraintsForTable(tx, "mdm_configuration_profile_labels", map[string]struct{}{"labels": {}})
 	if err != nil {
