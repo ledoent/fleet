@@ -148,6 +148,8 @@ var (
 	reDDLTinyint  = regexp.MustCompile(`(?i)\bTINYINT(?:\s*\(\s*\d+\s*\))?`)
 	// Binary types.
 	reDDLBlobTypes = regexp.MustCompile(`(?i)\b(?:MEDIUMBLOB|LONGBLOB|TINYBLOB|BLOB)\b`)
+	// VARBINARY(N) / BINARY(N) → BYTEA (PG has no fixed/var binary types).
+	reDDLVarbinary = regexp.MustCompile(`(?i)\b(?:VARBINARY|BINARY)\s*\(\s*\d+\s*\)`)
 	// Long-text types.
 	reDDLTextTypes = regexp.MustCompile(`(?i)\b(?:MEDIUMTEXT|LONGTEXT|TINYTEXT)\b`)
 	// DATETIME or DATETIME(N) → TIMESTAMP[(N)]. Capture group preserves the
@@ -370,6 +372,8 @@ func rebindQuery(query string) string {
 		query = reDDLTinyint.ReplaceAllString(query, "SMALLINT")
 		// BLOB / MEDIUMBLOB / LONGBLOB → bytea
 		query = reDDLBlobTypes.ReplaceAllString(query, "BYTEA")
+		// VARBINARY(N) / BINARY(N) → bytea
+		query = reDDLVarbinary.ReplaceAllString(query, "BYTEA")
 		// MEDIUMTEXT / LONGTEXT / TINYTEXT → TEXT
 		query = reDDLTextTypes.ReplaceAllString(query, "TEXT")
 		// DATETIME → TIMESTAMP. Preserves the optional (N) precision.
@@ -2404,6 +2408,7 @@ var smallintBoolColumns = []string{
 	"fleetd_sync_capable",            // mdm_windows_enrollments.fleetd_sync_capable
 	"continuous_automations_enabled", // policies.continuous_automations_enabled
 	"force_full",                     // trace_sampler_settings.force_full
+	"has_acme_payload",               // host_mdm_apple_profiles.has_acme_payload
 }
 
 // smallintBoolColSet is a case-insensitive lookup for smallintBoolColumns,

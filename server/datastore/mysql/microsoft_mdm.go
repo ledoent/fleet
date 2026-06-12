@@ -1700,7 +1700,7 @@ func (ds *Datastore) copyWindowsConfigProfilesToPendingDeleteDB(ctx context.Cont
 		SELECT profile_uuid, team_id, name, syncml
 		FROM mdm_windows_configuration_profiles
 		WHERE profile_uuid IN (?)
-		ON DUPLICATE KEY UPDATE created_at = NOW(6)`, profileUUIDs)
+		`+ds.dialect.OnDuplicateKey("profile_uuid", "created_at = NOW(6)"), profileUUIDs)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "building IN for pending-delete copy")
 	}
