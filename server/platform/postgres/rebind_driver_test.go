@@ -108,7 +108,7 @@ func TestRewriteUpdateJoin(t *testing.T) {
 		},
 		{
 			name: "multiline unaliased UPDATE...JOIN (regression for host_dep_assignments DEP path)",
-			in: "UPDATE\n\thost_dep_assignments\nJOIN\n\thosts ON id = host_id\nSET\n\tprofile_uuid = ?,\n\tassign_profile_response = ?\nWHERE\n\thosts.hardware_serial IN (?)",
+			in:   "UPDATE\n\thost_dep_assignments\nJOIN\n\thosts ON id = host_id\nSET\n\tprofile_uuid = ?,\n\tassign_profile_response = ?\nWHERE\n\thosts.hardware_serial IN (?)",
 			want: "UPDATE host_dep_assignments SET profile_uuid = ?,\n\tassign_profile_response = ? FROM hosts WHERE id = host_id AND hosts.hardware_serial IN (?)",
 		},
 	}
@@ -913,12 +913,12 @@ func TestCoerceIntArgsForBoolColumns(t *testing.T) {
 			// can't reason about this; must skip.
 			query: "INSERT INTO upcoming_activities (host_id, priority, user_id, fleet_initiated, activity_type, execution_id, payload) VALUES (?, ?, ?, ?, 'software_install', ?, jsonb_build_object('self_service', ?, 'filename', ?, 'version', ?, 'title', ?, 'src', ?, 'with_retries', ?, 'user_id', ?))",
 			args: []driver.NamedValue{
-				{Ordinal: 1, Value: int64(10)},  // host_id
-				{Ordinal: 2, Value: int64(1)},   // priority
-				{Ordinal: 3, Value: int64(7)},   // user_id
-				{Ordinal: 4, Value: true},       // fleet_initiated (bool col, already bool)
-				{Ordinal: 5, Value: "exec-1"},   // execution_id
-				{Ordinal: 6, Value: int64(0)},   // self_service inside payload (NOT fleet_initiated)
+				{Ordinal: 1, Value: int64(10)}, // host_id
+				{Ordinal: 2, Value: int64(1)},  // priority
+				{Ordinal: 3, Value: int64(7)},  // user_id
+				{Ordinal: 4, Value: true},      // fleet_initiated (bool col, already bool)
+				{Ordinal: 5, Value: "exec-1"},  // execution_id
+				{Ordinal: 6, Value: int64(0)},  // self_service inside payload (NOT fleet_initiated)
 				{Ordinal: 7, Value: "f.pkg"},
 				{Ordinal: 8, Value: "1.0"},
 				{Ordinal: 9, Value: "Title"},

@@ -29,11 +29,20 @@ func Up_20260606051849(tx *sql.Tx) error {
 	// new acked_at IS NULL predicate, or every previously delivered command would be re-sent on the next session. Use the
 	// result row's created_at so the GC's 1-hour age floor keeps its meaning. The join is PK-to-PK; the work is bounded
 	// by the acked-but-not-yet-GC'd backlog (at most the GC interval's worth of traffic).
-	if _, err := tx.Exec(`UPDATE windows_mdm_command_queue q
+	backfill := `UPDATE windows_mdm_command_queue q
 		JOIN windows_mdm_command_results r
 			ON r.enrollment_id = q.enrollment_id AND r.command_uuid = q.command_uuid
 		SET q.acked_at = r.created_at
-		WHERE q.acked_at IS NULL`); err != nil {
+		WHERE q.acked_at IS NULL`
+	if isPostgres() {
+		// PG has no multi-table UPDATE … JOIN; use UPDATE … FROM.
+		backfill = `UPDATE windows_mdm_command_queue q
+		SET acked_at = r.created_at
+		FROM windows_mdm_command_results r
+		WHERE r.enrollment_id = q.enrollment_id AND r.command_uuid = q.command_uuid
+			AND q.acked_at IS NULL`
+	}
+	if _, err := tx.Exec(backfill); err != nil {
 		return fmt.Errorf("backfill acked_at from windows_mdm_command_results: %w", err)
 	}
 	return nil

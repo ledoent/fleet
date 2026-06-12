@@ -17,6 +17,37 @@ func init() {
 // The operation_name column holds the full AMAPI operation name (enterprises/X/devices/Y/operations/Z, ~70+ chars)
 // which is the key used to correlate Pub/Sub COMMAND notifications back to the originating Fleet command.
 func Up_20260528201143(tx *sql.Tx) error {
+	if tableExists(tx, "mdm_android_commands") {
+		return nil
+	}
+	if isPostgres() {
+		// PG has no ENUM-inline, ON UPDATE, or inline INDEX syntax; updated_at
+		// maintenance uses the fleet_set_updated_at trigger like other tables.
+		stmts := []string{
+			`CREATE TABLE mdm_android_commands (
+	command_uuid     VARCHAR(36)   NOT NULL,
+	host_uuid        VARCHAR(255)  NOT NULL,
+	operation_name   VARCHAR(255)  NOT NULL,
+	command_type     VARCHAR(32)   NOT NULL,
+	status           VARCHAR(16)   NOT NULL DEFAULT 'pending'
+		CHECK (status IN ('pending','acknowledged','error')),
+	error_code       VARCHAR(64)   DEFAULT NULL,
+	error_message    VARCHAR(1024) DEFAULT NULL,
+	created_at       TIMESTAMP(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+	updated_at       TIMESTAMP(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+	PRIMARY KEY (command_uuid)
+)`,
+			`CREATE INDEX idx_mdm_android_commands_host_uuid ON mdm_android_commands (host_uuid)`,
+			`CREATE UNIQUE INDEX idx_mdm_android_commands_operation_name ON mdm_android_commands (operation_name)`,
+			`CREATE TRIGGER mdm_android_commands_set_updated_at BEFORE UPDATE ON mdm_android_commands FOR EACH ROW EXECUTE FUNCTION fleet_set_updated_at()`,
+		}
+		for _, stmt := range stmts {
+			if _, err := tx.Exec(stmt); err != nil {
+				return fmt.Errorf("create table mdm_android_commands (postgres): %w", err)
+			}
+		}
+		return nil
+	}
 	_, err := tx.Exec(`
 CREATE TABLE mdm_android_commands (
 	command_uuid     VARCHAR(36)                            NOT NULL,

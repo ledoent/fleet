@@ -128,6 +128,9 @@ var (
 	reDDLEngineClause    = regexp.MustCompile(`(?i)\s*ENGINE\s*=\s*\w+`)
 	reDDLDefaultCharset  = regexp.MustCompile(`(?i)\s*DEFAULT\s+CHARSET\s*=\s*\w+(?:\s+COLLATE\s*=\s*\w+)?`)
 	reDDLAlgorithmClause = regexp.MustCompile(`(?i),\s*ALGORITHM\s*=\s*\w+`)
+	// MySQL online-DDL `LOCK=NONE|SHARED|...` ALTER TABLE option — no PG
+	// equivalent; PG DDL takes its own locks.
+	reDDLLockClause = regexp.MustCompile(`(?i),\s*LOCK\s*=\s*\w+`)
 	// Integer types. The auto-increment regexes are anchored by the full
 	// `NOT NULL AUTO_INCREMENT` suffix so they don't shadow the plain
 	// UNSIGNED rewrites. \b is used at the start so we don't match BIGINT
@@ -150,6 +153,11 @@ var (
 	// DATETIME or DATETIME(N) → TIMESTAMP[(N)]. Capture group preserves the
 	// optional precision so e.g. `DATETIME(6)` → `TIMESTAMP(6)`.
 	reDDLDatetime = regexp.MustCompile(`(?i)\bDATETIME(\s*\(\s*\d+\s*\))?\b`)
+	// MySQL DOUBLE / DOUBLE(M,D) / FLOAT → PG DOUBLE PRECISION / REAL. The
+	// negative lookahead is approximated by ordering: DOUBLE PRECISION is
+	// valid PG and must not be double-rewritten, so match DOUBLE only when
+	// NOT followed by PRECISION.
+	reDDLDouble = regexp.MustCompile(`(?i)\bDOUBLE\b(\s*\(\s*\d+\s*,\s*\d+\s*\))?(\s+PRECISION\b)?`)
 	// Inline `UNIQUE KEY <name> (<cols>)` constraint declaration inside
 	// CREATE TABLE → `CONSTRAINT <name> UNIQUE (<cols>)`. Captures the name
 	// without surrounding backticks if any.
@@ -339,6 +347,8 @@ func rebindQuery(query string) string {
 	query = reDDLEngineClause.ReplaceAllString(query, "")
 	// Strip `ALGORITHM=INSTANT` and similar `ALGORITHM=...` ALTER TABLE options.
 	query = reDDLAlgorithmClause.ReplaceAllString(query, "")
+	// Strip `LOCK=NONE` and similar online-DDL `LOCK=...` ALTER TABLE options.
+	query = reDDLLockClause.ReplaceAllString(query, "")
 	// Strip standalone COLLATE modifiers on column expressions in SELECT (e.g. col COLLATE utf8mb4_unicode_ci AS alias)
 	query = reCollateMod.ReplaceAllString(query, "$1")
 	// MySQL→PG DDL column-type translations. These only apply inside
@@ -364,6 +374,9 @@ func rebindQuery(query string) string {
 		query = reDDLTextTypes.ReplaceAllString(query, "TEXT")
 		// DATETIME → TIMESTAMP. Preserves the optional (N) precision.
 		query = reDDLDatetime.ReplaceAllString(query, "TIMESTAMP$1")
+		// DOUBLE [(M,D)] → DOUBLE PRECISION (PG has no precision args on
+		// double). Already-valid `DOUBLE PRECISION` is preserved as-is.
+		query = reDDLDouble.ReplaceAllString(query, "DOUBLE PRECISION")
 		// Inline `UNIQUE KEY name (cols)` → `CONSTRAINT name UNIQUE (cols)`.
 		// Strips the MySQL constraint-decl form to the PG one.
 		query = reDDLUniqueKey.ReplaceAllString(query, "CONSTRAINT $1 UNIQUE ($2)")
@@ -851,7 +864,16 @@ func (c *rebindConn) QueryContext(ctx context.Context, query string, args []driv
 // Fleet migrations always index over plain column names so this is safe
 // today; if upstream adds an expression index, switch to paren-balanced
 // scanning here.
-var reAlterAddKey = regexp.MustCompile("(?is)\\bADD\\s+(?:UNIQUE\\s+)?KEY\\s+`?([A-Za-z_][A-Za-z0-9_]*)`?\\s*\\(([^)]+)\\)")
+var reAlterAddKey = regexp.MustCompile("(?is)\\bADD\\s+(?:UNIQUE\\s+)?(?:KEY|INDEX)\\s+`?([A-Za-z_][A-Za-z0-9_]*)`?\\s*\\(([^)]+)\\)")
+
+// reCreateInlineKey matches a plain inline `KEY <name> (<cols>)` index
+// declaration inside CREATE TABLE. The leading comma anchor means PRIMARY
+// KEY / UNIQUE KEY / FOREIGN KEY clauses never match (KEY is not immediately
+// after the comma there). UNIQUE KEY is rewritten to a CONSTRAINT by
+// reDDLUniqueKey before this runs. `[^()]+` deliberately rejects nested
+// parens (e.g. prefix indexes) so unsupported forms fail loudly instead of
+// silently mis-translating.
+var reCreateInlineKey = regexp.MustCompile("(?is),\\s*KEY\\s+`?([A-Za-z_][A-Za-z0-9_]*)`?\\s*\\(([^()]+)\\)")
 var reAlterTableHeader = regexp.MustCompile(`(?is)\bALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)`)
 
 // reSplitTrailingComma cleans up leftover commas after ADD KEY clauses are
@@ -868,11 +890,19 @@ var reSplitCollapseCommas = regexp.MustCompile(`(?:,\s*)+,`)
 
 func splitDDLStatements(query string) []string {
 	upper := strings.ToUpper(query)
-	hasAddKey := strings.Contains(upper, "ADD KEY") || strings.Contains(upper, "ADD UNIQUE KEY")
+	hasAddKey := strings.Contains(upper, "ADD KEY") || strings.Contains(upper, "ADD UNIQUE KEY") ||
+		strings.Contains(upper, "ADD INDEX") || strings.Contains(upper, "ADD UNIQUE INDEX")
 	hasOnUpdate := strings.Contains(upper, "ON UPDATE CURRENT_TIMESTAMP")
+	// Inline `KEY name (cols)` declarations inside CREATE TABLE — PG has no
+	// inline secondary index syntax; they become separate CREATE INDEX
+	// statements. The CREATE TABLE guard keeps DML containing the word KEY
+	// (e.g. ON DUPLICATE KEY remnants) off this path.
+	hasInlineKey := strings.Contains(upper, "KEY ") &&
+		strings.Contains(upper, "CREATE TABLE") &&
+		reCreateInlineKey.MatchString(query)
 
 	// Fast path: nothing to split.
-	if !hasAddKey && !hasOnUpdate {
+	if !hasAddKey && !hasOnUpdate && !hasInlineKey {
 		return []string{query}
 	}
 
@@ -895,6 +925,23 @@ func splitDDLStatements(query string) []string {
 			extra = append(extra,
 				fmt.Sprintf(`CREATE TRIGGER %s BEFORE UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION fleet_set_updated_at()`,
 					trigName, tableName))
+		}
+	}
+
+	// Handle inline KEY declarations in CREATE TABLE — strip each and emit a
+	// separate CREATE INDEX on the new table.
+	if hasInlineKey {
+		if m := reCreateTableName.FindStringSubmatch(stmt); m != nil {
+			tableName := m[1]
+			inlineKeys := reCreateInlineKey.FindAllStringSubmatch(stmt, -1)
+			if len(inlineKeys) > 0 {
+				stmt = reCreateInlineKey.ReplaceAllString(stmt, "")
+				for _, k := range inlineKeys {
+					extra = append(extra,
+						fmt.Sprintf("CREATE INDEX %s ON %s (%s)",
+							k[1], tableName, strings.TrimSpace(k[2])))
+				}
+			}
 		}
 	}
 
@@ -924,8 +971,19 @@ func splitDDLStatements(query string) []string {
 		}
 	}
 
+	// If every clause was extracted (e.g. `ALTER TABLE t ADD INDEX …, LOCK=NONE`
+	// reduces to a bare `ALTER TABLE t`), drop the now-empty statement and run
+	// only the extracted ones.
+	if reBareAlterTable.MatchString(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(stmt), ";"))) && len(extra) > 0 {
+		return extra
+	}
+
 	return append([]string{stmt}, extra...)
 }
+
+// reBareAlterTable matches an ALTER TABLE statement whose clauses were all
+// extracted by splitDDLStatements, leaving only the header.
+var reBareAlterTable = regexp.MustCompile(`(?i)^ALTER\s+TABLE\s+[A-Za-z_][A-Za-z0-9_]*$`)
 
 // rebindRows wraps driver.Rows to convert string values to []byte in Next().
 // PostgreSQL (via pgx) returns text/json/jsonb column values as Go strings,
@@ -2234,11 +2292,11 @@ var knownPrimaryKeys = map[string]string{
 	"wstep_cert_auth_associations":         "id,sha256",
 	"host_managed_local_account_passwords": "host_uuid",
 	// Test-only upsert sites (still need correct ON CONFLICT target on PG)
-	"aggregated_stats": "id,type,global_stats",
-	"host_scd_data":                        "dataset,entity_id,valid_from",
-	"in_house_app_configurations":          "in_house_app_id",
-	"vpp_app_configurations":               "team_id,application_id,platform",
-	"vpp_client_users":                     "vpp_token_id,managed_apple_id",
+	"aggregated_stats":            "id,type,global_stats",
+	"host_scd_data":               "dataset,entity_id,valid_from",
+	"in_house_app_configurations": "in_house_app_id",
+	"vpp_app_configurations":      "team_id,application_id,platform",
+	"vpp_client_users":            "vpp_token_id,managed_apple_id",
 	// Historical migration upsert sites — these migrations have already been
 	// applied to production and won't re-run on fresh PG installs (which start
 	// from pg_baseline_schema.sql). Entries are defense-in-depth in case the
@@ -2340,6 +2398,12 @@ var smallintBoolColumns = []string{
 	"enrolled_from_migration", // host_mdm.enrolled_from_migration (smallint in PG, bool in fleet.HostMDM)
 	"initiated_by_fleet",      // host_managed_local_account_passwords.initiated_by_fleet (smallint in PG, bool)
 	"awaiting_configuration",  // mdm_windows_enrollments.awaiting_configuration (smallint in PG; uint state in Go)
+	// Columns added by the 2026-05/06 upstream migrations (created via the
+	// TINYINT(1)→smallint DDL mapping, written as Go bools):
+	"poll_schedule_relaxed",          // mdm_windows_enrollments.poll_schedule_relaxed
+	"fleetd_sync_capable",            // mdm_windows_enrollments.fleetd_sync_capable
+	"continuous_automations_enabled", // policies.continuous_automations_enabled
+	"force_full",                     // trace_sampler_settings.force_full
 }
 
 // smallintBoolColSet is a case-insensitive lookup for smallintBoolColumns,
