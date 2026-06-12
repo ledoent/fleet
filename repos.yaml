@@ -12,7 +12,7 @@
     fork: https://github.com/ledoent/fleet.git
   target: fork aggregated
   merges:
-    - remote: upstream
+    - remote: fork
       ref: main
     - remote: fork
       ref: ledoent
