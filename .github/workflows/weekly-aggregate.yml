@@ -87,3 +87,5 @@ jobs:
 \`\`\`
 ${LOG}
 \`\`\`"
+
+# touch: force GitHub to re-index workflow triggers (2026-06-12)
