@@ -615,7 +615,7 @@ func (ds *Datastore) BatchSetMDMProfiles(ctx context.Context, tmID *uint, macPro
 		// this transaction so the tracking row commits atomically with the batch.
 		// Batch replaces profiles, so a removed OS-update profile clears its
 		// tracking row via ON DELETE CASCADE.
-		if err := batchTrackUpdateConfigProfilesDB(ctx, tx, tmID, winProfiles, macDeclarations); err != nil {
+		if err := batchTrackUpdateConfigProfilesDB(ctx, tx, ds.dialect, tmID, winProfiles, macDeclarations); err != nil {
 			return ctxerr.Wrap(ctx, err, "tracking software update profiles")
 		}
 
@@ -628,7 +628,7 @@ func (ds *Datastore) BatchSetMDMProfiles(ctx context.Context, tmID *uint, macPro
 // profile or Apple declaration in the batch as the team's OS-update profile. The
 // caller (BatchSetMDMProfiles) enforces at most one of each per team, and the
 // inserts are idempotent, so this safely re-applies an unchanged profile.
-func batchTrackUpdateConfigProfilesDB(ctx context.Context, tx sqlx.ExtContext, tmID *uint, winProfiles []*fleet.MDMWindowsConfigProfile, macDeclarations []*fleet.MDMAppleDeclaration) error {
+func batchTrackUpdateConfigProfilesDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, tmID *uint, winProfiles []*fleet.MDMWindowsConfigProfile, macDeclarations []*fleet.MDMAppleDeclaration) error {
 	var teamID uint
 	if tmID != nil {
 		teamID = *tmID
@@ -643,8 +643,8 @@ func batchTrackUpdateConfigProfilesDB(ctx context.Context, tx sqlx.ExtContext, t
 			`SELECT profile_uuid FROM mdm_windows_configuration_profiles WHERE team_id = ? AND name = ?`, teamID, p.Name); err != nil {
 			return ctxerr.Wrap(ctx, err, "getting windows profile uuid")
 		}
-		const stmt = `INSERT INTO mdm_configuration_profile_update_settings (windows_profile_uuid) VALUES (?)
-			ON DUPLICATE KEY UPDATE windows_profile_uuid = windows_profile_uuid`
+		stmt := dialect.InsertIgnoreInto() + ` mdm_configuration_profile_update_settings (windows_profile_uuid) VALUES (?)` +
+			dialect.OnConflictDoNothing("windows_profile_uuid")
 		if _, err := tx.ExecContext(ctx, stmt, profileUUID); err != nil {
 			return ctxerr.Wrap(ctx, err, "insert windows update config profile")
 		}
@@ -660,8 +660,8 @@ func batchTrackUpdateConfigProfilesDB(ctx context.Context, tx sqlx.ExtContext, t
 			`SELECT declaration_uuid FROM mdm_apple_declarations WHERE team_id = ? AND identifier = ?`, teamID, d.Identifier); err != nil {
 			return ctxerr.Wrap(ctx, err, "getting apple declaration uuid")
 		}
-		const stmt = `INSERT INTO mdm_configuration_profile_update_settings (apple_declaration_uuid) VALUES (?)
-			ON DUPLICATE KEY UPDATE apple_declaration_uuid = apple_declaration_uuid`
+		stmt := dialect.InsertIgnoreInto() + ` mdm_configuration_profile_update_settings (apple_declaration_uuid) VALUES (?)` +
+			dialect.OnConflictDoNothing("apple_declaration_uuid")
 		if _, err := tx.ExecContext(ctx, stmt, declUUID); err != nil {
 			return ctxerr.Wrap(ctx, err, "insert apple update config profile")
 		}
