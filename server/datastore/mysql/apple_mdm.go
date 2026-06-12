@@ -5318,7 +5318,7 @@ func (ds *Datastore) insertOrUpsertMDMAppleDeclaration(ctx context.Context, insO
 		}
 
 		if isSoftwareUpdate {
-			if err := trackAppleUpdateConfigProfileDB(ctx, tx, tmID, declUUID); err != nil {
+			if err := trackAppleUpdateConfigProfileDB(ctx, tx, ds.dialect, tmID, declUUID); err != nil {
 				return err
 			}
 		} else if err := untrackAppleUpdateConfigProfileDB(ctx, tx, declUUID); err != nil {
@@ -8096,9 +8096,9 @@ func (ds *Datastore) HasAppleUpdateConfigProfileConfigured(ctx context.Context, 
 
 // trackAppleUpdateConfigProfileDB records declUUID as the team's OS-update
 // declaration within the caller's transaction
-func trackAppleUpdateConfigProfileDB(ctx context.Context, tx sqlx.ExtContext, teamID uint, declUUID string) error {
-	const insertStmt = `INSERT INTO mdm_configuration_profile_update_settings (apple_declaration_uuid) VALUES (?)
-		ON DUPLICATE KEY UPDATE apple_declaration_uuid = apple_declaration_uuid`
+func trackAppleUpdateConfigProfileDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, teamID uint, declUUID string) error {
+	insertStmt := dialect.InsertIgnoreInto() + ` mdm_configuration_profile_update_settings (apple_declaration_uuid) VALUES (?)` +
+		dialect.OnConflictDoNothing("apple_declaration_uuid")
 	if _, err := tx.ExecContext(ctx, insertStmt, declUUID); err != nil {
 		return ctxerr.Wrap(ctx, err, "inserting software update profile")
 	}

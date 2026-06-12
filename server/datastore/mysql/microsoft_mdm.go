@@ -124,8 +124,13 @@ func (ds *Datastore) MDMWindowsEnqueuePollScheduleCommand(
 // enrollment. The orbit-config endpoint calls it on-change (the live capability header is only present on that request), so the OMA-DM
 // management session, which has no such header, can gate poll relaxation on the stored value.
 func (ds *Datastore) SetMDMWindowsEnrollmentFleetdSyncCapable(ctx context.Context, hostUUID string, capable bool) error {
-	if _, err := ds.writer(ctx).ExecContext(ctx,
-		`UPDATE mdm_windows_enrollments SET fleetd_sync_capable = ? WHERE host_uuid = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
+	// PG has no UPDATE … ORDER BY … LIMIT; select the newest enrollment id in a subquery.
+	stmt := `UPDATE mdm_windows_enrollments SET fleetd_sync_capable = ? WHERE host_uuid = ? ORDER BY created_at DESC, id DESC LIMIT 1`
+	if ds.dialect.IsPostgres() {
+		stmt = `UPDATE mdm_windows_enrollments SET fleetd_sync_capable = ? WHERE id = (
+			SELECT id FROM mdm_windows_enrollments WHERE host_uuid = ? ORDER BY created_at DESC, id DESC LIMIT 1)`
+	}
+	if _, err := ds.writer(ctx).ExecContext(ctx, stmt,
 		capable, hostUUID); err != nil {
 		return ctxerr.Wrap(ctx, err, "set mdm windows enrollment fleetd sync capable")
 	}
@@ -319,11 +324,15 @@ func (ds *Datastore) recomputeMDMWindowsHasPendingCommandsByEnrollmentIDs(ctx co
 		// so this clause only matters for callers that do not pre-gate, or when the loaded flag was stale. It is safe
 		// because the refresh only exists for the 1 -> 0 transition - the enqueue paths own 0 -> 1 by setting the flag
 		// directly.
-		stmt, args, err := sqlx.In(
-			`UPDATE mdm_windows_enrollments e SET e.has_pending_commands = `+windowsMDMHasPendingCommandsExpr+
-				` WHERE e.id IN (?) AND e.has_pending_commands = 1`,
-			syncml.DMClientPollIntervalLocURI, batch,
-		)
+		// PG: SET columns must be unqualified, and the boolean EXISTS needs an
+		// explicit cast to land in the smallint flag column.
+		updateStmt := `UPDATE mdm_windows_enrollments e SET e.has_pending_commands = ` + windowsMDMHasPendingCommandsExpr +
+			` WHERE e.id IN (?) AND e.has_pending_commands = 1`
+		if ds.dialect.IsPostgres() {
+			updateStmt = `UPDATE mdm_windows_enrollments e SET has_pending_commands = (` + windowsMDMHasPendingCommandsExpr + `)::int
+				WHERE e.id IN (?) AND e.has_pending_commands = 1`
+		}
+		stmt, args, err := sqlx.In(updateStmt, syncml.DMClientPollIntervalLocURI, batch)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "build recompute has_pending_commands by enrollment ids")
 		}
@@ -2776,7 +2785,7 @@ INSERT INTO
 		// An OS-update profile is tracked as the team's OS-update profile within
 		// this transaction so it rolls back together on failure.
 		if fleet.ProfileTargetsReservedLocURI(cp.SyncML, syncml.FleetOSUpdateTargetLocURI) {
-			if err := trackWindowsUpdateConfigProfileDB(ctx, tx, teamID, profileUUID); err != nil {
+			if err := trackWindowsUpdateConfigProfileDB(ctx, tx, ds.dialect, teamID, profileUUID); err != nil {
 				return err
 			}
 		}
@@ -3494,9 +3503,9 @@ func (ds *Datastore) HasWindowsUpdateConfigProfileConfigured(ctx context.Context
 
 // trackWindowsUpdateConfigProfileDB records profileUUID as the team's OS-update
 // profile within the caller's transaction
-func trackWindowsUpdateConfigProfileDB(ctx context.Context, tx sqlx.ExtContext, teamID uint, profileUUID string) error {
-	const insertStmt = `INSERT INTO mdm_configuration_profile_update_settings (windows_profile_uuid) VALUES (?)
-		ON DUPLICATE KEY UPDATE windows_profile_uuid = windows_profile_uuid`
+func trackWindowsUpdateConfigProfileDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, teamID uint, profileUUID string) error {
+	insertStmt := dialect.InsertIgnoreInto() + ` mdm_configuration_profile_update_settings (windows_profile_uuid) VALUES (?)` +
+		dialect.OnConflictDoNothing("windows_profile_uuid")
 	if _, err := tx.ExecContext(ctx, insertStmt, profileUUID); err != nil {
 		return ctxerr.Wrap(ctx, err, "inserting software update profile")
 	}

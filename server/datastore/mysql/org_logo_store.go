@@ -27,11 +27,11 @@ func (s *orgLogoStore) Put(ctx context.Context, mode fleet.OrgLogoMode, content 
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "reading org logo content")
 	}
-	const stmt = `
+	stmt := `
 		INSERT INTO org_logo (mode, data, uploaded_at)
 		VALUES (?, ?, NOW(6))
-		ON DUPLICATE KEY UPDATE data = ?, uploaded_at = NOW(6)`
-	if _, err := s.ds.writer(ctx).ExecContext(ctx, stmt, string(mode), data, data); err != nil {
+		` + s.ds.dialect.OnDuplicateKey("mode", "data = VALUES(data), uploaded_at = VALUES(uploaded_at)")
+	if _, err := s.ds.writer(ctx).ExecContext(ctx, stmt, string(mode), data); err != nil {
 		return ctxerr.Wrap(ctx, err, "storing org logo")
 	}
 	return nil

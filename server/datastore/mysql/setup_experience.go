@@ -214,10 +214,12 @@ SELECT
 	-- used as a gate during setup experience). A policy's software_installer_id already uniquely identifies the installer (and its
 	-- team), so no team check is needed; only gate on Windows/Linux. The specific policy ids are derived from the installer at
 	-- decision time, so only this marker is stored.
-	EXISTS (SELECT 1
+	-- CASE instead of bare EXISTS: policy_gated is smallint on PG (the
+	-- TINYINT(1) convention), and PG won't implicitly cast boolean→smallint.
+	CASE WHEN EXISTS (SELECT 1
 		FROM policies p
 		WHERE p.software_installer_id = si.id
-		AND ? IN ('windows', 'linux')) AS policy_gated,
+		AND ? IN ('windows', 'linux')) THEN 1 ELSE 0 END AS policy_gated,
 	COALESCE(stdn.display_name, st.name) AS sort_name,
 	st.id AS software_title_id
 FROM software_installers si
@@ -313,7 +315,7 @@ SELECT
 	'pending' AS status,
 	CAST(NULL AS UNSIGNED) AS software_installer_id,
 	vat.id AS vpp_app_team_id,
-	FALSE AS policy_gated,
+	0 AS policy_gated,
 	COALESCE(stdn.display_name, st.name) AS sort_name,
 	st.id AS software_title_id
 FROM vpp_apps va
@@ -843,7 +845,7 @@ SELECT DISTINCT p.id
 FROM setup_experience_status_results sesr
 JOIN policies p ON p.software_installer_id = sesr.software_installer_id
 WHERE sesr.host_uuid = ?
-	AND sesr.policy_gated = true
+	AND sesr.policy_gated = 1
 	AND sesr.status IN ('pending', 'running')
 	AND sesr.host_software_installs_execution_id IS NULL`
 	var ids []uint
