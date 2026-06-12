@@ -73,6 +73,7 @@ var schemaIdentityCols = map[string]string{
 	"mdm_apple_setup_assistants":                "id",
 	"mdm_config_assets":                         "id",
 	"mdm_configuration_profile_labels":          "id",
+	"mdm_configuration_profile_update_settings": "id",
 	"mdm_configuration_profile_variables":       "id",
 	"mdm_declaration_labels":                    "id",
 	"mdm_windows_configuration_profiles":        "auto_increment",
