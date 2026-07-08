@@ -301,6 +301,21 @@ func TestRewriteIntervalPlaceholder(t *testing.T) {
 			in:   "a >= NOW() - INTERVAL ? SECOND AND b <= NOW() + INTERVAL ? MINUTE",
 			want: "a >= NOW() - ($1::float8 * INTERVAL '1 second') AND b <= NOW() + ($2::float8 * INTERVAL '1 minute')",
 		},
+		{
+			name: "placeholder plus INTERVAL gets timestamptz cast",
+			in:   "expires_at <= ? + INTERVAL '1 hour'",
+			want: "expires_at <= $1::timestamptz + INTERVAL '1 hour'",
+		},
+		{
+			name: "placeholder minus INTERVAL gets timestamptz cast",
+			in:   "seen_at >= ? - INTERVAL '30 minutes'",
+			want: "seen_at >= $1::timestamptz - INTERVAL '30 minutes'",
+		},
+		{
+			name: "placeholder times INTERVAL gets float8 cast, not timestamptz",
+			in:   "cert_not_valid_after <= CURRENT_DATE + (? * INTERVAL '1 day')",
+			want: "cert_not_valid_after <= CURRENT_DATE + ($1::float8 * INTERVAL '1 day')",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
