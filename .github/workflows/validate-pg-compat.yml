@@ -7,6 +7,9 @@ on:
       - patch-*
       - prepare-*
       - aggregated
+      # Direct pushes to the PG branch must run this: Aggregate & Push
+      # (ledoent branch) chains off this workflow's success via workflow_run.
+      - feat/pg-compat-rebased
     paths:
       - '**.go'
       - 'go.mod'
