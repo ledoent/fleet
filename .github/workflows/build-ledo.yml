@@ -21,6 +21,13 @@ on:
       - '.github/workflows/build-ledo.yml'
   workflow_dispatch:
 
+# Serialize per ref and drop superseded builds: back-to-back aggregated
+# pushes otherwise race, and an older build finishing last would overwrite
+# :latest / the version tag with stale content.
+concurrency:
+  group: build-ledo-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ledoent/fleet
