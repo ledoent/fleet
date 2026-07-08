@@ -106,7 +106,16 @@ jobs:
           exit 1
 
       - name: Build fleet binary
-        run: go build -o /tmp/fleet ./cmd/fleet
+        # go mod download retries first: proxy.golang.org occasionally aborts
+        # module zips mid-stream (INTERNAL_ERROR), which is retriable but
+        # fails a single go build outright (observed 2026-07-07).
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && break
+            echo "go mod download failed (attempt $attempt); retrying..."
+            sleep 10
+          done
+          go build -o /tmp/fleet ./cmd/fleet
 
       - name: Fresh PG install — prepare db (first run)
         env:

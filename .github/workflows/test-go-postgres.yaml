@@ -67,6 +67,17 @@ jobs:
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
+      - name: Download Go modules (with retry)
+        # proxy.golang.org occasionally aborts module zips mid-stream
+        # (INTERNAL_ERROR); retriable, but a single failure would fail the
+        # test step outright.
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && break
+            echo "go mod download failed (attempt $attempt); retrying..."
+            sleep 10
+          done
+
       - name: Start postgres_test container
         run: |
           FLEET_POSTGRES_IMAGE=${{ matrix.postgres }} \
