@@ -68,7 +68,9 @@ var (
 	// MySQL: INSERT INTO table () VALUES () — empty column/value lists for auto-increment-only inserts
 	reEmptyValues = regexp.MustCompile(`(?i)(INSERT\s+INTO\s+\S+\s+)\(\s*\)\s*VALUES\s*\(\s*\)`)
 	// PG can't infer $N type in interval arithmetic; cast to timestamptz
-	reParamBeforeInterval = regexp.MustCompile(`(\$\d+)\s+([-+*]\s*INTERVAL\b)`)
+	reParamBeforeInterval = regexp.MustCompile(`(\$\d+)\s+([-+]\s*INTERVAL\b)`)
+	// $N * INTERVAL scales the interval, so the param is a number, not a timestamp
+	reParamTimesInterval = regexp.MustCompile(`(\$\d+)\s*(\*\s*INTERVAL\b)`)
 	// JSON boolean comparison: MySQL ->> on JSON true returns '1', PG returns 'true'.
 	// Match: COALESCE(<expr>, '0') = '1' → COALESCE(<expr>, '0') IN ('1', 'true')
 	reJSONBoolCoalesce = regexp.MustCompile(`COALESCE\(([^)]+->>'[^']+'),\s*'0'\)\s*=\s*'1'`)
@@ -694,6 +696,7 @@ func rebindQuery(query string) string {
 	// PG can't infer the type of $N when used in interval arithmetic ($N - INTERVAL, $N + INTERVAL).
 	// Cast to timestamptz so the operator resolves correctly.
 	result = reParamBeforeInterval.ReplaceAllString(result, "${1}::timestamptz ${2}")
+	result = reParamTimesInterval.ReplaceAllString(result, "${1}::float8 ${2}")
 	return result
 }
 
