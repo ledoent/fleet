@@ -1,9 +1,18 @@
 name: Aggregate & Push
 
 on:
+  push:
+    branches:
+      - ledoent
+      - feat/pg-compat-rebased
+      - patches/**
   schedule:
-    - cron: '0 8 * * 1'  # Every Monday at 08:00 UTC
+    - cron: '0 8 * * 1'  # Weekly safety net; the push triggers above are primary
   workflow_dispatch:
+
+concurrency:
+  group: aggregate
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -63,19 +72,30 @@ jobs:
             echo "\`build-ledo.yml\` will trigger automatically to build the image." >> $GITHUB_STEP_SUMMARY
           else
             echo "## Aggregation FAILED" >> $GITHUB_STEP_SUMMARY
-            echo "git-aggregator hit a merge conflict. Manual resolution required." >> $GITHUB_STEP_SUMMARY
+            conflicts=$(git -C fleet diff --name-only --diff-filter=U 2>/dev/null || true)
+            if [ -n "$conflicts" ]; then
+              echo "Merge conflict — usually means \`feat/pg-compat-rebased\` needs porting work for these files:" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "$conflicts" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "**Last 30 lines of output:**" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             tail -30 /tmp/aggregate.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Open failure issue
+      # Notification must never mask the real failure: tolerate disabled
+      # Issues, and comment on an existing open failure issue instead of
+      # opening a new one every run.
+      - name: Notify failure via issue (non-fatal)
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.FLEET_RELEASE_GITHUB_PAT }}
+          REPO: ${{ github.repository }}
         run: |
           {
-            echo "The weekly aggregation workflow failed and requires manual conflict resolution."
+            echo "The aggregation workflow failed and requires manual attention."
             echo
             echo "**Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
@@ -84,8 +104,17 @@ jobs:
             tail -30 /tmp/aggregate.log 2>/dev/null || echo "No log available"
             echo '```'
           } > /tmp/issue-body.md
-          gh issue create \
-            --repo "${{ github.repository }}" \
-            --title "Aggregate & Push failed — $(date -u '+%Y-%m-%d')" \
-            --assignee dkendall \
-            --body-file /tmp/issue-body.md
+          {
+            existing=$(gh issue list --repo "$REPO" --state open \
+              --search 'Aggregate & Push failed in:title' \
+              --json number --jq '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "$REPO" --body-file /tmp/issue-body.md
+            else
+              gh issue create \
+                --repo "$REPO" \
+                --title "Aggregate & Push failed — $(date -u '+%Y-%m-%d')" \
+                --assignee dkendall \
+                --body-file /tmp/issue-body.md
+            fi
+          } || echo "::warning::Could not file failure issue (are Issues enabled on $REPO?). See the step summary for details."
