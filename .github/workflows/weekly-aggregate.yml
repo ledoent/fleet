@@ -1,13 +1,24 @@
 name: Aggregate & Push
 
 on:
+  # push only fires when the pushed ref contains this workflow file, i.e.
+  # the ledoent branch. feat/pg-compat-rebased doesn't carry the fork CI
+  # files, so it chains in via workflow_run below instead; pushes to
+  # patches/* are rare and covered by the cron + manual dispatch.
   push:
     branches:
       - ledoent
-      - feat/pg-compat-rebased
-      - patches/**
+  # Aggregate after PG CI succeeds on the PG branch — workflow_run executes
+  # from the default branch, so the PG branch not carrying this file doesn't
+  # matter, and it guarantees we never aggregate a red PG tip. Validate PG
+  # Compatibility also runs on `aggregated` pushes; the branches filter
+  # stops that from re-triggering us (no loop).
+  workflow_run:
+    workflows: ["Validate PG Compatibility"]
+    types: [completed]
+    branches: [feat/pg-compat-rebased]
   schedule:
-    - cron: '0 8 * * 1'  # Weekly safety net; the push triggers above are primary
+    - cron: '0 8 * * 1'  # Weekly safety net; the triggers above are primary
   workflow_dispatch:
 
 concurrency:
@@ -20,7 +31,11 @@ permissions:
 
 jobs:
   aggregate:
-    if: github.repository != 'fleetdm/fleet'
+    # Skip on upstream, and only chain from a *successful* PG CI run.
+    if: >
+      github.repository != 'fleetdm/fleet' &&
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
