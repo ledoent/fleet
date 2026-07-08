@@ -450,12 +450,17 @@ func (ds *Datastore) MDMWindowsDeleteEnrolledDeviceOnReenrollment(ctx context.Co
 		delActionsStmt  = "DELETE FROM host_mdm_actions WHERE host_id = (SELECT id FROM hosts WHERE uuid = ? LIMIT 1)"
 		delProfilesStmt = "DELETE FROM host_mdm_windows_profiles WHERE host_uuid = ?"
 		// setup_experience_status_results.host_uuid is keyed by fleet.HostUUIDForSetupExperience; for Windows that's the
-		// host's OsqueryHostID, NOT the Fleet host UUID stored on the MDM enrollment. Resolve via JOIN so we delete by
-		// whichever identifier matches (works for both shapes).
-		delSetupExpStmt = `DELETE ser FROM setup_experience_status_results ser
-			JOIN hosts h ON ser.host_uuid = h.osquery_host_id OR ser.host_uuid = h.uuid
-			WHERE h.uuid = ?`
-		delUpcomingStmt = `DELETE ua FROM upcoming_activities ua JOIN hosts h ON h.id = ua.host_id WHERE h.uuid = ?`
+		// host's OsqueryHostID, NOT the Fleet host UUID stored on the MDM enrollment. Resolve via the hosts table so we
+		// delete by whichever identifier matches (works for both shapes).
+		// Cross-dialect: avoid MySQL-only "DELETE alias FROM ... JOIN" syntax.
+		delSetupExpStmt = `DELETE FROM setup_experience_status_results
+			WHERE EXISTS (
+				SELECT 1 FROM hosts h
+				WHERE (setup_experience_status_results.host_uuid = h.osquery_host_id
+					OR setup_experience_status_results.host_uuid = h.uuid)
+				AND h.uuid = ?
+			)`
+		delUpcomingStmt = `DELETE FROM upcoming_activities WHERE host_id IN (SELECT id FROM hosts WHERE uuid = ?)`
 	)
 
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
@@ -3475,11 +3480,13 @@ LIMIT ?`
 // when the profile was edited or deleted). Once every host has moved past that version (re-installed to a newer one, drained its
 // removal, or unenrolled), the row is dropped.
 func (ds *Datastore) CleanupWindowsMDMProfilePriorContent(ctx context.Context) error {
+	// Cross-dialect: avoid MySQL-only "DELETE alias FROM table alias" syntax.
 	const stmt = `
-DELETE pc FROM mdm_windows_configuration_profiles_prior_content pc
+DELETE FROM mdm_windows_configuration_profiles_prior_content
 WHERE NOT EXISTS (
 	SELECT 1 FROM host_mdm_windows_profiles hmwp
-	WHERE hmwp.profile_uuid = pc.profile_uuid AND hmwp.checksum = pc.checksum
+	WHERE hmwp.profile_uuid = mdm_windows_configuration_profiles_prior_content.profile_uuid
+		AND hmwp.checksum = mdm_windows_configuration_profiles_prior_content.checksum
 )`
 	if _, err := ds.writer(ctx).ExecContext(ctx, stmt); err != nil {
 		return ctxerr.Wrap(ctx, err, "cleanup windows mdm profile prior content")
