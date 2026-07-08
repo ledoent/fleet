@@ -2014,7 +2014,7 @@ WHERE
     AND ncaa.renew_command_uuid IS NULL
     AND ne.enabled = true
 GROUP BY
-    host_uuid, ncaa.sha256, ncaa.cert_not_valid_after
+    host_uuid, ncaa.sha256, ncaa.cert_not_valid_after, ne.enrolled_from_migration, ne.type
 ORDER BY
     cert_not_valid_after ASC
 LIMIT ?`, expiryDays, limit)
