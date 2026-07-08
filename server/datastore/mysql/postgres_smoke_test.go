@@ -555,3 +555,44 @@ func TestPostgresHostSoftwareUpdate(t *testing.T) {
 		assert.Empty(t, host.Software, "host inventory should be empty")
 	})
 }
+
+// TestPostgresMDMCleanupQueries is regression coverage for MDM statements that
+// previously used MySQL-only SQL and broke at runtime on PostgreSQL (the
+// cleanups_then_aggregation cron and Windows re-enrollment). Each subtest
+// executes the real statement against PG; a dialect regression fails here
+// instead of shipping silently (these paths are not otherwise in the
+// TestPostgres* suite).
+func TestPostgresMDMCleanupQueries(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	t.Run("GetHostCertAssociationsToExpire", func(t *testing.T) {
+		// renew_scep_certificates cron: the expiry filter multiplies a bound
+		// param by INTERVAL '1 day' and must not be cast to timestamptz.
+		_, err := ds.GetHostCertAssociationsToExpire(ctx, 30, 100)
+		require.NoError(t, err, "GetHostCertAssociationsToExpire")
+	})
+
+	t.Run("CleanupWindowsMDMPendingDeleteProfiles", func(t *testing.T) {
+		require.NoError(t, ds.CleanupWindowsMDMPendingDeleteProfiles(ctx),
+			"CleanupWindowsMDMPendingDeleteProfiles")
+	})
+
+	t.Run("MDMWindowsDeleteEnrolledDeviceOnReenrollment", func(t *testing.T) {
+		device := &fleet.MDMWindowsEnrolledDevice{
+			MDMDeviceID:            "pg-mdm-device-1",
+			MDMHardwareID:          "pg-mdm-hwid-1-0123456789012345678901234567890123456789",
+			MDMDeviceState:         "2",
+			MDMDeviceType:          "CIMClient_Windows",
+			MDMDeviceName:          "PG-TEST-DESKTOP",
+			MDMEnrollType:          "ProgrammaticEnrollment",
+			MDMEnrollUserID:        "",
+			MDMEnrollProtoVersion:  "5.0",
+			MDMEnrollClientVersion: "10.0.19045.2965",
+			MDMNotInOOBE:           false,
+		}
+		require.NoError(t, ds.MDMWindowsInsertEnrolledDevice(ctx, device), "insert enrolled device")
+		require.NoError(t, ds.MDMWindowsDeleteEnrolledDeviceOnReenrollment(ctx, device.MDMHardwareID),
+			"MDMWindowsDeleteEnrolledDeviceOnReenrollment")
+	})
+}
