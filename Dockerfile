@@ -13,7 +13,7 @@ COPY . .
 RUN NODE_OPTIONS=--openssl-legacy-provider NODE_ENV=production yarn run webpack --progress
 
 # Stage 2: Build Go binary
-FROM golang:1.26-bookworm@sha256:5f68ec6805843bd3981a951ffada82a26a0bd2631045c8f7dba483fa868f5ec5 AS backend
+FROM golang:1.26-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS backend
 RUN apt-get update && apt-get install -y --no-install-recommends gcc
 WORKDIR /build
 ARG FLEET_VERSION
