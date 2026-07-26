@@ -328,7 +328,7 @@ func (ds *Datastore) BatchDeleteCertificateTemplates(ctx context.Context, certif
 // setCertTemplateVariableAssociations replaces the variable associations for a
 // certificate template in mdm_configuration_profile_variables. It deletes
 // existing rows and inserts fresh ones for the given fleetVars.
-func setCertTemplateVariableAssociations(ctx context.Context, tx sqlx.ExtContext, certTemplateID uint, fleetVars []fleet.FleetVarName) error {
+func setCertTemplateVariableAssociations(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, certTemplateID uint, fleetVars []fleet.FleetVarName) error {
 	// Always clear existing associations first.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM mdm_configuration_profile_variables WHERE certificate_template_id = ?`, certTemplateID); err != nil {
 		return ctxerr.Wrap(ctx, err, "deleting cert template variable associations")
@@ -370,8 +370,8 @@ func setCertTemplateVariableAssociations(ctx context.Context, tx sqlx.ExtContext
 	stmt := fmt.Sprintf(`
 		INSERT INTO mdm_configuration_profile_variables (certificate_template_id, fleet_variable_id)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE fleet_variable_id = VALUES(fleet_variable_id)
-	`, strings.TrimSuffix(values.String(), ","))
+		`+dialect.OnDuplicateKey("certificate_template_id,fleet_variable_id", "fleet_variable_id = VALUES(fleet_variable_id)"),
+		strings.TrimSuffix(values.String(), ","))
 
 	if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 		return ctxerr.Wrap(ctx, err, "inserting cert template variable associations")
@@ -380,7 +380,7 @@ func setCertTemplateVariableAssociations(ctx context.Context, tx sqlx.ExtContext
 }
 
 func (ds *Datastore) SetCertificateTemplateVariables(ctx context.Context, certTemplateID uint, fleetVars []fleet.FleetVarName) error {
-	return setCertTemplateVariableAssociations(ctx, ds.writer(ctx), certTemplateID, fleetVars)
+	return setCertTemplateVariableAssociations(ctx, ds.writer(ctx), ds.dialect, certTemplateID, fleetVars)
 }
 
 func (ds *Datastore) GetHostCertificateTemplates(ctx context.Context, hostUUID string) ([]fleet.HostCertificateTemplate, error) {

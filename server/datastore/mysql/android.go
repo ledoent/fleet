@@ -2404,7 +2404,7 @@ func (ds *Datastore) updateAndroidAppConfigurationTx(ctx context.Context, tx sql
 	for i, v := range found {
 		fleetVars[i] = fleet.FleetVarName(v)
 	}
-	if err := setAppConfigVariableAssociations(ctx, tx, appConfigID, fleetVars); err != nil {
+	if err := setAppConfigVariableAssociations(ctx, tx, ds.dialect, appConfigID, fleetVars); err != nil {
 		return ctxerr.Wrap(ctx, err, "setting app config variable associations")
 	}
 
@@ -2413,7 +2413,7 @@ func (ds *Datastore) updateAndroidAppConfigurationTx(ctx context.Context, tx sql
 
 // setAppConfigVariableAssociations replaces the variable associations for an
 // android app configuration in mdm_configuration_profile_variables.
-func setAppConfigVariableAssociations(ctx context.Context, tx sqlx.ExtContext, appConfigID uint, fleetVars []fleet.FleetVarName) error {
+func setAppConfigVariableAssociations(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, appConfigID uint, fleetVars []fleet.FleetVarName) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM mdm_configuration_profile_variables WHERE android_app_configuration_id = ?`, appConfigID); err != nil {
 		return ctxerr.Wrap(ctx, err, "deleting app config variable associations")
 	}
@@ -2453,8 +2453,8 @@ func setAppConfigVariableAssociations(ctx context.Context, tx sqlx.ExtContext, a
 	stmt := fmt.Sprintf(`
 		INSERT INTO mdm_configuration_profile_variables (android_app_configuration_id, fleet_variable_id)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE fleet_variable_id = VALUES(fleet_variable_id)
-	`, strings.TrimSuffix(values.String(), ","))
+		`+dialect.OnDuplicateKey("android_app_configuration_id,fleet_variable_id", "fleet_variable_id = VALUES(fleet_variable_id)"),
+		strings.TrimSuffix(values.String(), ","))
 
 	if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 		return ctxerr.Wrap(ctx, err, "inserting app config variable associations")
