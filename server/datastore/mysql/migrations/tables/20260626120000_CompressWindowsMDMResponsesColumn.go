@@ -44,7 +44,12 @@ func Up_20260626120000(tx *sql.Tx) error {
 
 	// Enforce NOT NULL once every row is populated.
 	if columnIsNullable(tx, "windows_mdm_responses", "raw_response_gz") {
-		if _, err := tx.Exec(`ALTER TABLE windows_mdm_responses MODIFY raw_response_gz MEDIUMBLOB NOT NULL`); err != nil {
+		notNullStmt := `ALTER TABLE windows_mdm_responses MODIFY raw_response_gz MEDIUMBLOB NOT NULL`
+		if isPostgres() {
+			// MODIFY is MySQL-only; PG keeps the column's type and adds the constraint.
+			notNullStmt = `ALTER TABLE windows_mdm_responses ALTER COLUMN raw_response_gz SET NOT NULL`
+		}
+		if _, err := tx.Exec(notNullStmt); err != nil {
 			return fmt.Errorf("making raw_response_gz NOT NULL: %w", err)
 		}
 	}

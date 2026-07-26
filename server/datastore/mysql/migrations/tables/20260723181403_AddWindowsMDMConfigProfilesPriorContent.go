@@ -49,6 +49,17 @@ func Up_20260723181403(tx *sql.Tx) error {
 
 	// The prior-content GC and the deleted-profile host-row cleanup probe host_mdm_windows_profiles by (profile_uuid, checksum). The
 	// GC's NOT EXISTS now also filters on checksum.
+	if isPostgres() {
+		// PG can't combine DROP INDEX and ADD INDEX in one ALTER TABLE.
+		if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_host_mdm_windows_profiles_profile_uuid`); err != nil {
+			return fmt.Errorf("drop profile_uuid index on host_mdm_windows_profiles: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_host_mdm_windows_profiles_profile_uuid_checksum
+			ON host_mdm_windows_profiles (profile_uuid, checksum)`); err != nil {
+			return fmt.Errorf("replace profile_uuid index with (profile_uuid, checksum) on host_mdm_windows_profiles: %w", err)
+		}
+		return nil
+	}
 	if _, err := tx.Exec(`ALTER TABLE host_mdm_windows_profiles
 		DROP INDEX idx_host_mdm_windows_profiles_profile_uuid,
 		ADD INDEX idx_host_mdm_windows_profiles_profile_uuid_checksum (profile_uuid, checksum)`); err != nil {

@@ -596,3 +596,39 @@ func TestPostgresMDMCleanupQueries(t *testing.T) {
 			"MDMWindowsDeleteEnrolledDeviceOnReenrollment")
 	})
 }
+
+// TestPostgresInsertCVEMeta regression-covers the vulnerabilities cron's CVE
+// meta bulk upsert: the PG variant adds a WHERE ... IS DISTINCT FROM guard so
+// re-upserting identical rows (the common hourly case) writes no new row
+// versions. Verifies the statement is valid PG and that changed values still
+// land.
+func TestPostgresInsertCVEMeta(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	published := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	meta := []fleet.CVEMeta{
+		{CVE: "CVE-2025-0001", CVSSScore: new(7.5), EPSSProbability: new(0.12), CISAKnownExploit: new(false), Published: &published, Description: "first"},
+		{CVE: "CVE-2025-0002", CVSSScore: new(9.8), EPSSProbability: new(0.93), CISAKnownExploit: new(true), Published: &published, Description: "second"},
+	}
+	require.NoError(t, ds.InsertCVEMeta(ctx, meta), "initial insert")
+
+	// Idempotent re-upsert of identical rows must succeed (and on PG, skip the
+	// row rewrite via the IS DISTINCT FROM guard).
+	require.NoError(t, ds.InsertCVEMeta(ctx, meta), "identical re-upsert")
+
+	// A changed value must still be applied.
+	meta[0].CVSSScore = new(8.1)
+	meta[0].Description = "first-updated"
+	require.NoError(t, ds.InsertCVEMeta(ctx, meta), "changed re-upsert")
+
+	var got struct {
+		CVSSScore   *float64 `db:"cvss_score"`
+		Description string   `db:"description"`
+	}
+	require.NoError(t, ds.primary.Get(&got,
+		"SELECT cvss_score, description FROM cve_meta WHERE cve = $1", "CVE-2025-0001"))
+	require.NotNil(t, got.CVSSScore)
+	require.InDelta(t, 8.1, *got.CVSSScore, 0.001)
+	require.Equal(t, "first-updated", got.Description)
+}

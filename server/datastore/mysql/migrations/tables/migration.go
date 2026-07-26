@@ -369,13 +369,24 @@ AND index_name = ?
 
 func indexExistsTx(tx *sql.Tx, table, index string) bool {
 	var count int
-	err := tx.QueryRow(`
+	stmt := `
 SELECT COUNT(1)
 FROM INFORMATION_SCHEMA.STATISTICS
 WHERE table_schema = DATABASE()
 AND table_name = ?
 AND index_name = ?
-`, table, index).Scan(&count)
+`
+	if isPostgres() {
+		// PG's information_schema has no STATISTICS view; use pg_indexes.
+		stmt = `
+SELECT COUNT(1)
+FROM pg_indexes
+WHERE schemaname = 'public'
+AND tablename = ?
+AND indexname = ?
+`
+	}
+	err := tx.QueryRow(stmt, table, index).Scan(&count)
 	if err != nil {
 		return false
 	}

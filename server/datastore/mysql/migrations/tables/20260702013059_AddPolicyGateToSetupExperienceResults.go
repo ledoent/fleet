@@ -15,6 +15,11 @@ func Up_20260702013059(tx *sql.Tx) error {
 	// passes, and installed if any fails. The set of gating policies is derived from the installer at decision time, so this is
 	// only a marker (no specific policy is stored, which also means deleting one of several gating policies does not un-gate the
 	// item). It is internal (json:"-"), so this is not an API change.
+	// Idempotent: the fork's PG baseline already carries this column (the
+	// feature pre-dates its upstreaming).
+	if columnExists(tx, "setup_experience_status_results", "policy_gated") {
+		return nil
+	}
 	_, err := tx.Exec(`
 ALTER TABLE setup_experience_status_results
 	ADD COLUMN policy_gated TINYINT(1) NOT NULL DEFAULT 0

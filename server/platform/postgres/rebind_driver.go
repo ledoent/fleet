@@ -175,7 +175,7 @@ var (
 	// equivalent column-level attribute; the rebind driver strips it and
 	// splitDDLStatements emits a CREATE TRIGGER referencing fleet_set_updated_at
 	// installed by pg_baseline_post.sql.
-	reDDLOnUpdateCurrentTimestamp = regexp.MustCompile(`(?i)\s+ON\s+UPDATE\s+CURRENT_TIMESTAMP(?:\s*\(\s*\d+\s*\))?`)
+	reDDLOnUpdateCurrentTimestamp = regexp.MustCompile(`(?i)\s+ON\s+UPDATE\s+(?:CURRENT_TIMESTAMP(?:\s*\(\s*\d+\s*\))?|NOW\s*\(\s*\d*\s*\))`)
 	// Match CREATE TABLE <name> ( … updated_at … ON UPDATE CURRENT_TIMESTAMP …
 	// to detect the need for a per-table trigger. We don't care about column
 	// position — we just need the table name.
@@ -899,7 +899,7 @@ func splitDDLStatements(query string) []string {
 	upper := strings.ToUpper(query)
 	hasAddKey := strings.Contains(upper, "ADD KEY") || strings.Contains(upper, "ADD UNIQUE KEY") ||
 		strings.Contains(upper, "ADD INDEX") || strings.Contains(upper, "ADD UNIQUE INDEX")
-	hasOnUpdate := strings.Contains(upper, "ON UPDATE CURRENT_TIMESTAMP")
+	hasOnUpdate := strings.Contains(upper, "ON UPDATE CURRENT_TIMESTAMP") || strings.Contains(upper, "ON UPDATE NOW(")
 	// Inline `KEY name (cols)` declarations inside CREATE TABLE — PG has no
 	// inline secondary index syntax; they become separate CREATE INDEX
 	// statements. The CREATE TABLE guard keeps DML containing the word KEY

@@ -31,6 +31,7 @@ import (
 	activity_api "github.com/fleetdm/fleet/v4/server/activity/api"
 	activity_bootstrap "github.com/fleetdm/fleet/v4/server/activity/bootstrap"
 	"github.com/fleetdm/fleet/v4/server/config"
+	"github.com/fleetdm/fleet/v4/server/datastore/mysql/migrations/tables"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	nanodep_client "github.com/fleetdm/fleet/v4/server/mdm/nanodep/client"
 	mdmtesting "github.com/fleetdm/fleet/v4/server/mdm/testing_utils"
@@ -648,19 +649,32 @@ func CreatePostgresDS(t testing.TB) *Datastore {
 
 	logger := slog.New(slog.DiscardHandler)
 	ds := &Datastore{
-		primary:          testDB,
-		replica:          testDB,
-		logger:           logger,
-		clock:            clock.NewMockClock(),
-		dialect:          postgresDialect{},
-		writeCh:          make(chan itemToWrite),
-		serverPrivateKey: "test-private-key-for-pg-tests!!!", // 32 bytes for AES-256
-		stmtCache:        make(map[string]*sqlx.Stmt),
+		primary:                testDB,
+		replica:                testDB,
+		logger:                 logger,
+		clock:                  clock.NewMockClock(),
+		dialect:                postgresDialect{},
+		writeCh:                make(chan itemToWrite),
+		serverPrivateKey:       "test-private-key-for-pg-tests!!!", // 32 bytes for AES-256
+		stmtCache:              make(map[string]*sqlx.Stmt),
+		knownSoftwareTitleKeys: make(map[string]struct{}),
 	}
 	ds.Datastore = NewAndroidDatastore(logger, testDB, testDB, postgresDialect{})
 	t.Cleanup(func() { ds.Close() })
 
 	go ds.writeChanLoop()
+
+	// Replay post-baseline migrations exactly as `fleet prepare db` does on a
+	// real deployment: seed migration history <= the baseline marker, then
+	// goose-Up the newer upstream migrations through the rebind driver. This
+	// is the test gate proving new upstream migrations run on PostgreSQL.
+	tables.SetDialect("postgres")
+	t.Cleanup(func() { tables.SetDialect("mysql") })
+	migCtx := context.Background()
+	require.NoError(t, ds.seedPGMigrationHistory(migCtx, parsePGBaselineMarker(pgBaselineSchemaSQL)),
+		"seed PG migration history")
+	require.NoError(t, tables.MigrationClient.Up(ds.writer(migCtx).DB, ""),
+		"apply post-baseline migrations on PG")
 
 	return ds
 }

@@ -20,7 +20,12 @@ func Up_20260724134801(tx *sql.Tx) error {
 	// treats tabs, newlines, and Unicode whitespace as blank, so we can't rely
 	// on MySQL's TRIM (which only strips ASCII spaces). MySQL 8's ICU-backed
 	// [[:space:]] class covers the full Unicode whitespace set.
-	if _, err := tx.Exec(`DELETE FROM enroll_secrets WHERE secret REGEXP '^[[:space:]]*$'`); err != nil {
+	stmt := `DELETE FROM enroll_secrets WHERE secret REGEXP '^[[:space:]]*$'`
+	if isPostgres() {
+		// PG spells regex match with ~; the POSIX class works the same.
+		stmt = `DELETE FROM enroll_secrets WHERE secret ~ '^[[:space:]]*$'`
+	}
+	if _, err := tx.Exec(stmt); err != nil {
 		return fmt.Errorf("deleting empty enroll secrets: %w", err)
 	}
 	return nil
