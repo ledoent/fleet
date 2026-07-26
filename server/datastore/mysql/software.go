@@ -95,6 +95,10 @@ func softwareSliceToMap(softwareItems []fleet.Software) map[string]fleet.Softwar
 func (ds *Datastore) cacheKnownSoftwareTitleKey(key string) {
 	ds.knownSoftwareTitleKeysMu.Lock()
 	defer ds.knownSoftwareTitleKeysMu.Unlock()
+	// Lazily initialize: not every Datastore construction path goes through New().
+	if ds.knownSoftwareTitleKeys == nil {
+		ds.knownSoftwareTitleKeys = make(map[string]struct{})
+	}
 	if _, loaded := ds.knownSoftwareTitleKeys[key]; loaded {
 		return
 	}
@@ -3295,16 +3299,28 @@ func (ds *Datastore) HostsByCVE(ctx context.Context, cve string) ([]fleet.HostVu
 }
 
 func (ds *Datastore) InsertCVEMeta(ctx context.Context, cveMeta []fleet.CVEMeta) error {
-	query := `
-INSERT INTO cve_meta (cve, cvss_score, epss_probability, cisa_known_exploit, published, description)
-VALUES %s
-` + ds.dialect.OnDuplicateKey("cve", `
+	onDup := ds.dialect.OnDuplicateKey("cve", `
     cvss_score = VALUES(cvss_score),
     epss_probability = VALUES(epss_probability),
     cisa_known_exploit = VALUES(cisa_known_exploit),
     published = VALUES(published),
     description = VALUES(description)
 `)
+	if ds.dialect.IsPostgres() {
+		// Skip rewriting unchanged rows. MySQL's ON DUPLICATE KEY UPDATE is a
+		// no-op when the new values equal the old ones, but PG's DO UPDATE
+		// always writes a new row version (dead tuple + index churn). This
+		// bulk load re-upserts the full NVD set (~300k rows) every hour with
+		// mostly identical values, which bloats cve_meta and blows the load's
+		// context deadline without this guard.
+		onDup += `
+WHERE (cve_meta.cvss_score, cve_meta.epss_probability, cve_meta.cisa_known_exploit, cve_meta.published, cve_meta.description)
+    IS DISTINCT FROM (EXCLUDED.cvss_score, EXCLUDED.epss_probability, EXCLUDED.cisa_known_exploit, EXCLUDED.published, EXCLUDED.description)`
+	}
+	query := `
+INSERT INTO cve_meta (cve, cvss_score, epss_probability, cisa_known_exploit, published, description)
+VALUES %s
+` + onDup
 
 	batchSize := 500
 	for i := 0; i < len(cveMeta); i += batchSize {

@@ -360,7 +360,11 @@ func LoadCVEMeta(ctx context.Context, logger *slog.Logger, vulnPath string, ds f
 		meta = append(meta, score)
 	}
 
-	insertCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+	// The first-ever load (and any load after a long outage) inserts the full
+	// NVD set (~300k rows); 1 minute is not enough for that on all supported
+	// databases, and a load that never completes retries the full set every
+	// cron run without ever catching up.
+	insertCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	if err := ds.InsertCVEMeta(insertCtx, meta); err != nil {
 		return fmt.Errorf("insert cve meta: %w", err)
