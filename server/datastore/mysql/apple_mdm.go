@@ -420,7 +420,7 @@ WHERE profile_uuid = ? AND identifier = ?`
 		if len(labels) == 0 {
 			profWithoutLabels = append(profWithoutLabels, cp.ProfileUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profWithoutLabels, "darwin"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profWithoutLabels, "darwin"); err != nil {
 			return ctxerr.Wrap(ctx, err, "updating darwin profile label associations")
 		}
 
@@ -429,7 +429,7 @@ WHERE profile_uuid = ? AND identifier = ?`
 		// variable still clears the stale association. A labels-only update
 		// must leave them alone or variable-driven resends would break.
 		if len(cp.Mobileconfig) > 0 {
-			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, []fleet.MDMProfileUUIDFleetVariables{
+			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, []fleet.MDMProfileUUIDFleetVariables{
 				{ProfileUUID: cp.ProfileUUID, FleetVariables: usesFleetVars},
 			}, "darwin", false); err != nil {
 				return ctxerr.Wrap(ctx, err, "updating darwin profile variable associations")

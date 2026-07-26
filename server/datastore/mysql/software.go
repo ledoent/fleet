@@ -1059,6 +1059,22 @@ func (ds *Datastore) preInsertSoftwareInventory(
 		}
 	}
 
+	// Fetch FMA canonical names to override osquery-reported names for macOS apps.
+	// This ensures software titles use consistent names (e.g., "Microsoft Visual Studio Code"
+	// instead of "Code" which is what osquery reports for VS Code).
+	// Note: This call is made from the base datastore so it bypasses the cached_mysql layer.
+	// The query is simple (SELECT from the small fleet_maintained_apps table) so this is acceptable.
+	// The cached_mysql layer still caches this method for other callers (e.g., API endpoints).
+	fmaNames, fmaErr := ds.GetFMANamesByIdentifier(ctx)
+	if fmaErr != nil {
+		// Log but don't fail - we can still use osquery-reported names.
+		// A nil map is safe here since Go's map access on nil returns the zero value.
+		if ds.logger != nil {
+			ds.logger.WarnContext(ctx, "failed to get FMA names by identifier", "err", fmaErr)
+		}
+		fmaNames = nil
+	}
+
 	// Process in smaller batches to reduce lock time
 	err := common_mysql.BatchProcessSimple(keys, softwareInventoryInsertBatchSize, func(batchKeys []string) error {
 		batchSoftware := make(map[string]fleet.Software, len(batchKeys))
@@ -2890,6 +2906,26 @@ func (ds *Datastore) SoftwareByID(ctx context.Context, id uint, teamID *uint, in
 	}
 
 	return &software, nil
+}
+
+func (ds *Datastore) SoftwareLiteByID(
+	ctx context.Context,
+	id uint,
+) (fleet.SoftwareLite, error) {
+	const stmt = `
+    SELECT id, name, version
+    FROM software
+    WHERE id = ?
+  `
+	var results fleet.SoftwareLite
+	if err := sqlx.GetContext(ctx, ds.reader(ctx), &results, stmt, id); err != nil {
+		if err == sql.ErrNoRows {
+			return fleet.SoftwareLite{}, notFound("Software").WithID(id)
+		}
+		return fleet.SoftwareLite{}, ctxerr.Wrap(ctx, err, "get software version name for host filter")
+	}
+
+	return results, nil
 }
 
 // SyncHostsSoftware calculates the number of hosts having each

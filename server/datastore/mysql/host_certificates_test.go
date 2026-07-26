@@ -147,7 +147,7 @@ func testWindowsSCEPProfileVerification(t *testing.T, ds *Datastore) {
 	ackVerified := func(t *testing.T, h *fleet.Host, cmdUUID string) {
 		t.Helper()
 		verified := fleet.MDMDeliveryVerified
-		require.NoError(t, updateMDMWindowsHostProfileStatusFromResponseDB(ctx, ds.writer(ctx),
+		require.NoError(t, updateMDMWindowsHostProfileStatusFromResponseDB(ctx, ds.writer(ctx), ds.dialect,
 			[]*fleet.MDMWindowsProfilePayload{{HostUUID: h.UUID, CommandUUID: cmdUUID, Status: &verified}}))
 	}
 

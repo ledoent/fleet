@@ -13186,14 +13186,14 @@ func testListHostSoftwareSortByDisplayName(t *testing.T, ds *Datastore) {
 	//   bravo         -> ""            (empty string, NULLIF falls back to "bravo")
 	//   zzz-installer -> "AAA Script"  (should sort first despite filename)
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		if err := updateSoftwareTitleDisplayName(ctx, q, &team.ID, alphaID, "Zulu"); err != nil {
+		if err := updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, alphaID, "Zulu"); err != nil {
 			return err
 		}
 		// Explicitly set empty display name to exercise the NULLIF(display_name, '') fallback.
-		if err := updateSoftwareTitleDisplayName(ctx, q, &team.ID, bravoID, ""); err != nil {
+		if err := updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, bravoID, ""); err != nil {
 			return err
 		}
-		return updateSoftwareTitleDisplayName(ctx, q, &team.ID, scriptID, "AAA Script")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, scriptID, "AAA Script")
 	})
 
 	// List host software sorted by name ASC.
@@ -13729,11 +13729,11 @@ func testListHostSoftwareMultiplePackagesPrecedence(t *testing.T, ds *Datastore)
 	time.Sleep(time.Second)
 
 	// Scope each package to its label (include-any).
-	require.NoError(t, setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), firstAddedID, fleet.LabelIdentsWithScope{
+	require.NoError(t, setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, firstAddedID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName:     map[string]fleet.LabelIdent{labelA.Name: {LabelName: labelA.Name, LabelID: labelA.ID}},
 	}, softwareTypeInstaller))
-	require.NoError(t, setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), secondID, fleet.LabelIdentsWithScope{
+	require.NoError(t, setOrUpdateSoftwareInstallerLabelsDB(ctx, ds.writer(ctx), ds.dialect, secondID, fleet.LabelIdentsWithScope{
 		LabelScope: fleet.LabelScopeIncludeAny,
 		ByName:     map[string]fleet.LabelIdent{labelB.Name: {LabelName: labelB.Name, LabelID: labelB.ID}},
 	}, softwareTypeInstaller))

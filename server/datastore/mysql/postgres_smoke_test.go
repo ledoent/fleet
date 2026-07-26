@@ -396,7 +396,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 
 	// --- ListPolicies ---
 	t.Run("ListGlobalPolicies", func(t *testing.T) {
-		policies, err := ds.ListGlobalPolicies(ctx, fleet.ListOptions{})
+		policies, err := ds.ListGlobalPolicies(ctx, fleet.ListOptions{}, "")
 		if err != nil {
 			t.Logf("FAIL ListGlobalPolicies: %v", err)
 			return
@@ -573,9 +573,9 @@ func TestPostgresMDMCleanupQueries(t *testing.T) {
 		require.NoError(t, err, "GetHostCertAssociationsToExpire")
 	})
 
-	t.Run("CleanupWindowsMDMPendingDeleteProfiles", func(t *testing.T) {
-		require.NoError(t, ds.CleanupWindowsMDMPendingDeleteProfiles(ctx),
-			"CleanupWindowsMDMPendingDeleteProfiles")
+	t.Run("CleanupWindowsMDMProfilePriorContent", func(t *testing.T) {
+		require.NoError(t, ds.CleanupWindowsMDMProfilePriorContent(ctx),
+			"CleanupWindowsMDMProfilePriorContent")
 	})
 
 	t.Run("MDMWindowsDeleteEnrolledDeviceOnReenrollment", func(t *testing.T) {

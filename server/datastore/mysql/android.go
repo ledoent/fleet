@@ -679,7 +679,7 @@ INSERT INTO
 		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profsWithoutLabel, "android"); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting android profile label associations")
 		}
-		if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, []fleet.MDMProfileUUIDFleetVariables{
+		if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, []fleet.MDMProfileUUIDFleetVariables{
 			{ProfileUUID: profileUUID, FleetVariables: usesFleetVars},
 		}, "android", false); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting android profile variable associations")
@@ -775,7 +775,7 @@ func (ds *Datastore) UpdateMDMAndroidConfigProfile(ctx context.Context, cp fleet
 			// unconditionally, so an edit that removes the profile's last Fleet
 			// variable still clears the stale association. A labels-only update
 			// must leave them alone or variable-driven redelivery would break.
-			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, []fleet.MDMProfileUUIDFleetVariables{
+			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, []fleet.MDMProfileUUIDFleetVariables{
 				{ProfileUUID: cp.ProfileUUID, FleetVariables: usesFleetVars},
 			}, "android", false); err != nil {
 				return ctxerr.Wrap(ctx, err, "updating android profile variable associations")
@@ -805,7 +805,7 @@ func (ds *Datastore) UpdateMDMAndroidConfigProfile(ctx context.Context, cp fleet
 		if len(labels) == 0 {
 			profsWithoutLabel = append(profsWithoutLabel, cp.ProfileUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profsWithoutLabel, "android"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profsWithoutLabel, "android"); err != nil {
 			return ctxerr.Wrap(ctx, err, "updating android profile label associations")
 		}
 

@@ -2382,7 +2382,7 @@ func testSoftwareTitleNameForHostFilter(t *testing.T, ds *Datastore) {
 
 	// A team's display_name override takes precedence over the title name.
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		return updateSoftwareTitleDisplayName(ctx, q, &team1.ID, titleID, "Team1 Custom Name")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team1.ID, titleID, "Team1 Custom Name")
 	})
 	name, displayName, err = ds.SoftwareTitleNameForHostFilter(ctx, titleID, &team1.ID, team1Filter)
 	require.NoError(t, err)

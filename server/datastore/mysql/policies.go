@@ -382,7 +382,7 @@ func (ds *Datastore) ResetPolicy(ctx context.Context, policyID uint) error {
 		}
 		// removeAllMemberships=true, removePolicyStats=true; platform is unused
 		// when removing all memberships, so "" is fine.
-		return cleanupPolicy(ctx, tx, tx, policyID, "", true, true, ds.logger)
+		return cleanupPolicy(ctx, tx, tx, policyID, "", true, true, ds.logger, ds.dialect)
 	}); err != nil {
 		return ctxerr.Wrap(ctx, err, "resetting policy")
 	}

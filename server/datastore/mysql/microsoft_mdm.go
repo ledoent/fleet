@@ -2868,7 +2868,7 @@ func (ds *Datastore) UpdateMDMWindowsConfigProfile(ctx context.Context, cp fleet
 			// edited away from OS-update content must stop blocking the team's
 			// OS updates setting.
 			if bytes.Contains(cp.SyncML, []byte(syncml.FleetOSUpdateTargetLocURI)) {
-				if err := trackWindowsUpdateConfigProfileDB(ctx, tx, teamID, cp.ProfileUUID); err != nil {
+				if err := trackWindowsUpdateConfigProfileDB(ctx, tx, ds.dialect, teamID, cp.ProfileUUID); err != nil {
 					return err
 				}
 			} else if err := untrackWindowsUpdateConfigProfileDB(ctx, tx, cp.ProfileUUID); err != nil {
@@ -2879,7 +2879,7 @@ func (ds *Datastore) UpdateMDMWindowsConfigProfile(ctx context.Context, cp fleet
 			// unconditionally, so an edit that removes the profile's last Fleet
 			// variable still clears the stale association. A labels-only update
 			// must leave them alone or variable-driven resends would break.
-			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, []fleet.MDMProfileUUIDFleetVariables{
+			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, []fleet.MDMProfileUUIDFleetVariables{
 				{ProfileUUID: cp.ProfileUUID, FleetVariables: usesFleetVars},
 			}, "windows", false); err != nil {
 				return ctxerr.Wrap(ctx, err, "updating windows profile variable associations")
@@ -2909,7 +2909,7 @@ func (ds *Datastore) UpdateMDMWindowsConfigProfile(ctx context.Context, cp fleet
 		if len(labels) == 0 {
 			profsWithoutLabel = append(profsWithoutLabel, cp.ProfileUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profsWithoutLabel, "windows"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profsWithoutLabel, "windows"); err != nil {
 			return ctxerr.Wrap(ctx, err, "updating windows profile label associations")
 		}
 
