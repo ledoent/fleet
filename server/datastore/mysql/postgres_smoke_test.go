@@ -623,6 +623,30 @@ func TestPostgresAndroidProfileUpsert(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+// TestPostgresBelowMarkerDriftCheck regression-covers the rebase backstop: a
+// migration numbered below the baseline marker with no applied record (an
+// upstream migration authored before the baseline was generated but merged
+// after) must fail prepare loudly instead of being silently skipped forever.
+func TestPostgresBelowMarkerDriftCheck(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+	marker := parsePGBaselineMarker(pgBaselineSchemaSQL)
+	require.NotZero(t, marker)
+
+	require.NoError(t, ds.checkPGBelowMarkerDrift(ctx, marker), "fully-seeded DB must pass")
+
+	// Simulate the back-dated-migration hole by removing one applied record.
+	var victim int64
+	require.NoError(t, ds.primary.Get(&victim,
+		`SELECT version_id FROM migration_status_tables WHERE is_applied ORDER BY version_id LIMIT 1`))
+	_, err := ds.primary.Exec(`DELETE FROM migration_status_tables WHERE version_id = $1`, victim)
+	require.NoError(t, err)
+
+	err = ds.checkPGBelowMarkerDrift(ctx, marker)
+	require.Error(t, err, "missing below-marker record must error")
+	require.Contains(t, err.Error(), "PG migration drift")
+}
+
 // TestPostgresDBDiagnostics regression-covers DBLocks and InnoDBStatus on PG:
 // the driver used to blanket-replace any query mentioning "innodb" with
 // SELECT 1, which broke both methods' row scanning. They now have explicit

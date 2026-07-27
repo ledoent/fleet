@@ -660,10 +660,12 @@ func (ds *Datastore) MigrateTables(ctx context.Context) error {
 }
 
 func (ds *Datastore) MigrateData(ctx context.Context) error {
-	if ds.dialect.IsPostgres() {
-		// PG baseline schema includes all data migrations (label seeds, etc.)
-		return nil
-	}
+	// On PG this runs through the rebind driver like table migrations. The
+	// baseline seeding marks every data migration <= the baseline marker as
+	// applied (their effects are embedded in the baseline), so goose only
+	// executes newer ones. An unconditional no-op here would leave
+	// MigrationStatus (which still checks data migrations) reporting pending
+	// forever, wedging `fleet serve` on the first post-marker data migration.
 	return data.MigrationClient.Up(ds.writer(ctx).DB, "")
 }
 
@@ -725,13 +727,60 @@ func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
 	if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselinePostSQL); err != nil {
 		return ctxerr.Wrap(ctx, err, "applying PG post-baseline fixups")
 	}
-	if freshApply {
-		if err := ds.seedPGMigrationHistory(ctx, marker); err != nil {
-			return ctxerr.Wrap(ctx, err, "seeding PG migration history")
+	// Seed unconditionally, not only on freshApply: an operator who loaded
+	// the baseline via psql has `hosts` present but an empty tracking table,
+	// and skipping the seed would make goose replay every migration against a
+	// fully-populated schema. seedPGMigrationTable's own empty-table guard
+	// makes this a no-op everywhere else.
+	if err := ds.seedPGMigrationHistory(ctx, marker); err != nil {
+		return ctxerr.Wrap(ctx, err, "seeding PG migration history")
+	}
+	if !freshApply {
+		// Rebase backstop: upstream assigns migration timestamps at authoring
+		// time and merges later, so a rebase can introduce a migration
+		// numbered BELOW the marker. On a fresh apply the seed covers it (its
+		// DDL is in the regenerated baseline), but on an existing database it
+		// would otherwise be recorded as applied without ever running.
+		if err := ds.checkPGBelowMarkerDrift(ctx, marker); err != nil {
+			return err
 		}
 	}
 	ds.warnPGMigrationDrift(ctx, marker)
 	return nil
+}
+
+// checkPGBelowMarkerDrift errors when the running code carries a table
+// migration with version <= the baseline marker that the database has no
+// applied record of. This happens when a rebase pulls in an upstream
+// migration that was authored (timestamped) before the current baseline was
+// generated: its DDL is in neither the baseline nor the applied history, and
+// silently seeding it as applied would hide a real schema gap.
+func (ds *Datastore) checkPGBelowMarkerDrift(ctx context.Context, marker int64) error {
+	if marker == 0 {
+		return nil
+	}
+	var applied []int64
+	if err := ds.writer(ctx).SelectContext(ctx, &applied,
+		`SELECT DISTINCT version_id FROM migration_status_tables WHERE is_applied`); err != nil {
+		return ctxerr.Wrap(ctx, err, "loading applied PG migration history")
+	}
+	appliedSet := make(map[int64]struct{}, len(applied))
+	for _, v := range applied {
+		appliedSet[v] = struct{}{}
+	}
+	var missing []int64
+	for _, v := range versionsAtOrBelow(tables.MigrationClient.Migrations, marker) {
+		if _, ok := appliedSet[v]; !ok {
+			missing = append(missing, v)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return ctxerr.Errorf(ctx,
+		"PG migration drift: %d migration(s) below the baseline marker %d were never applied to this database (oldest %d, newest %d); "+
+			"a rebase likely introduced back-dated upstream migrations. Port their DDL in a new post-marker migration (or regenerate the baseline) before deploying",
+		len(missing), marker, missing[0], missing[len(missing)-1])
 }
 
 // seedPGMigrationHistory populates migration_status_tables and migration_status_data
