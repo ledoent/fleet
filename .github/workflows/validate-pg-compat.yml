@@ -197,7 +197,10 @@ jobs:
         if: always()
         run: |
           set +e
-          matches=$(grep -rEn 't\.Skip\("TODO B1 \(#[0-9]+\)' server/datastore/mysql/ 2>/dev/null)
+          # PG-specific skips use the isPG(ds) helper, not a TODO-string
+          # convention (the old grep matched nothing and reported Total: 0
+          # forever).
+          matches=$(grep -rEn 'isPG\(ds\)' server/datastore/mysql/ --include='*_test.go' 2>/dev/null)
           count=$(printf '%s' "$matches" | grep -c . || true)
           {
             echo "## PG test skip ledger"

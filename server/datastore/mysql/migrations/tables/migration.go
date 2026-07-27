@@ -24,7 +24,7 @@ func SetDialect(driver string) {
 	if err := MigrationClient.SetDialect(driver); err != nil {
 		panic(fmt.Sprintf("migrations/tables: unsupported dialect %q: %v", driver, err))
 	}
-	if driver == "postgres" || driver == "pgx" {
+	if driver == "postgres" {
 		defaultMigrationHelper = pgMigrationHelper{}
 	} else {
 		defaultMigrationHelper = mysqlMigrationHelper{}
@@ -351,6 +351,9 @@ WHERE
 	return count > 0
 }
 
+// indexExists is used only by MySQL migration tests (which run against a real
+// MySQL via applyUpToPrev); it intentionally queries INFORMATION_SCHEMA.
+// Migration CODE must use the dialect-aware indexExistsTx instead.
 func indexExists(tx *sqlx.DB, table, index string) bool {
 	var count int
 	err := tx.QueryRow(`

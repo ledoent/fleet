@@ -179,10 +179,16 @@ func (postgresDialect) FindInSet(needle, col string) string {
 	return fmt.Sprintf("%s = ANY(string_to_array(%s, ','))", needle, col)
 }
 
-// FullTextMatch builds: to_tsvector('english', <col>) @@ plainto_tsquery('english', <query>)
-// PostgreSQL's to_tsvector takes a single column expression.
+// FullTextMatch builds: to_tsvector('english', <expr>) @@ plainto_tsquery('english', <query>)
+// Multi-column MATCH() is supported by concatenating the columns into one
+// tsvector expression — silently dropping cols[1:] would search a narrower
+// corpus than the MySQL fulltext index the caller mirrors.
 func (postgresDialect) FullTextMatch(cols []string, query string) string {
-	return fmt.Sprintf("to_tsvector('english', %s) @@ plainto_tsquery('english', %s)", cols[0], query)
+	expr := cols[0]
+	if len(cols) > 1 {
+		expr = "concat_ws(' ', " + strings.Join(cols, ", ") + ")"
+	}
+	return fmt.Sprintf("to_tsvector('english', %s) @@ plainto_tsquery('english', %s)", expr, query)
 }
 
 // RegexpMatch builds: <col> ~ <pattern>

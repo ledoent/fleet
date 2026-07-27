@@ -35,6 +35,14 @@ The following terms were recently renamed. Use the new terms in conversation and
 
 Go and API conventions (ctxerr error wrapping, error types, request/response structs, auth, slog, `new(expression)` pointers, endpoint registration) auto-load from `.claude/rules/` when you edit matching files — see `rules/fleet-go-backend.md`, `rules/fleet-api.md`, and `rules/fleet-database.md`. Reference example: `server/service/vulnerabilities.go`.
 
+## Writing migrations
+
+- Bulk UPDATE/DELETE steps in migrations must be batched (see
+  `incrementalMigrationStep` in `migrations/tables/`) — an unbatched
+  full-table statement holds locks for the whole run on large deployments.
+- Avoid MySQL-only `UPDATE/DELETE ... LIMIT n`; use a keyed-subquery batch
+  (the PG driver rejects the LIMIT form).
+
 ## Before writing a fix
 
 - Identify WHERE in the request lifecycle the problem manifests (creation vs team-addition vs sync vs query). Fix it there, not at the reproduction step.

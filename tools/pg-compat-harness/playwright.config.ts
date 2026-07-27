@@ -1,6 +1,11 @@
 import { defineConfig } from "@playwright/test";
 
-const BASE_URL = process.env.FLEET_URL ?? "https://fleet.hz.ledoweb.com";
+// FLEET_URL is required: defaulting to the production instance made a bare
+// `yarn test` exercise prod.
+const BASE_URL = process.env.FLEET_URL;
+if (!BASE_URL) {
+  throw new Error("FLEET_URL must be set (e.g. FLEET_URL=https://localhost:8080)");
+}
 
 export default defineConfig({
   testDir: "./tests",
