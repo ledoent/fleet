@@ -120,6 +120,16 @@ swallowed-error → bootstrap-row → replay-every-migration failure mode on MyS
 `.gitignore`; the 393 KB results file is a stale 2026-05-13 run). If any of its 32
 recorded failures are still real, list them here as tracked items instead.
 
+> **Prod deploy note (2026-07-27):** the first run of migration 20260727150000
+> failed with `must be owner of table acme_accounts` — nine prod tables
+> (acme_*, host_managed_local_account_passwords, in_house_app_configurations,
+> user_api_endpoints, vpp_app_configurations) were owned by `postgres` from a
+> manual psql baseline load; `pg_baseline_post.sql`'s ownership fixups run as
+> `fleet` and cannot reclaim them. Fixed with `ALTER TABLE … OWNER TO fleet`
+> as superuser. Phase 3 item: ownership fixups must run as a superuser step or
+> the smoke test must assert ownership (it does for fresh installs, not for
+> prod).
+
 ### Phase 1 exit criteria
 - All new/changed tests green under `POSTGRES_TEST=1` locally and in CI; MySQL suite
   (`TestHosts`, mdm/android/vpp/policies upsert tests) green to prove no MySQL drift.
