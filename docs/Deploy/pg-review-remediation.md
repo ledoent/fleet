@@ -329,3 +329,50 @@ are correctness and hygiene. Exit is a full re-run of the adversarial review.
    (every finding: fixed / allowlisted-with-reason / did-not-reproduce).
 3. Re-run the adversarial review (bugbot-style, same scope) and triage its
    findings to zero must-fix — the original goal: an AI review that passes.
+
+---
+
+## Findings reconciliation (final, 2026-07-28)
+
+Every finding from the 2026-07-27 adversarial review, dispositioned:
+
+| # | Finding | Disposition |
+|---|---------|-------------|
+| 1 | insertOnDuplicateDidInsertOrUpdate always true on PG | **Fixed** (P1.3, OnDuplicateKeyGuarded + 8 sites) |
+| 2 | Android profile upsert wrong conflict target | **Fixed** (P1.4; same class found+fixed in apple declarations) |
+| 3 | SCEP renewal discriminator broken on PG | **Fixed** (P1.5, UPDATE…FROM VALUES) |
+| 4 | Generated columns never maintained on PG | **Fixed** (P2.4, triggers + backfill, prod-verified) |
+| 5 | 35 silent no-op indexes in parity migration | **Fixed** (P2.2, 41 indexes; count corrected by validator diff) |
+| 6 | Multiple custom packages per title blocked on PG | **Fixed** (P2.3, constraint verified live on prod then dropped) |
+| 7 | ACME revoked smallint vs boolean | **Fixed** (P1.6 migration) |
+| 8 | FOR UPDATE stripped from claim query | **Open — accepted risk** (single-replica deployment; revisit before HA) |
+| 9 | goose MySQL IF NOT EXISTS regression | **Fixed** (P1.7 revert + test) |
+| 10 | Smoke tests cannot fail | **Fixed** (P1.1; immediately surfaced 3 more bugs) |
+| 11 | CI gate scope | **Fixed for driver/branch/pin/docs** (P1.2); full dual-dialect suite remains Phase 4 (stretch) |
+| 12 | check_primary_keys false confidence (columns/attribution/scope) | **Fixed** (P3.3 + negative tests) |
+| 13 | No constraint/FK drift validator; divergences | **Fixed** (P2.1 validator; idx_unique_os + profile-label FKs in P2.5; 160 FKs deferred via allowlist — see below) |
+| 14 | AtomicTableSwap index-name accretion | **Fixed** (P2.6 + prod cleanup migration; swap-cycle stability test) |
+| 15 | Seeding blind spots | **Fixed** (P3.2: unconditional seed, below-marker backstop, MigrateData reconciled) |
+| 16 | pg_baseline_post drop windows | **Fixed** (P3.2: DO-block view, CREATE OR REPLACE TRIGGER) |
+| 17 | DELETE…LIMIT silently unbatched | **Fixed** (P3.1: sites rewritten, driver now errors) |
+| 18 | innodb/sql_mode query swallowing | **Fixed** (P3.1: anchored + dialect-aware DBLocks/InnoDBStatus) |
+| 19 | gen_identity_cols wrong source | **Fixed** (P3.3; surfaced real host_scd_data gap) |
+| 20 | bool/smallint split unbounded | **Fixed** (P3.3 check_bool_col_split validator) |
+| 21 | IsReadOnly dead code on PG | **Fixed** (P3.4: SQLSTATE 25006 in IsReadOnlyError, all call sites) |
+| 22 | Untested safety-critical rewrites | **Fixed** (P3.1: boundary-anchored rewrite + tests for both transforms) |
+| 23 | Committed test artifacts | **Fixed** (P1.8) |
+| 24 | Unrelated bundled changes | **Accepted** (CISA user-agent + deadline are deliberate fork features, now documented in PR body) |
+| 25 | Migration lock-hold times | **Accepted** (flagged migrations are pre-marker/never re-run; batching convention added to CLAUDE.md) |
+
+Review claims that did not reproduce under mechanical checking: the four
+"dropped UNIQUEs" (locks/tokens/nano user_id) exist on prod and in the
+baseline; windows_mdm_command_results has its composite PK (map entry was
+wrong but dormant — fixed anyway).
+
+Deferred with rationale: 160 foreign keys (check_constraint_drift allowlist;
+adopting them is mechanical but a large orphan-cleanup migration — separate
+follow-up), full dual-dialect test suite (Phase 4), FOR UPDATE strip
+(finding 8, single-replica prod).
+
+Nits: all addressed in P3.5 except execWithReturning per-row materialization
+cost (accepted: correctness first; unmeasured at this deployment's scale).
