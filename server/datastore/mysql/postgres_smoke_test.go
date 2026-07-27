@@ -632,3 +632,34 @@ func TestPostgresInsertCVEMeta(t *testing.T) {
 	require.InDelta(t, 8.1, *got.CVSSScore, 0.001)
 	require.Equal(t, "first-updated", got.Description)
 }
+
+// TestPostgresGetHostMDM regression-covers the connected_to_fleet CASE in
+// GetHostMDM: its branches must all be boolean on PG (EXISTS mixed with 1/0
+// integer literals fails with "CASE types integer and boolean cannot be
+// matched"). Seen live on /api/fleet/orbit/config after the 2026-07 rebase.
+func TestPostgresGetHostMDM(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	host, err := ds.NewHost(ctx, &fleet.Host{
+		OsqueryHostID:   new("pg-mdm-info-host"),
+		NodeKey:         new("pg-mdm-info-key"),
+		UUID:            "pg-mdm-info-uuid",
+		Hostname:        "pg-mdm-info",
+		Platform:        "darwin",
+		DetailUpdatedAt: time.Now(),
+		LabelUpdatedAt:  time.Now(),
+		PolicyUpdatedAt: time.Now(),
+		SeenTime:        time.Now(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, ds.SetOrUpdateMDMData(ctx, host.ID,
+		false, true, "https://fleet.example.com", true, fleet.WellKnownMDMFleet, "", false))
+
+	hmdm, err := ds.GetHostMDM(ctx, host.ID)
+	require.NoError(t, err, "GetHostMDM")
+	require.True(t, hmdm.Enrolled)
+	// Enrolled in host_mdm but no active nano enrollment row exists.
+	require.False(t, hmdm.ConnectedToFleet)
+}

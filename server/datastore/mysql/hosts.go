@@ -5379,19 +5379,19 @@ func (ds *Datastore) GetHostMDM(ctx context.Context, hostID uint) (*fleet.HostMD
 			COALESCE(mdms.name, ?) AS name,
 			hdep.assign_profile_response AS dep_profile_assign_status,
 			CASE
-				WHEN hm.enrolled = 1 AND h.platform = 'windows' THEN EXISTS (
+				WHEN hm.enrolled = true AND h.platform = 'windows' THEN EXISTS (
 					SELECT 1 FROM mdm_windows_enrollments mwe
 					WHERE mwe.host_uuid = h.uuid
 					AND mwe.device_state = '`+microsoft_mdm.MDMDeviceStateEnrolled+`'
 				)
-				WHEN hm.enrolled = 1 AND h.platform IN ('ios', 'ipados', 'darwin') THEN EXISTS (
+				WHEN hm.enrolled = true AND h.platform IN ('ios', 'ipados', 'darwin') THEN EXISTS (
 					SELECT 1 FROM nano_enrollments ne
 					WHERE ne.id = h.uuid
-					AND ne.enabled = 1
+					AND ne.enabled = true
 					AND ne.type IN ('Device', 'User Enrollment (Device)')
 				)
-				WHEN hm.enrolled = 1 AND h.platform = 'android' THEN 1
-				ELSE 0
+				WHEN hm.enrolled = true AND h.platform = 'android' THEN true
+				ELSE false
 			END AS connected_to_fleet
 		FROM
 			host_mdm hm
