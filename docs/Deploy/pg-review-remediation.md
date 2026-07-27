@@ -241,20 +241,91 @@ batched); 2.6 independent of migrations; 2.7 last, single rollout. Finding 25
 (migration batching hygiene) becomes a convention note in CLAUDE.md rather than
 retrofits — the flagged migrations are pre-marker and no longer execute.
 
-## Phase 3 — validators + driver hardening (sketch)
+## Phase 3 — execution plan (driver hardening + validator completion)
 
-- Constraint-parity validator: PK/UNIQUE/index/FK sets, `schema.sql` vs baseline, with
-  an explicit allowlist (finding 13). Conflict-target column check + AST-based (not
-  proximity-based) table attribution + walk `ee/`, `cmd/`, `tools/` in
-  `check_primary_keys`; negative tests (finding 12).
-- Seeding: unconditional `seedPGMigrationHistory`; error on below-marker unknown
-  migrations; reconcile `MigrateData` no-op vs `MigrationStatus` (finding 15).
-- Transactional `pg_baseline_post.sql` blocks (finding 16).
-- Driver: fail loudly on `DELETE … LIMIT` (finding 17); anchor the innodb/sql_mode
-  no-op rewrite on leading `SET`/`SHOW` (finding 18); word-boundary bool rewrites +
-  tests for `rewriteBoolComparisons` and `rewriteOnDuplicateKey` (finding 22).
-- `gen_identity_cols` reads `schema.sql`; CI staleness check (finding 19).
-- Bool/smallint split validator (finding 20). Wire `DialectHelper.IsReadOnly` into
-  `sessions.go` (finding 21).
-- Docs truth pass + the remaining nits (dead code, `FullTextMatch`, playwright BASE_URL,
-  docker-compose parity, `activities`/`activity_past` audit).
+The constraint-parity validator planned here was pulled forward into Phase 2
+(check_constraint_drift). What remains splits into five workstreams; 3.1 and
+3.2 remove silent-corruption modes, 3.3 completes the validator story, 3.4/3.5
+are correctness and hygiene. Exit is a full re-run of the adversarial review.
+
+### 3.1 Driver hardening — no silent semantic changes (findings 17, 18, 22 + scanner nits)
+- `DELETE … LIMIT n`: stop stripping. Convert the two known sites
+  (`in_house_apps.go:1848`, `statistics.go:256`) to the tuple-IN batching
+  pattern already used in `microsoft_mdm.go:3434`, then make the driver ERROR
+  on any remaining `DELETE … LIMIT` instead of silently unbatching.
+- innodb/sql_mode wholesale `SELECT 1` replacement: anchor on leading
+  `SET`/`SHOW`; give `DBLocks`/`InnoDBStatus` (locks.go) explicit
+  dialect-aware implementations instead of relying on the rewrite; a matching
+  DML statement must error, not no-op.
+- Bool-column rewrite: word-boundary anchoring (the `\b` treatment
+  `smallintBoolPatterns` already has) so suffix collisions
+  (`num_canceled`/`canceled`, `*_encrypted`/`encrypted`) can't mis-rewrite.
+  Table-driven tests for `rewriteBoolComparisons` AND `rewriteOnDuplicateKey`
+  (currently zero tests for the two most safety-critical transforms).
+- `rewriteOnDuplicateKey` unknown-table fallback: return a descriptive error
+  instead of emitting invalid `ON CONFLICT DO UPDATE SET` SQL.
+- `?`→`$N` scanner: skip single-quoted literals ('' escapes) and `/* */`
+  comments so a literal `?` can't shift every later ordinal; same for
+  `splitTopLevel`.
+- `PrepareContext`: apply the RETURNING rewrite (prepared identity-table
+  inserts currently get `LastInsertId()==0` silently — docs list it as a known
+  failure) or reject with a clear error.
+
+### 3.2 Migration-runner robustness (findings 15, 16 + Phase-1 ownership note)
+- `seedPGMigrationHistory`: call unconditionally (the empty-table guard inside
+  already makes it idempotent); the freshApply gate skips seeding when an
+  operator loaded the baseline via psql → goose replays everything.
+- Detect upstream migrations numbered BELOW the marker (authored-then-merged
+  late, cf. /bump-migration): error at prepare time instead of silently
+  recording them as applied. This is the rebase-safety backstop.
+- Reconcile `MigrateData` (unconditional no-op on PG) with `MigrationStatus`
+  (still checks it): first upstream data-migration above the marker must not
+  wedge `serve`.
+- `pg_baseline_post.sql`: wrap each drop/recreate pair (nano_view_queue,
+  software_titles trigger) in BEGIN…COMMIT; fix the "runs on every startup"
+  header comment.
+- Ownership: fresh-install smoke asserts every table is owned by `fleet`;
+  runbook note for the superuser fixup on existing DBs.
+
+### 3.3 Validator completion (findings 12b/c, 19, 20)
+- `check_primary_keys`: (a) verify each entry's columns against a real
+  PK/UNIQUE in the baseline (catches 42P10 at CI time — the two bad entries
+  Phase 2 fixed would have been caught); (b) function-scoped statement
+  attribution instead of nearest-INSERT-within-8KB; (c) walk `ee/`, `cmd/`,
+  `tools/`; (d) negative tests for all three.
+- `gen_identity_cols`: read `schema.sql` (which upstream regenerates every
+  migration) instead of the PG baseline, so a post-baseline AUTO_INCREMENT
+  table can't silently miss RETURNING. (CI staleness check landed in Phase 2.)
+- New `check_bool_col_split`: fail when a column name appears with both
+  boolean and smallint types across tables (the `awaiting_configuration` /
+  `revoked` class), since the rewrites key on bare column names.
+
+### 3.4 Datastore correctness (finding 21 + activities audit)
+- Wire `DialectHelper.IsReadOnly` into `sessions.go:216` (and audit other
+  `common_mysql.IsReadOnlyError` callers) so PG failover fails fast.
+- `activities`/`activity_past` audit: confirm prod history isn't stranded in
+  the pre-rename tables that `known_schema_diff.txt` mislabels "PG-only";
+  migrate data or correct the allowlist comments accordingly.
+
+### 3.5 Hygiene + docs truth pass (nits)
+- `FullTextMatch`: enforce single-column or implement multi-column.
+- `JSONAgg` doc vs jsonb_agg implementation; `STRAIGHT_JOIN` and
+  `knownBooleanColumns` references in docs/Deploy/postgresql.md.
+- Dead code: `AddDualDialectMigration`, unreachable `driver == "pgx"` branch,
+  MySQL-only `indexExists` (make dialect-aware like `indexExistsTx`).
+- validate-pg-compat.yml B1-skip grep (permanently reports Total: 0) → count
+  `isPG(ds)` skips instead.
+- `tools/pg-compat-harness/playwright.config.ts`: BASE_URL required (bare
+  `yarn test` currently targets prod).
+- docker-compose: align dev `postgres` image with `postgres_test`
+  (musl-vs-glibc collation differences; there is a collation_test.go).
+- CLAUDE.md convention note: batch bulk migration UPDATEs / avoid
+  full-table locks (finding 25's residue).
+
+### 3.6 Exit
+1. All suites + all validators green; prod deploy of the hardened image;
+   post-deploy log soak.
+2. PR #6 body updated to final state; this doc's findings table reconciled
+   (every finding: fixed / allowlisted-with-reason / did-not-reproduce).
+3. Re-run the adversarial review (bugbot-style, same scope) and triage its
+   findings to zero must-fix — the original goal: an AI review that passes.
