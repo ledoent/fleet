@@ -83,6 +83,7 @@ type skipped struct {
 // Pulled out of main() so unit tests can drive it directly with string
 // fixtures.
 func translate(r *bufio.Scanner) (emits []emitted, skips []skipped, err error) {
+	usedNames := map[string]bool{}
 	r.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	currentTable := ""
 	for r.Scan() {
@@ -156,9 +157,31 @@ func translate(r *bufio.Scanner) (emits []emitted, skips []skipped, err error) {
 		if kind == "UNIQUE" {
 			unique = "UNIQUE "
 		}
+		// PG index names are schema-scoped: MySQL's per-table names (status,
+		// label_id, command_uuid, …) collide across tables and IF NOT EXISTS
+		// silently no-ops every collision after the first. Prefix with the
+		// table name unless already prefixed; PG truncates identifiers at 63
+		// bytes, so trim from the left of the original name if needed.
+		pgName := name
+		if !strings.Contains(name, currentTable) {
+			pgName = "idx_" + currentTable + "_" + strings.TrimPrefix(name, "idx_")
+			if len(pgName) > 63 {
+				pgName = pgName[:63]
+			}
+		}
+		// 63-byte truncation can itself collide; disambiguate with a suffix.
+		for i := 2; usedNames[pgName]; i++ {
+			suffix := fmt.Sprintf("_%d", i)
+			base := pgName
+			if len(base)+len(suffix) > 63 {
+				base = base[:63-len(suffix)]
+			}
+			pgName = base + suffix
+		}
+		usedNames[pgName] = true
 		stmt := fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s);",
-			unique, quoteIdent(name), quoteIdent(currentTable), colsPG)
-		emits = append(emits, emitted{stmt: stmt, table: currentTable, name: name})
+			unique, quoteIdent(pgName), quoteIdent(currentTable), colsPG)
+		emits = append(emits, emitted{stmt: stmt, table: currentTable, name: pgName})
 	}
 	return emits, skips, r.Err()
 }

@@ -149,3 +149,36 @@ func TestColumnDriftValidator_PassesWithRealAllowlist(t *testing.T) {
 		t.Fatalf("expected OK prefix, got: %s", out)
 	}
 }
+
+func TestConstraintDriftValidator_FailsOnEmptyAllowlist(t *testing.T) {
+	root := repoRoot(t)
+	tmp := t.TempDir()
+	empty := filepath.Join(tmp, "allowlist.txt")
+	if err := os.WriteFile(empty, []byte("# intentionally empty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("go", "run", "./tools/pgcompat/check_constraint_drift",
+		"-allowlist", empty)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit with empty allowlist (FK drift is deferred, so drift exists), got success.\nOutput: %s", out)
+	}
+	if !strings.Contains(string(out), "missing from PG baseline") {
+		t.Fatalf("expected drift diagnostic in output, got: %s", out)
+	}
+}
+
+func TestConstraintDriftValidator_PassesWithRealAllowlist(t *testing.T) {
+	root := repoRoot(t)
+	cmd := exec.Command("go", "run", "./tools/pgcompat/check_constraint_drift")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("validator failed against checked-in inputs: %v\nOutput: %s", err, out)
+	}
+	if !strings.HasPrefix(string(out), "OK:") {
+		t.Fatalf("expected OK prefix, got: %s", out)
+	}
+}

@@ -306,8 +306,10 @@ dump-test-schema: test-schema
 #      (intentional drift is recorded in tools/pgcompat/known_column_drift.txt).
 check-pg-compat:
 	go run ./tools/pgcompat/check_primary_keys
+	go run ./tools/pgcompat/check_primary_keys --include-migrations
 	go run ./tools/pgcompat/check_schema_drift
 	go run ./tools/pgcompat/check_column_drift
+	go run ./tools/pgcompat/check_constraint_drift
 	go test -count=1 -timeout 120s ./tools/pgcompat/
 .PHONY: check-pg-compat
 

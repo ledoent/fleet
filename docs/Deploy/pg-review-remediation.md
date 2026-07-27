@@ -143,6 +143,20 @@ recorded failures are still real, list them here as tracked items instead.
 
 ## Phase 2 — execution plan (schema repair)
 
+> **Status 2026-07-27: code COMPLETE; prod rollout pending.** All of 2.1–2.6
+> landed: check_constraint_drift validator (in CI + make check-pg-compat, with
+> a 163-FK deferral allowlist), migrations 20260727170000–170400 (41 missing
+> indexes incl. two expression indexes, software_installers constraint drop,
+> generated-column triggers + backfill, OS unique + profile-label cascades,
+> swap-name canonicalization), AtomicTableSwap now drops the old table and
+> canonicalizes index/sequence names each cycle, knownPrimaryKeys corrected,
+> pg-index-translate emits prefixed deduped names, baseline regenerated
+> (marker 20260727170400, zero swap names), gen files regenerated, identity-
+> cols staleness check added to CI. Two review claims did not reproduce: the
+> four "dropped uniques" exist on prod and in the baseline (verified), and
+> windows_mdm_command_results has its composite PK (the map entry was wrong
+> but dormant).
+
 Pre-flight facts gathered 2026-07-27 against prod:
 - `software_installers` still carries `UNIQUE (global_or_team_id, title_id)` —
   finding 6 is live: a second custom package for the same title fails today.

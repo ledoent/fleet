@@ -220,9 +220,68 @@ func (postgresDialect) CreateTableLike(newTable, srcTable string) string {
 	return "CREATE TABLE IF NOT EXISTS " + newTable + " (LIKE " + srcTable + " INCLUDING ALL)"
 }
 
+// AtomicTableSwap renames src out of the way, promotes the swap table, drops
+// the old table, and canonicalizes index names. The drop happens here (not in
+// the caller's follow-up DROP, which becomes a no-op) because the old table's
+// indexes hold the canonical names: CREATE TABLE (LIKE …) derives index names
+// from the swap table's name, and without the rename step every swap cycle
+// accretes `_swap`/numeric suffixes (observed in prod: `…_swap_pkey1`), which
+// breaks any future DROP INDEX by name and bloats schema diffs.
 func (postgresDialect) AtomicTableSwap(srcTable, swapTable string) []string {
 	return []string{
 		"ALTER TABLE " + srcTable + " RENAME TO " + srcTable + "_old",
 		"ALTER TABLE " + swapTable + " RENAME TO " + srcTable,
+		"DROP TABLE IF EXISTS " + srcTable + "_old",
+		canonicalizeIndexNamesSQL(srcTable),
 	}
+}
+
+// canonicalizeIndexNamesSQL returns a DO block that renames table's
+// swap-derived index names back to canonical: `<t>_swap_<cols>_idx` →
+// `<t>_<cols>_idx`, including the truncated `_swa_` form (63-byte identifier
+// limit can cut mid-`_swap`) and accreted numeric suffixes (`_pkey1`,
+// `_key2`). If the canonical name is already taken the index is an
+// equivalent duplicate from a previous unrenamed cycle and is dropped;
+// failures (e.g. an index backing a constraint) are ignored — the name just
+// stays until the next cycle.
+func canonicalizeIndexNamesSQL(table string) string {
+	return `DO $$
+DECLARE
+	r record;
+	target text;
+BEGIN
+	FOR r IN
+		SELECT indexname FROM pg_indexes
+		WHERE schemaname = 'public' AND tablename = '` + table + `'
+		  AND (indexname LIKE '%\_swap%' OR indexname LIKE '%\_swa\_%' OR indexname ~ '(_pkey|_key|_idx)[0-9]+$')
+	LOOP
+		target := regexp_replace(r.indexname, '_swap', '', 'g');
+		target := regexp_replace(target, '_swa_', '_', 'g');
+		target := regexp_replace(target, '(_pkey|_key|_idx)[0-9]+$', '\1');
+		IF target = r.indexname THEN
+			CONTINUE;
+		END IF;
+		BEGIN
+			EXECUTE format('ALTER INDEX %I RENAME TO %I', r.indexname, target);
+		EXCEPTION
+			WHEN duplicate_table THEN
+				BEGIN
+					EXECUTE format('DROP INDEX %I', r.indexname);
+				EXCEPTION WHEN OTHERS THEN NULL;
+				END;
+			WHEN OTHERS THEN NULL;
+		END;
+	END LOOP;
+	FOR r IN
+		SELECT c.relname AS indexname FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = 'public' AND c.relkind = 'S' AND c.relname LIKE '%\_swap\_%'
+	LOOP
+		target := regexp_replace(r.indexname, '_swap', '', 'g');
+		BEGIN
+			EXECUTE format('ALTER SEQUENCE %I RENAME TO %I', r.indexname, target);
+		EXCEPTION WHEN OTHERS THEN NULL;
+		END;
+	END LOOP;
+END $$`
 }

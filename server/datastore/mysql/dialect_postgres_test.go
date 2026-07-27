@@ -96,9 +96,11 @@ func TestPostgresDialectSQL(t *testing.T) {
 
 	t.Run("AtomicTableSwap", func(t *testing.T) {
 		stmts := d.AtomicTableSwap("hosts", "hosts_new")
-		require.Len(t, stmts, 2)
+		require.Len(t, stmts, 4)
 		assert.Equal(t, "ALTER TABLE hosts RENAME TO hosts_old", stmts[0])
 		assert.Equal(t, "ALTER TABLE hosts_new RENAME TO hosts", stmts[1])
+		assert.Equal(t, "DROP TABLE IF EXISTS hosts_old", stmts[2])
+		assert.Contains(t, stmts[3], "ALTER INDEX %I RENAME TO %I", "index canonicalization DO block")
 	})
 
 	t.Run("GoquDialect", func(t *testing.T) {

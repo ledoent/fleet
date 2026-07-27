@@ -135,6 +135,9 @@ type DialectHelper interface {
 	CreateTableLike(newTable, srcTable string) string
 
 	// AtomicTableSwap renames srcTable → oldName, swapTable → srcTable within a transaction.
+	// The PostgreSQL implementation additionally drops the old table and
+	// renames swap-derived index names back to canonical (the caller's own
+	// follow-up DROP of the old table becomes a no-op).
 	// Returns the SQL statements to execute (1 for MySQL, 2 for PostgreSQL).
 	AtomicTableSwap(srcTable, swapTable string) []string
 }

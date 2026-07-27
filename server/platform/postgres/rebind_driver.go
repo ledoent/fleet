@@ -2288,7 +2288,7 @@ var knownPrimaryKeys = map[string]string{
 	"host_emails":                            "id",
 	"label_membership":                       "host_id,label_id",
 	"host_software":                          "host_id,software_id",
-	"software_host_counts":                   "software_id,team_id",
+	"software_host_counts":                   "software_id,team_id,global_stats",
 	"nano_enrollment_queue":                  "id,command_uuid",
 	"host_mdm_windows_profiles":              "host_uuid,profile_uuid",
 	// NanoMDM/NanoDEP tables
@@ -2301,7 +2301,7 @@ var knownPrimaryKeys = map[string]string{
 	"host_certificate_templates":         "host_uuid,certificate_template_id",
 	"mdm_windows_enrollments":            "id",
 	"mdm_windows_configuration_profiles": "profile_uuid",
-	"windows_mdm_command_results":        "id",
+	"windows_mdm_command_results":        "enrollment_id,command_uuid",
 	"windows_mdm_commands":               "command_uuid",
 	"host_mdm_actions":                   "host_id",
 	// Runtime upsert sites (non-dialect)

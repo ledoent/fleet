@@ -76,8 +76,17 @@ jobs:
       - name: MySQL ↔ PG schema drift (columns)
         run: go run ./tools/pgcompat/check_column_drift
 
+      - name: MySQL ↔ PG constraint/index drift
+        run: go run ./tools/pgcompat/check_constraint_drift
+
       - name: Validator regression test (gate-of-the-gate)
         run: go test -count=1 -timeout 120s ./tools/pgcompat/
+
+      - name: schemaIdentityCols generated file is up to date
+        run: |
+          go run ./tools/pgcompat/gen_identity_cols
+          git diff --exit-code server/platform/postgres/schema_identity_cols_gen.go || \
+            { echo "schema_identity_cols_gen.go is stale — run: go run ./tools/pgcompat/gen_identity_cols"; exit 1; }
 
       # Pure-Go checks first; docker-dependent steps last so an infra hiccup
       # (image pull, network) doesn't mask a real schema/code regression.

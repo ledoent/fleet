@@ -623,6 +623,199 @@ func TestPostgresAndroidProfileUpsert(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+// TestPostgresSwapIndexNamesStable regression-covers AtomicTableSwap's index
+// canonicalization: CREATE TABLE (LIKE …) derives index names from the swap
+// table's name, and without post-swap renames every cron cycle accreted
+// `_swap`/numeric suffixes (observed live on the four *_host_counts tables).
+// Two full swap cycles must leave the index name set identical.
+func TestPostgresSwapIndexNamesStable(t *testing.T) {
+	ds := CreatePostgresDS(t)
+
+	indexNames := func() []string {
+		var names []string
+		require.NoError(t, ds.primary.Select(&names,
+			`SELECT indexname FROM pg_indexes WHERE tablename = 'software_host_counts' ORDER BY indexname`))
+		return names
+	}
+	before := indexNames()
+
+	runSwapCycle := func() {
+		_, err := ds.primary.Exec(`DROP TABLE IF EXISTS software_host_counts_swap`)
+		require.NoError(t, err)
+		_, err = ds.primary.Exec(ds.dialect.CreateTableLike("software_host_counts_swap", "software_host_counts"))
+		require.NoError(t, err)
+		for _, stmt := range ds.dialect.AtomicTableSwap("software_host_counts", "software_host_counts_swap") {
+			_, err = ds.primary.Exec(stmt)
+			require.NoError(t, err, "swap stmt: %s", stmt)
+		}
+	}
+	runSwapCycle()
+	after1 := indexNames()
+	runSwapCycle()
+	after2 := indexNames()
+
+	require.Equal(t, before, after1, "index names must be stable after one swap cycle")
+	require.Equal(t, after1, after2, "index names must be stable after two swap cycles")
+	for _, n := range after2 {
+		require.NotContains(t, n, "_swap", "no swap-derived name may survive: %s", n)
+	}
+}
+
+// TestPostgresGeneratedColumnTriggers regression-covers migration
+// 20260727170200: host_mdm.enrollment_status and host_software_installs'
+// status/execution_status are MySQL generated columns that the PG baseline
+// modeled as plain text — never written, so 'Pending' host counts and install
+// statuses were silently wrong. The triggers must compute them on insert and
+// recompute on update, mirroring the MySQL expressions exactly.
+func TestPostgresGeneratedColumnTriggers(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	host, err := ds.NewHost(ctx, &fleet.Host{
+		OsqueryHostID:   new("pg-gencol-host"),
+		NodeKey:         new("pg-gencol-key"),
+		UUID:            "pg-gencol-uuid",
+		Hostname:        "pg-gencol",
+		Platform:        "darwin",
+		DetailUpdatedAt: time.Now(),
+		LabelUpdatedAt:  time.Now(),
+		PolicyUpdatedAt: time.Now(),
+		SeenTime:        time.Now(),
+	})
+	require.NoError(t, err)
+
+	// enrollment_status matrix via SetOrUpdateMDMData (writes host_mdm).
+	cases := []struct {
+		enrolled, fromDep, personal bool
+		want                        string
+	}{
+		{true, false, true, "On (manual - personal)"},
+		{true, false, false, "On (manual)"},
+		{true, true, false, "On (automatic)"},
+		{false, true, false, "Pending"},
+		{false, false, false, "Off"},
+	}
+	for _, c := range cases {
+		require.NoError(t, ds.SetOrUpdateMDMData(ctx, host.ID,
+			false, c.enrolled, "https://fleet.example.com", c.fromDep, fleet.WellKnownMDMFleet, "", c.personal))
+		var got *string
+		require.NoError(t, ds.primary.Get(&got,
+			`SELECT enrollment_status FROM host_mdm WHERE host_id = $1`, host.ID))
+		require.NotNil(t, got, "enrollment_status for %+v", c)
+		require.Equal(t, c.want, *got, "enrollment_status for %+v", c)
+	}
+
+	// The 'Pending' filter used by MIA/DEP host counting must now match.
+	require.NoError(t, ds.SetOrUpdateMDMData(ctx, host.ID,
+		false, false, "https://fleet.example.com", true, fleet.WellKnownMDMFleet, "", false))
+	var pending int
+	require.NoError(t, ds.primary.Get(&pending,
+		`SELECT COUNT(*) FROM host_mdm WHERE enrollment_status = 'Pending' AND host_id = $1`, host.ID))
+	require.Equal(t, 1, pending)
+
+	// host_software_installs status/execution_status lifecycle.
+	var installID int
+	require.NoError(t, ds.primary.Get(&installID, `
+		INSERT INTO host_software_installs (execution_id, host_id)
+		VALUES ('pg-gencol-exec-1', $1) RETURNING id`, host.ID))
+	assertStatuses := func(wantStatus, wantExec any) {
+		var st, ex *string
+		require.NoError(t, ds.primary.QueryRow(
+			`SELECT status, execution_status FROM host_software_installs WHERE id = $1`, installID).Scan(&st, &ex))
+		if wantStatus == nil {
+			require.Nil(t, st)
+		} else {
+			require.NotNil(t, st)
+			require.Equal(t, wantStatus, *st)
+		}
+		if wantExec == nil {
+			require.Nil(t, ex)
+		} else {
+			require.NotNil(t, ex)
+			require.Equal(t, wantExec, *ex)
+		}
+	}
+	assertStatuses("pending_install", "pending_install")
+
+	_, err = ds.primary.Exec(`UPDATE host_software_installs SET install_script_exit_code = 0 WHERE id = $1`, installID)
+	require.NoError(t, err)
+	assertStatuses("installed", "installed")
+
+	_, err = ds.primary.Exec(`UPDATE host_software_installs SET install_script_exit_code = 1 WHERE id = $1`, installID)
+	require.NoError(t, err)
+	assertStatuses("failed_install", "failed_install")
+
+	// removed gates status (NULL) but not execution_status.
+	_, err = ds.primary.Exec(`UPDATE host_software_installs SET removed = true WHERE id = $1`, installID)
+	require.NoError(t, err)
+	assertStatuses(nil, "failed_install")
+
+	_, err = ds.primary.Exec(`UPDATE host_software_installs SET removed = false, canceled = true WHERE id = $1`, installID)
+	require.NoError(t, err)
+	assertStatuses("canceled_install", "canceled_install")
+}
+
+// TestPostgresOSUniqueAndProfileLabelCascade regression-covers migration
+// 20260727170300: idx_unique_os must include installation_type (two OS rows
+// differing only there are legal on MySQL), and deleting an MDM profile must
+// cascade-delete its label rows instead of orphaning them.
+func TestPostgresOSUniqueAndProfileLabelCascade(t *testing.T) {
+	ds := CreatePostgresDS(t)
+
+	// Same OS tuple, different installation_type: both rows must insert.
+	for _, it := range []string{"client", "server"} {
+		_, err := ds.primary.Exec(`
+			INSERT INTO operating_systems (name, version, arch, kernel_version, platform, display_version, installation_type)
+			VALUES ('pgOS', '1.0', 'arm64', '1.0.0', 'darwin', '', $1)`, it)
+		require.NoError(t, err, "installation_type=%s", it)
+	}
+
+	// Profile → label rows cascade on profile delete.
+	_, err := ds.primary.Exec(`
+		INSERT INTO mdm_windows_configuration_profiles (profile_uuid, team_id, name, syncml)
+		VALUES ('wpg-cascade-test', 0, 'pg-cascade-profile', '<SyncML/>')`)
+	require.NoError(t, err)
+	var labelID int
+	require.NoError(t, ds.primary.Get(&labelID, `
+		INSERT INTO labels (name, description, query, label_type, label_membership_type)
+		VALUES ('pg-cascade-label', '', 'SELECT 1', 1, 0) RETURNING id`))
+	_, err = ds.primary.Exec(`
+		INSERT INTO mdm_configuration_profile_labels (windows_profile_uuid, label_id, label_name)
+		VALUES ('wpg-cascade-test', $1, 'pg-cascade-label')`, labelID)
+	require.NoError(t, err)
+
+	_, err = ds.primary.Exec(`DELETE FROM mdm_windows_configuration_profiles WHERE profile_uuid = 'wpg-cascade-test'`)
+	require.NoError(t, err)
+	var orphans int
+	require.NoError(t, ds.primary.Get(&orphans, `
+		SELECT COUNT(*) FROM mdm_configuration_profile_labels WHERE windows_profile_uuid = 'wpg-cascade-test'`))
+	require.Zero(t, orphans, "label rows must cascade with the profile")
+}
+
+// TestPostgresMultipleCustomPackagesPerTitle regression-covers migration
+// 20260727170100: PG kept a stale UNIQUE (global_or_team_id, title_id) that
+// upstream's MultipleCustomPackagesPerTitle migration failed to remove
+// (it dropped a MySQL index name that never existed on PG), so a second
+// custom package for any title violated the constraint. Asserts the stale
+// unique is gone and the dedup-token unique is the only per-title one left.
+func TestPostgresMultipleCustomPackagesPerTitle(t *testing.T) {
+	ds := CreatePostgresDS(t)
+
+	var staleCount int
+	require.NoError(t, ds.primary.Get(&staleCount, `
+		SELECT COUNT(*) FROM pg_indexes
+		WHERE tablename = 'software_installers'
+		  AND indexdef LIKE 'CREATE UNIQUE INDEX%(global_or_team_id, title_id)'`))
+	require.Zero(t, staleCount, "stale two-column unique must be dropped")
+
+	var dedupCount int
+	require.NoError(t, ds.primary.Get(&dedupCount, `
+		SELECT COUNT(*) FROM pg_indexes
+		WHERE tablename = 'software_installers'
+		  AND indexdef LIKE '%(global_or_team_id, title_id, dedup_token)'`))
+	require.Equal(t, 1, dedupCount, "dedup-token unique must exist")
+}
+
 // TestPostgresListPoliciesForHost regression-covers the device/host policies
 // query: its ORDER BY used `CASE response WHEN ...` — MySQL resolves the
 // SELECT alias inside the expression, PG errors with `column "response" does
