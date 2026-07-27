@@ -143,7 +143,7 @@ recorded failures are still real, list them here as tracked items instead.
 
 ## Phase 2 — execution plan (schema repair)
 
-> **Status 2026-07-27: code COMPLETE; prod rollout pending.** All of 2.1–2.6
+> **Status 2026-07-27: COMPLETE, deployed to prod.** Rollout verified: all five migrations applied, generated columns backfilled (values cross-checked against inputs), zero swap-derived names on prod, stale installers unique gone, spot-checked new indexes present, device endpoints 200, zero error logs. All of 2.1–2.6
 > landed: check_constraint_drift validator (in CI + make check-pg-compat, with
 > a 163-FK deferral allowlist), migrations 20260727170000–170400 (41 missing
 > indexes incl. two expression indexes, software_installers constraint drop,
