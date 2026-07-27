@@ -623,6 +623,50 @@ func TestPostgresAndroidProfileUpsert(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+// TestPostgresListPoliciesForHost regression-covers the device/host policies
+// query: its ORDER BY used `CASE response WHEN ...` — MySQL resolves the
+// SELECT alias inside the expression, PG errors with `column "response" does
+// not exist` (42703), which broke the whole My Device page. Found by a prod
+// UI walk on 2026-07-27.
+func TestPostgresListPoliciesForHost(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	host, err := ds.NewHost(ctx, &fleet.Host{
+		OsqueryHostID:   new("pg-hostpol-host"),
+		NodeKey:         new("pg-hostpol-key"),
+		UUID:            "pg-hostpol-uuid",
+		Hostname:        "pg-hostpol",
+		Platform:        "darwin",
+		DetailUpdatedAt: time.Now(),
+		LabelUpdatedAt:  time.Now(),
+		PolicyUpdatedAt: time.Now(),
+		SeenTime:        time.Now(),
+	})
+	require.NoError(t, err)
+
+	pol, err := ds.NewGlobalPolicy(ctx, new(uint(0)), fleet.PolicyPayload{
+		Name:  "pg-hostpol-policy",
+		Query: "SELECT 1",
+	})
+	require.NoError(t, err)
+	_, err = ds.RecordPolicyQueryExecutions(ctx, host,
+		map[uint]*bool{pol.ID: new(true)}, time.Now(), false, nil)
+	require.NoError(t, err)
+
+	policies, err := ds.ListPoliciesForHost(ctx, host)
+	require.NoError(t, err, "ListPoliciesForHost")
+	require.NotEmpty(t, policies)
+	var found bool
+	for _, p := range policies {
+		if p.Name == "pg-hostpol-policy" {
+			found = true
+			require.Equal(t, "pass", p.Response)
+		}
+	}
+	require.True(t, found)
+}
+
 // TestPostgresACMERevokedBoolean regression-covers the ACME `revoked`
 // columns' type: the baseline created them as smallint while every query
 // (e.g. GetAccountByID's `revoked = false`) and the driver's boolean-column

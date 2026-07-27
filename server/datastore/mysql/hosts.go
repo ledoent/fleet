@@ -4056,10 +4056,12 @@ func (ds *Datastore) ListPoliciesForHost(ctx context.Context, host *fleet.Host) 
 	AND COALESCE(pl_agg.host_in_exclude_any, 0) = 0
 	-- Policy has no exclude_all labels, or host is not in all of them
 	AND (COALESCE(pl_agg.exclude_all_count, 0) = 0 OR pl_agg.host_exclude_all_count < pl_agg.exclude_all_count)
-	ORDER BY CASE response
-		WHEN 'fail' THEN 1
-		WHEN '' THEN 2
-		WHEN 'pass' THEN 3
+	-- CASE on pm.passes, not the 'response' alias: PG permits a SELECT alias
+	-- in ORDER BY only as a bare reference, not inside an expression (42703).
+	ORDER BY CASE
+		WHEN pm.passes = false THEN 1
+		WHEN pm.passes IS NULL THEN 2
+		WHEN pm.passes = true THEN 3
 		ELSE 0
 	END, p.name`, ds.dialect.FindInSet("?", "p.platforms"))
 
