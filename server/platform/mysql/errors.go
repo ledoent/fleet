@@ -90,9 +90,14 @@ const (
 	erReadOnlyMode = 1836
 )
 
-// IsReadOnlyError returns true if the error is a MySQL error indicating that
-// the server is in read-only mode. This typically happens after an Aurora
-// failover when the primary has been demoted to a reader.
+// IsReadOnlyError returns true if the error indicates the server is in
+// read-only mode. For MySQL this typically happens after an Aurora failover
+// when the primary has been demoted to a reader; for PostgreSQL (matched
+// structurally via SQLState() so this package needs no pgx dependency) it is
+// SQLSTATE 25006, raised after a primary→replica failover or when connected
+// to a hot standby. Every fail-fast site (sessions, withRetryTxx, common tx
+// helpers) funnels through this function, so both backends get the same
+// failover behavior.
 func IsReadOnlyError(err error) bool {
 	err = ctxerr.Cause(err)
 	var mySQLErr *mysql.MySQLError
@@ -101,6 +106,10 @@ func IsReadOnlyError(err error) bool {
 		case erReadOnlyTransaction, erOptionPreventsStatement, erReadOnlyMode:
 			return true
 		}
+	}
+	var sqlStateErr interface{ SQLState() string }
+	if errors.As(err, &sqlStateErr) && sqlStateErr.SQLState() == "25006" {
+		return true
 	}
 	return false
 }

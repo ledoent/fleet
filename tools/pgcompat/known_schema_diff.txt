@@ -13,7 +13,12 @@
 # the pg_baseline_schema.sql must be regenerated (see its file header for the
 # canonical pg_dump command) or the entry must be added here with explanation.
 
-# PG-only tables — no MySQL equivalent.
+# Pre-rename leftovers: upstream's 20260316120008 renamed these to
+# activity_past/host_activity_past via MySQL-only RENAME TABLE; the pre-marker
+# rename never ran on PG and the baseline kept both generations. Verified
+# empty on prod 2026-07-27; migration 20260727210000 drops them — remove
+# these two entries at the next baseline regen.
 pg-only: activities
 pg-only: host_activities
+# PG-only table — no MySQL equivalent.
 pg-only: migration_status_data

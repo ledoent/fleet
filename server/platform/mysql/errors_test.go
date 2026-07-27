@@ -50,3 +50,16 @@ func TestIsReadOnlyError(t *testing.T) {
 		})
 	}
 }
+
+type fakePGReadOnlyErr struct{}
+
+func (fakePGReadOnlyErr) Error() string    { return "cannot execute UPDATE in a read-only transaction" }
+func (fakePGReadOnlyErr) SQLState() string { return "25006" }
+
+// TestIsReadOnlyErrorPostgres covers the PG failover path: SQLSTATE 25006
+// must trip the same fail-fast handling as MySQL's read-only errors.
+func TestIsReadOnlyErrorPostgres(t *testing.T) {
+	assert.True(t, IsReadOnlyError(fakePGReadOnlyErr{}))
+	assert.True(t, IsReadOnlyError(fmt.Errorf("wrapped: %w", fakePGReadOnlyErr{})))
+	assert.False(t, IsReadOnlyError(fmt.Errorf("some other error")))
+}
