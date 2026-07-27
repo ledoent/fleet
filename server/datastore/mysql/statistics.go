@@ -253,7 +253,9 @@ func (ds *Datastore) ShouldSendStatistics(ctx context.Context, frequency time.Du
 }
 
 func (ds *Datastore) RecordStatisticsSent(ctx context.Context) error {
-	_, err := ds.writer(ctx).ExecContext(ctx, `UPDATE statistics SET updated_at = CURRENT_TIMESTAMP LIMIT 1`)
+	// No LIMIT: the statistics table holds a single row, and UPDATE ... LIMIT
+	// is MySQL-only syntax the PG driver refuses.
+	_, err := ds.writer(ctx).ExecContext(ctx, `UPDATE statistics SET updated_at = CURRENT_TIMESTAMP`)
 	return ctxerr.Wrap(ctx, err, "update statistics")
 }
 

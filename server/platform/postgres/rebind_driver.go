@@ -216,14 +216,51 @@ var qualifiedBoolCols = []string{
 	"si.install_during_setup",
 }
 
-// allBoolCols merges schemaBoolCols and qualifiedBoolCols once at init time so
-// rebindQuery iterates a single slice instead of two.
-var allBoolCols = func() []string {
-	out := make([]string, 0, len(schemaBoolCols)+len(qualifiedBoolCols))
-	out = append(out, schemaBoolCols...)
-	out = append(out, qualifiedBoolCols...)
+// boolColNameSet holds the bare column names of every known boolean column
+// (schemaBoolCols entries plus the column part of qualifiedBoolCols), used by
+// rewriteBoolLiteralComparisons for last-segment lookup.
+var boolColNameSet = func() map[string]struct{} {
+	out := make(map[string]struct{}, len(schemaBoolCols)+len(qualifiedBoolCols))
+	for _, c := range schemaBoolCols {
+		out[c] = struct{}{}
+	}
+	for _, c := range qualifiedBoolCols {
+		if _, name, ok := strings.Cut(c, "."); ok {
+			out[name] = struct{}{}
+		}
+	}
 	return out
 }()
+
+// reBoolLiteralCompare matches `<identifier> [!]= 0|1` where identifier may be
+// alias-qualified and/or double-quoted. The trailing \b keeps `= 10` intact;
+// anchoring on the full identifier keeps suffix collisions
+// (num_canceled vs canceled, *_encrypted vs encrypted) from mis-rewriting —
+// the naive substring ReplaceAll this replaces had no left boundary at all.
+var reBoolLiteralCompare = regexp.MustCompile(`([A-Za-z_"][A-Za-z0-9_$".]*)\s*(!=|=)\s*([01])\b`)
+
+// rewriteBoolLiteralComparisons converts integer-literal comparisons on known
+// boolean columns to boolean literals (col = 1 → col = true), which is valid
+// on PG and a no-op semantically on MySQL.
+func rewriteBoolLiteralComparisons(query string) string {
+	return reBoolLiteralCompare.ReplaceAllStringFunc(query, func(m string) string {
+		parts := reBoolLiteralCompare.FindStringSubmatch(m)
+		ident, op, lit := parts[1], parts[2], parts[3]
+		seg := ident
+		if i := strings.LastIndexByte(seg, '.'); i >= 0 {
+			seg = seg[i+1:]
+		}
+		seg = strings.Trim(seg, `"`)
+		if _, ok := boolColNameSet[seg]; !ok {
+			return m
+		}
+		val := "true"
+		if lit == "0" {
+			val = "false"
+		}
+		return ident + " " + op + " " + val
+	})
+}
 
 // Per-table-name regex caches for rewrites that embed the table name in the pattern.
 // sync.Map is used because rebindQuery is called concurrently from request goroutines.
@@ -463,12 +500,15 @@ func rebindQuery(query string) string {
 	query = reFromDual.ReplaceAllString(query, "")
 	// STRAIGHT_JOIN → JOIN (MySQL optimizer hint, not supported by PG)
 	query = strings.ReplaceAll(query, "STRAIGHT_JOIN", "JOIN")
-	// MySQL SET FOREIGN_KEY_CHECKS / innodb / sql_mode commands → no-op for PG
-	if strings.Contains(query, "FOREIGN_KEY_CHECKS") || strings.Contains(query, "innodb") || strings.Contains(query, "INNODB") || strings.Contains(query, "sql_mode") {
-		query = strings.ReplaceAll(query, "SET FOREIGN_KEY_CHECKS=0", "SELECT 1")
-		query = strings.ReplaceAll(query, "SET FOREIGN_KEY_CHECKS=1", "SELECT 1")
-		if strings.Contains(query, "innodb") || strings.Contains(query, "INNODB") || strings.Contains(query, "sql_mode") {
-			return "SELECT 1" // skip MySQL-specific queries entirely
+	// MySQL SET FOREIGN_KEY_CHECKS / SET sql_mode / SHOW ENGINE|VARIABLES
+	// session commands → no-op for PG. Anchored on the leading keyword: only
+	// whole statements that ARE MySQL session commands become SELECT 1. A DML
+	// statement that merely mentions "innodb" or "sql_mode" (e.g. queries over
+	// information_schema.innodb_trx, which now have dialect-aware
+	// implementations in the datastore) must never be silently swallowed.
+	if head := strings.ToUpper(strings.TrimLeft(query, " \t\n")); strings.HasPrefix(head, "SET ") || strings.HasPrefix(head, "SHOW ") {
+		if strings.Contains(head, "FOREIGN_KEY_CHECKS") || strings.Contains(head, "INNODB") || strings.Contains(head, "SQL_MODE") {
+			return "SELECT 1"
 		}
 	}
 	// MySQL RAND() → PG random()
@@ -550,29 +590,10 @@ func rebindQuery(query string) string {
 	// Fix CASE type mismatch: ELSE hdek.decryptable (boolean) mixed with THEN -1 (integer)
 	// Cast boolean to integer in CASE branches
 	query = strings.ReplaceAll(query, "ELSE hdek.decryptable", "ELSE CAST(hdek.decryptable AS integer)")
-	// Fix boolean = integer comparisons that PG doesn't allow.
-	// allBoolCols merges schemaBoolCols (generated, unqualified) with qualifiedBoolCols
-	// (hand-curated alias.col forms); see package-level declarations for details.
-	for _, col := range allBoolCols {
-		query = strings.ReplaceAll(query, col+" = 1", col+" = true")
-		query = strings.ReplaceAll(query, col+" = 0", col+" = false")
-		query = strings.ReplaceAll(query, col+" != 1", col+" != true")
-		query = strings.ReplaceAll(query, col+"=1", col+"=true")
-		query = strings.ReplaceAll(query, col+"=0", col+"=false")
-		query = strings.ReplaceAll(query, col+"!=1", col+"!=true")
-		// goqu emits double-quoted identifiers (alias→backtick→") for alias.col forms.
-		// After backtick→" conversion above, `shc`.`global_stats` becomes "shc"."global_stats".
-		// The unquoted pattern above won't match, so also rewrite the quoted form.
-		if alias, name, ok := strings.Cut(col, "."); ok {
-			qCol := `"` + alias + `"."` + name + `"`
-			query = strings.ReplaceAll(query, qCol+" = 1", qCol+" = true")
-			query = strings.ReplaceAll(query, qCol+" = 0", qCol+" = false")
-			query = strings.ReplaceAll(query, qCol+" != 1", qCol+" != true")
-			query = strings.ReplaceAll(query, qCol+"=1", qCol+"=true")
-			query = strings.ReplaceAll(query, qCol+"=0", qCol+"=false")
-			query = strings.ReplaceAll(query, qCol+"!=1", qCol+"!=true")
-		}
-	}
+	// Fix boolean = integer comparisons that PG doesn't allow. Single-pass,
+	// identifier-anchored (see rewriteBoolLiteralComparisons); covers bare,
+	// alias-qualified, and goqu double-quoted identifier forms.
+	query = rewriteBoolLiteralComparisons(query)
 	// Fix pm.passes = 1/0: PG column is boolean, can't compare to integer.
 	// Cast to int for use in SUM/COUNT aggregates.
 	// COALESCE(boolean_column, 0/1) → COALESCE(boolean_column, false/true)
@@ -633,11 +654,11 @@ func rebindQuery(query string) string {
 		query = reIntervalLiteral[unit].ReplaceAllString(query, "INTERVAL '${1} "+strings.ToLower(unit)+"s'")
 		query = reIntervalPlaceholder[unit].ReplaceAllString(query, "(?::float8 * INTERVAL '1 "+strings.ToLower(unit)+"')")
 	}
-	// MySQL allows LIMIT on UPDATE/DELETE; PG does not.
-	uq := strings.ToUpper(strings.TrimLeft(query, " \t\n"))
-	if strings.HasPrefix(uq, "UPDATE") || strings.HasPrefix(uq, "DELETE") {
-		query = reLimitTrailing.ReplaceAllString(query, "")
-	}
+	// MySQL allows LIMIT on UPDATE/DELETE; PG does not. Deliberately NOT
+	// stripped here: removing the LIMIT silently changes semantics (an
+	// intentionally batched delete becomes one unbounded delete under lock).
+	// checkUnsupportedQuery rejects these statements at the Exec/Query/Prepare
+	// entry points with a descriptive error instead.
 
 	// Resolve ambiguous column references in ON CONFLICT DO UPDATE SET clauses.
 	// Only apply when complex expressions (CASE WHEN, COALESCE) are in the SET clause.
@@ -659,25 +680,71 @@ func rebindQuery(query string) string {
 	var b strings.Builder
 	b.Grow(len(query) + 10)
 	n := 1
-	inLineComment := false
-	prevDash := false
+	// A `?` inside a -- line comment, /* */ block comment, or 'string
+	// literal' is literal text, not a placeholder — converting it would shift
+	// every subsequent ordinal off by one.
+	var (
+		inLineComment  bool
+		inBlockComment bool
+		inString       bool
+		prevDash       bool
+		prevSlash      bool
+		prevStar       bool
+	)
 	for _, r := range query {
-		if r == '\n' {
-			inLineComment = false
-			prevDash = false
+		switch {
+		case inString:
+			// A doubled '' is an escaped quote: the second ' just re-enters
+			// string state via the next iteration's toggle, which is correct
+			// because '' means the string continues either way.
+			if r == '\'' {
+				inString = false
+			}
+			b.WriteRune(r)
+			continue
+		case inBlockComment:
+			if prevStar && r == '/' {
+				inBlockComment = false
+			}
+			prevStar = r == '*'
+			b.WriteRune(r)
+			continue
+		case inLineComment:
+			if r == '\n' {
+				inLineComment = false
+			}
 			b.WriteRune(r)
 			continue
 		}
-		if !inLineComment && r == '-' {
+		if r == '\n' {
+			prevDash, prevSlash = false, false
+			b.WriteRune(r)
+			continue
+		}
+		if r == '-' {
 			if prevDash {
 				inLineComment = true
 			}
 			prevDash = !prevDash
+			prevSlash = false
 			b.WriteRune(r)
 			continue
 		}
 		prevDash = false
-		if r == '?' && !inLineComment {
+		if r == '*' && prevSlash {
+			inBlockComment = true
+			prevStar = false
+			prevSlash = false
+			b.WriteRune(r)
+			continue
+		}
+		prevSlash = r == '/'
+		if r == '\'' {
+			inString = true
+			b.WriteRune(r)
+			continue
+		}
+		if r == '?' {
 			b.WriteByte('$')
 			if n < 10 {
 				b.WriteByte(byte('0' + n))
@@ -700,7 +767,23 @@ func rebindQuery(query string) string {
 	return result
 }
 
+// checkUnsupportedQuery rejects MySQL-only constructs whose translation would
+// silently change semantics. Failing loudly here surfaces the site in tests
+// and logs so it can be rewritten cross-dialect (see DeleteExpiredInHouseAppInstallTokens
+// for the batched-delete pattern).
+func checkUnsupportedQuery(query string) error {
+	uq := strings.ToUpper(strings.TrimLeft(query, " \t\n("))
+	if (strings.HasPrefix(uq, "UPDATE") || strings.HasPrefix(uq, "DELETE")) &&
+		reLimitTrailing.MatchString(query) {
+		return fmt.Errorf("pg rebind driver: UPDATE/DELETE with LIMIT is MySQL-only and cannot be translated without changing semantics; rewrite with a keyed subquery batch: %.120q", query)
+	}
+	return nil
+}
+
 func (c *rebindConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if err := checkUnsupportedQuery(query); err != nil {
+		return nil, err
+	}
 	if ec, ok := c.Conn.(driver.ExecerContext); ok {
 		rebound := rebindQuery(query)
 		// MySQL allows multiple constructs in a single ALTER TABLE (e.g.
@@ -840,6 +923,9 @@ func execWithReturning(ctx context.Context, qc driver.QueryerContext, query stri
 }
 
 func (c *rebindConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if err := checkUnsupportedQuery(query); err != nil {
+		return nil, err
+	}
 	if qc, ok := c.Conn.(driver.QueryerContext); ok {
 		rebound := rebindQuery(query)
 		coerced := coerceTimeArgsToUTC(coerceBinaryArgs(stripNullBytes(coerceIntArgsForBoolColumns(rebound, coerceBoolArgsForTextCast(rebound, args)))))
@@ -1481,14 +1567,69 @@ func coerceBinaryArgs(args []driver.NamedValue) []driver.NamedValue {
 	return out
 }
 
-func (c *rebindConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
-	if pc, ok := c.Conn.(driver.ConnPrepareContext); ok {
-		return pc.PrepareContext(ctx, rebindQuery(query))
+// returningStmt wraps a prepared identity-table INSERT whose SQL had
+// RETURNING appended: Exec must route through Query so LastInsertId carries
+// the generated ID instead of silently returning 0 (which corrupts FK
+// relationships in callers that trust it).
+type returningStmt struct {
+	driver.Stmt
+}
+
+func (s *returningStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	sq, ok := s.Stmt.(driver.StmtQueryContext)
+	if !ok {
+		return nil, fmt.Errorf("rebind: prepared RETURNING statement's driver lacks StmtQueryContext")
 	}
-	return c.Conn.Prepare(rebindQuery(query))
+	rows, err := sq.QueryContext(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	dest := make([]driver.Value, len(rows.Columns()))
+	var firstID, n int64
+	var seen bool
+	for {
+		err := rows.Next(dest)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !seen {
+			if v, ok := dest[0].(int64); ok {
+				firstID = v
+			}
+			seen = true
+		}
+		n++
+	}
+	return &lastInsertIDResult{lastID: firstID, rowsAffected: n}, nil
+}
+
+func (c *rebindConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	if err := checkUnsupportedQuery(query); err != nil {
+		return nil, err
+	}
+	rebound := rebindQuery(query)
+	withReturning, _, hasReturning := tryAppendReturning(rebound)
+	if pc, ok := c.Conn.(driver.ConnPrepareContext); ok {
+		if hasReturning {
+			stmt, err := pc.PrepareContext(ctx, withReturning)
+			if err != nil {
+				return nil, err
+			}
+			return &returningStmt{Stmt: stmt}, nil
+		}
+		return pc.PrepareContext(ctx, rebound)
+	}
+	return c.Conn.Prepare(rebound)
 }
 
 func (c *rebindConn) Prepare(query string) (driver.Stmt, error) {
+	if err := checkUnsupportedQuery(query); err != nil {
+		return nil, err
+	}
 	return c.Conn.Prepare(rebindQuery(query))
 }
 
@@ -2348,8 +2489,15 @@ func rewriteOnDuplicateKey(query string) string {
 	if conflictTarget != "" {
 		query = query[:idx] + "ON CONFLICT (" + conflictTarget + ") DO UPDATE SET " + updateClause
 	} else {
-		// Fallback: no conflict target — PG will error but at least the syntax is close
-		query = query[:idx] + "ON CONFLICT DO UPDATE SET " + updateClause
+		// No knownPrimaryKeys entry for this table. Emit a statement that
+		// fails with a self-describing error naming the missing table —
+		// previously this emitted `ON CONFLICT DO UPDATE SET …` (invalid PG
+		// syntax) whose parse error gave no hint at the cause.
+		table := "<unparsed>"
+		if m != nil {
+			table = strings.ToLower(m[1])
+		}
+		query = query[:idx] + `ON CONFLICT (fleet_missing_knownPrimaryKeys_entry_for_` + table + `) DO UPDATE SET ` + updateClause
 	}
 	return query
 }

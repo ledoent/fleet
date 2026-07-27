@@ -623,6 +623,23 @@ func TestPostgresAndroidProfileUpsert(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+// TestPostgresDBDiagnostics regression-covers DBLocks and InnoDBStatus on PG:
+// the driver used to blanket-replace any query mentioning "innodb" with
+// SELECT 1, which broke both methods' row scanning. They now have explicit
+// dialect-aware implementations.
+func TestPostgresDBDiagnostics(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	locks, err := ds.DBLocks(ctx)
+	require.NoError(t, err, "DBLocks")
+	require.Empty(t, locks, "no blocking locks expected on an idle test DB")
+
+	status, err := ds.InnoDBStatus(ctx)
+	require.NoError(t, err, "InnoDBStatus")
+	require.Contains(t, status, "PostgreSQL")
+}
+
 // TestPostgresSwapIndexNamesStable regression-covers AtomicTableSwap's index
 // canonicalization: CREATE TABLE (LIKE …) derives index names from the swap
 // table's name, and without post-swap renames every cron cycle accreted

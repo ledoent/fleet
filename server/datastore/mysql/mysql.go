@@ -1599,6 +1599,11 @@ func replaceMatchAny(s string) string {
 }
 
 func (ds *Datastore) InnoDBStatus(ctx context.Context) (string, error) {
+	// No InnoDB on PostgreSQL; report a placeholder rather than relying on
+	// the driver to no-op the SHOW ENGINE statement (which broke scanning).
+	if ds.dialect.IsPostgres() {
+		return "n/a (PostgreSQL backend — no InnoDB engine status)", nil
+	}
 	status := struct {
 		Type   string `db:"Type"`
 		Name   string `db:"Name"`

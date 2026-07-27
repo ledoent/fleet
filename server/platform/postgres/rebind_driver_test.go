@@ -1065,3 +1065,90 @@ func TestTryAppendReturning(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckUnsupportedQuery(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantErr bool
+	}{
+		{"delete with limit", "DELETE FROM t WHERE a < NOW() LIMIT 1000", true},
+		{"update with limit", "UPDATE t SET a = 1 LIMIT 1", true},
+		{"lowercase delete with limit", "delete from t where a=1 limit 5", true},
+		{"delete without limit", "DELETE FROM t WHERE a < NOW()", false},
+		{"select with limit", "SELECT * FROM t LIMIT 10", false},
+		{"delete with subquery limit", "DELETE FROM t WHERE id IN (SELECT id FROM (SELECT id FROM t LIMIT 100) b)", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkUnsupportedQuery(tc.query)
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "MySQL-only")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestRewriteBoolLiteralComparisons(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare bool col", "SELECT * FROM q WHERE enrolled = 1", "SELECT * FROM q WHERE enrolled = true"},
+		{"bare bool col zero", "WHERE enrolled=0", "WHERE enrolled = false"},
+		{"not equal", "WHERE enrolled != 1", "WHERE enrolled != true"},
+		{"alias qualified", "WHERE hm.enrolled = 1", "WHERE hm.enrolled = true"},
+		{"goqu quoted", `WHERE "shc"."global_stats" = 1`, `WHERE "shc"."global_stats" = true`},
+		// The naive substring rewrite corrupted these suffix collisions.
+		{"suffix collision num_canceled", "WHERE num_canceled = 1", "WHERE num_canceled = 1"},
+		{"suffix collision unrelated_encrypted_bytes", "WHERE payload_encrypted_bytes = 0", "WHERE payload_encrypted_bytes = 0"},
+		{"larger literal untouched", "WHERE enrolled = 10", "WHERE enrolled = 10"},
+		{"non-bool col untouched", "WHERE team_id = 0", "WHERE team_id = 0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, rewriteBoolLiteralComparisons(tc.in))
+		})
+	}
+}
+
+func TestRewriteOnDuplicateKey(t *testing.T) {
+	t.Run("known table", func(t *testing.T) {
+		got := rewriteOnDuplicateKey(
+			"INSERT INTO host_emails (host_id, email) VALUES (?, ?) ON DUPLICATE KEY UPDATE email = VALUES(email)")
+		require.Contains(t, got, "ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email")
+	})
+	t.Run("unknown table fails self-describing", func(t *testing.T) {
+		got := rewriteOnDuplicateKey(
+			"INSERT INTO no_such_table (a) VALUES (?) ON DUPLICATE KEY UPDATE a = VALUES(a)")
+		require.Contains(t, got, "fleet_missing_knownPrimaryKeys_entry_for_no_such_table",
+			"the emitted SQL must name the table missing from knownPrimaryKeys")
+	})
+	t.Run("no ODKU passthrough", func(t *testing.T) {
+		q := "INSERT INTO t (a) VALUES (?)"
+		require.Equal(t, q, rewriteOnDuplicateKey(q))
+	})
+}
+
+func TestRebindPlaceholderScanner(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"basic", "SELECT ? , ?", "SELECT $1 , $2"},
+		{"question mark in string literal", "SELECT * FROM t WHERE a = 'what?' AND b = ?", "SELECT * FROM t WHERE a = 'what?' AND b = $1"},
+		{"escaped quote in literal", "WHERE a = 'it''s?' AND b = ?", "WHERE a = 'it''s?' AND b = $1"},
+		{"line comment", "SELECT ? -- is this? yes\n , ?", "SELECT $1 -- is this? yes\n , $2"},
+		{"block comment", "SELECT ? /* really? */ , ?", "SELECT $1 /* really? */ , $2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, rebindQuery(tc.in))
+		})
+	}
+}

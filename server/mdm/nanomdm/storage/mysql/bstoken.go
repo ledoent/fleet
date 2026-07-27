@@ -9,7 +9,9 @@ import (
 func (s *MySQLStorage) StoreBootstrapToken(r *mdm.Request, msg *mdm.SetBootstrapToken) error {
 	_, err := s.db.ExecContext(
 		r.Context,
-		`UPDATE nano_devices SET bootstrap_token_b64 = ?, bootstrap_token_at = CURRENT_TIMESTAMP WHERE id = ? LIMIT 1;`,
+		// No LIMIT 1: id is the primary key (at most one row matches), and
+		// UPDATE ... LIMIT is MySQL-only syntax the PG driver refuses.
+		`UPDATE nano_devices SET bootstrap_token_b64 = ?, bootstrap_token_at = CURRENT_TIMESTAMP WHERE id = ?;`,
 		nullEmptyString(msg.BootstrapToken.BootstrapToken.String()),
 		r.ID,
 	)

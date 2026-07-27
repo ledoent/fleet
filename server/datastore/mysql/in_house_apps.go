@@ -1846,7 +1846,15 @@ WHERE token = ? AND expires_at > NOW(6)
 }
 
 func (ds *Datastore) DeleteExpiredInHouseAppInstallTokens(ctx context.Context) (int64, error) {
-	const stmt = `DELETE FROM in_house_app_install_tokens WHERE expires_at < NOW(6) LIMIT 1000`
+	// Batched via a keyed subquery instead of DELETE ... LIMIT: MySQL-only
+	// syntax that the PG driver refuses (silently unbatching it would take
+	// one unbounded delete under lock). The derived table keeps MySQL happy
+	// (it can't otherwise reference the delete target in a subquery).
+	const stmt = `DELETE FROM in_house_app_install_tokens WHERE token IN (
+		SELECT token FROM (
+			SELECT token FROM in_house_app_install_tokens WHERE expires_at < NOW(6) LIMIT 1000
+		) batch
+	)`
 	var total int64
 	for {
 		res, err := ds.writer(ctx).ExecContext(ctx, stmt)
