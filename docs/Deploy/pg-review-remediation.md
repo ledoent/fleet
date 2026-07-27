@@ -141,26 +141,91 @@ recorded failures are still real, list them here as tracked items instead.
 
 ---
 
-## Phase 2 — schema repair (sketch)
+## Phase 2 — execution plan (schema repair)
 
-- Regenerate `20260513210000_AddMissingPGIndexes` names table-prefixed
-  (`tools/pg-index-translate`: emit `<table>_<mysqlname>` and dedup); new migration
-  creating the 44 missing `(name, table)` pairs — including the four dropped UNIQUEs
-  (`locks(name)`, `mdm_apple_bootstrap_packages(token)`,
-  `mdm_apple_enrollment_profiles(token)`, `nano_enrollments(user_id)`) (finding 5).
-- `20260723181411`: `DROP CONSTRAINT IF EXISTS idx_software_installers_team_id_title_id`
-  on PG (finding 6).
-- `BEFORE INSERT OR UPDATE` triggers for `host_mdm.enrollment_status`,
-  `host_software_installs.execution_status`, `host_software_installs.status`, ported
-  from the MySQL generated-column expressions (finding 4).
-- Fix wrong `knownPrimaryKeys` entries: `software_host_counts` →
+Pre-flight facts gathered 2026-07-27 against prod:
+- `software_installers` still carries `UNIQUE (global_or_team_id, title_id)` —
+  finding 6 is live: a second custom package for the same title fails today.
+- Swap-name accretion has started: `software_host_counts_swap_pkey1`,
+  `…_swap_*_idx1`, `vulnerability_host_counts_swap_cve_team_id_global_stats_key`
+  (6 accreted names) — deepens on every hourly cron.
+- Zero duplicate rows on all four lost uniques (`locks(name)`,
+  `mdm_apple_bootstrap_packages(token)`, `mdm_apple_enrollment_profiles(token)`,
+  `nano_enrollments(user_id)`) — recreation is safe on prod.
+- The three MySQL generation expressions to port are captured from `schema.sql`
+  lines 906 (host_mdm.enrollment_status), 1308 (host_software_installs.status,
+  STORED, gated on `removed`), 1314 (…execution_status, VIRTUAL, ungated).
+
+### 2.1 Authoritative index/constraint diff (do first)
+Build `tools/pgcompat/check_constraint_drift`: parse `schema.sql` per-table
+`PRIMARY KEY`/`UNIQUE KEY`/`KEY`/`CONSTRAINT … FOREIGN KEY` definitions into an
+expected `(table, kind, cols)` set; parse `pg_baseline_schema.sql` for actual;
+report missing/extra with an allowlist file. This is Phase 3's validator built
+early because Phase 2 needs its output twice: to generate Migration A and to
+prove closure at exit. Name-agnostic (compares column sets), so swap-renamed
+indexes don't false-positive.
+
+### 2.2 Migration A — missing indexes + uniques (finding 5)
+- New post-marker PG-only migration generated from the 2.1 diff (~44 pairs,
+  including the four uniques). Names table-prefixed: `idx_<table>_<mysqlname>`,
+  deduped. `CREATE [UNIQUE] INDEX IF NOT EXISTS` per statement.
+- Fix `tools/pg-index-translate` to emit prefixed names so a future regen can't
+  reintroduce collisions.
+- Scale note: plain in-txn CREATE INDEX is fine at this deployment's size; a
+  large deployment would need CONCURRENTLY (not txn-safe) — documented, not
+  implemented.
+
+### 2.3 Migration B — software_installers constraint (finding 6)
+- PG: `ALTER TABLE software_installers DROP CONSTRAINT IF EXISTS
+  idx_software_installers_team_id_title_id`; recreate whatever non-unique index
+  MySQL has post-20260723181411 for the lookup path. MySQL up: no-op.
+- PG test: two installers, same (team, title), different versions — both insert.
+
+### 2.4 Migration C — generated-column triggers (finding 4)
+- One trigger function per table, `BEFORE INSERT OR UPDATE`:
+  `host_mdm_set_enrollment_status()` (CASE over is_server/enrolled/
+  installed_from_dep/is_personal_enrollment) and
+  `host_software_installs_set_statuses()` (sets execution_status, and status =
+  CASE WHEN removed THEN NULL ELSE same-expression …).
+- Same migration backfills both tables with a one-time recompute UPDATE so
+  prod's stale rows (every row written since the July deploys) are corrected.
+- Tests: PG state-matrix tests asserting exact enum strings for each branch;
+  MySQL parity test feeding identical fixtures and comparing the generated
+  values; smoke assertion that `enrollment_status = 'Pending'` host counting
+  returns rows (hosts.go:1898 path — currently always 0 on PG).
+
+### 2.5 Migration D — idx_unique_os + profile-labels FKs (finding 13 evidence)
+- Recreate the operating_systems unique including `installation_type` (adding a
+  column loosens the constraint — no data risk).
+- Add the three missing `ON DELETE CASCADE` FKs to
+  `mdm_configuration_profile_labels`, deleting any orphaned rows first.
+- Full FK parity (190 MySQL vs 27 PG) is explicitly deferred: 2.1's validator
+  reports it, Phase 3 decides adopt-vs-allowlist per table.
+
+### 2.6 Driver fixes (findings 12a, 14)
+- `knownPrimaryKeys` corrections: `software_host_counts` →
   `software_id,team_id,global_stats`; `windows_mdm_command_results` →
-  `enrollment_id,command_uuid` (finding 12a data).
-- `AtomicTableSwap`: `ALTER INDEX … RENAME TO` after swap; clean the accreted
-  `*_swap_*` names from prod and the baseline; shrink `known_schema_diff.txt` (finding 14).
-- `idx_unique_os`: add missing `installation_type` column to the PG unique (finding 13).
-- Batch/lock hygiene for the three flagged migrations (finding 25).
-- Single prod migration job + full baseline regen + marker bump at the end.
+  `enrollment_id,command_uuid`. Audit both call sites' ODKU clauses against the
+  real PKs.
+- `AtomicTableSwap`: after the rename, `ALTER INDEX … RENAME TO` back to
+  canonical names (derive by listing the swap table's indexes before swap).
+  One-time cleanup migration renames the 6 accreted prod names; remove the
+  corresponding `known_schema_diff.txt` entries. Driver-level test: swap twice,
+  index names identical after each cycle.
+
+### 2.7 Exit — prod rollout + baseline regen
+1. Ownership pre-check (`pg_tables WHERE tableowner <> 'fleet'`).
+2. Migration job → image roll → UI walk (device pages + admin if a session is
+   available) → zero error logs.
+3. Regenerate `pg_baseline_schema.sql` from a scratch PG via `prepare db`, bump
+   marker, regen `gen_bool_cols`/`gen_identity_cols`, all validators green,
+   and the 2.1 diff returns empty (minus allowlist).
+4. Update PR #6 body and this doc; mark findings 4, 5, 6, 12a, 14 fixed.
+
+Sequencing: 2.1 first; 2.2–2.5 are independent migrations (one commit each or
+batched); 2.6 independent of migrations; 2.7 last, single rollout. Finding 25
+(migration batching hygiene) becomes a convention note in CLAUDE.md rather than
+retrofits — the flagged migrations are pre-marker and no longer execute.
 
 ## Phase 3 — validators + driver hardening (sketch)
 
