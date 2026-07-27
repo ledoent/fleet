@@ -79,6 +79,9 @@ jobs:
       - name: MySQL ↔ PG constraint/index drift
         run: go run ./tools/pgcompat/check_constraint_drift
 
+      - name: Boolean/smallint split column names
+        run: go run ./tools/pgcompat/check_bool_col_split
+
       - name: Validator regression test (gate-of-the-gate)
         run: go test -count=1 -timeout 120s ./tools/pgcompat/
 

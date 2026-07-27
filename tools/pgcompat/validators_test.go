@@ -182,3 +182,69 @@ func TestConstraintDriftValidator_PassesWithRealAllowlist(t *testing.T) {
 		t.Fatalf("expected OK prefix, got: %s", out)
 	}
 }
+
+func TestBoolColSplitValidator_FailsOnEmptyAllowlist(t *testing.T) {
+	root := repoRoot(t)
+	tmp := t.TempDir()
+	empty := filepath.Join(tmp, "allowlist.txt")
+	if err := os.WriteFile(empty, []byte("# empty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", "./tools/pgcompat/check_bool_col_split", "-allowlist", empty)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected failure (awaiting_configuration split exists), got success: %s", out)
+	}
+	if !strings.Contains(string(out), "awaiting_configuration") {
+		t.Fatalf("expected the split column in output, got: %s", out)
+	}
+}
+
+func TestBoolColSplitValidator_PassesWithRealAllowlist(t *testing.T) {
+	root := repoRoot(t)
+	cmd := exec.Command("go", "run", "./tools/pgcompat/check_bool_col_split")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("validator failed against checked-in inputs: %v\n%s", err, out)
+	}
+}
+
+// TestPrimaryKeysValidator_CatchesBadColumns proves the column-verification
+// half of check_primary_keys: an entry whose columns match no PK/UNIQUE in
+// the baseline (the class that produced two wrong entries fixed in Phase 2 of
+// the review remediation) must fail the run.
+func TestPrimaryKeysValidator_CatchesBadColumns(t *testing.T) {
+	root := repoRoot(t)
+	tmp := t.TempDir()
+	// Minimal fixture root: a driver file with one wrong-column entry, a
+	// baseline where the real PK differs, and empty source trees.
+	driverRel := "driver.go"
+	if err := os.WriteFile(filepath.Join(tmp, driverRel), []byte(
+		"package p\n\nvar knownPrimaryKeys = map[string]string{\n\t\"widgets\": \"id\",\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmp, "server/datastore/mysql"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"server", "ee", "cmd"} {
+		if err := os.MkdirAll(filepath.Join(tmp, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseline := "CREATE TABLE public.widgets (\n    a integer NOT NULL,\n    b integer NOT NULL\n);\n" +
+		"ALTER TABLE ONLY public.widgets\n    ADD CONSTRAINT widgets_pkey PRIMARY KEY (a, b);\n"
+	if err := os.WriteFile(filepath.Join(tmp, "server/datastore/mysql/pg_baseline_schema.sql"), []byte(baseline), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", "./tools/pgcompat/check_primary_keys", "-root", tmp, "-driver", driverRel)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected failure for wrong-column entry, got success: %s", out)
+	}
+	if !strings.Contains(string(out), "widgets") || !strings.Contains(string(out), "42P10") {
+		t.Fatalf("expected widgets 42P10 diagnostic, got: %s", out)
+	}
+}

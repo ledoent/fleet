@@ -1,0 +1,10 @@
+# known_bool_col_splits.txt — column names intentionally typed boolean in one
+# table and smallint in another. See tools/pgcompat/check_bool_col_split.
+#
+# mdm_windows_enrollments.awaiting_configuration is a tri-state enum
+# (fleet.WindowsMDMAwaitingConfiguration: None=0/Pending=1/Active=2) and MUST
+# stay smallint (a boolean would reject the value 2); pg_baseline_post.sql
+# documents the conversion. host_mdm_apple_awaiting_configuration's column is
+# a true boolean. The driver handles the smallint side via
+# smallintBoolColumns' table-aware patterns.
+awaiting_configuration

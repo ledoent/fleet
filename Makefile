@@ -310,6 +310,7 @@ check-pg-compat:
 	go run ./tools/pgcompat/check_schema_drift
 	go run ./tools/pgcompat/check_column_drift
 	go run ./tools/pgcompat/check_constraint_drift
+	go run ./tools/pgcompat/check_bool_col_split
 	go test -count=1 -timeout 120s ./tools/pgcompat/
 .PHONY: check-pg-compat
 
