@@ -750,11 +750,14 @@ func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
 }
 
 // checkPGBelowMarkerDrift errors when the running code carries a table
-// migration with version <= the baseline marker that the database has no
-// applied record of. This happens when a rebase pulls in an upstream
-// migration that was authored (timestamped) before the current baseline was
-// generated: its DDL is in neither the baseline nor the applied history, and
-// silently seeding it as applied would hide a real schema gap.
+// migration that goose Up can never reach: one that is not applied AND is
+// numbered below the database's highest applied version (goose only runs
+// versions above the current max). This happens when a rebase pulls in an
+// upstream migration that was authored (timestamped) before migrations this
+// database has already applied — its DDL would otherwise be skipped silently,
+// forever. Migrations above the DB's max version are fine: the goose Up that
+// follows this check applies them normally (the baseline marker itself is
+// typically in that set right after a regen, which must NOT trip this check).
 func (ds *Datastore) checkPGBelowMarkerDrift(ctx context.Context, marker int64) error {
 	if marker == 0 {
 		return nil
@@ -765,22 +768,27 @@ func (ds *Datastore) checkPGBelowMarkerDrift(ctx context.Context, marker int64) 
 		return ctxerr.Wrap(ctx, err, "loading applied PG migration history")
 	}
 	appliedSet := make(map[int64]struct{}, len(applied))
+	var dbMax int64
 	for _, v := range applied {
 		appliedSet[v] = struct{}{}
+		if v > dbMax {
+			dbMax = v
+		}
 	}
 	var missing []int64
-	for _, v := range versionsAtOrBelow(tables.MigrationClient.Migrations, marker) {
-		if _, ok := appliedSet[v]; !ok {
-			missing = append(missing, v)
+	for _, m := range tables.MigrationClient.Migrations {
+		if _, ok := appliedSet[m.Version]; !ok && m.Version < dbMax {
+			missing = append(missing, m.Version)
 		}
 	}
 	if len(missing) == 0 {
 		return nil
 	}
+	slices.Sort(missing)
 	return ctxerr.Errorf(ctx,
-		"PG migration drift: %d migration(s) below the baseline marker %d were never applied to this database (oldest %d, newest %d); "+
+		"PG migration drift: %d migration(s) below this database's max applied version %d were never applied and goose cannot reach them (oldest %d, newest %d); "+
 			"a rebase likely introduced back-dated upstream migrations. Port their DDL in a new post-marker migration (or regenerate the baseline) before deploying",
-		len(missing), marker, missing[0], missing[len(missing)-1])
+		len(missing), dbMax, missing[0], missing[len(missing)-1])
 }
 
 // seedPGMigrationHistory populates migration_status_tables and migration_status_data

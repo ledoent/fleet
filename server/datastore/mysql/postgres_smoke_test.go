@@ -635,11 +635,25 @@ func TestPostgresBelowMarkerDriftCheck(t *testing.T) {
 
 	require.NoError(t, ds.checkPGBelowMarkerDrift(ctx, marker), "fully-seeded DB must pass")
 
+	// The newest migration being unapplied must NOT trip the check: that is
+	// the normal state right before goose Up applies it (this exact scenario
+	// aborted the first Phase-3 prod deploy when the check compared against
+	// the marker instead of the DB's max applied version).
+	var newest int64
+	require.NoError(t, ds.primary.Get(&newest,
+		`SELECT version_id FROM migration_status_tables WHERE is_applied ORDER BY version_id DESC LIMIT 1`))
+	_, err := ds.primary.Exec(`DELETE FROM migration_status_tables WHERE version_id = $1`, newest)
+	require.NoError(t, err)
+	require.NoError(t, ds.checkPGBelowMarkerDrift(ctx, marker),
+		"pending newest migration is goose-reachable, not drift")
+	_, err = ds.primary.Exec(`INSERT INTO migration_status_tables (version_id, is_applied) VALUES ($1, true)`, newest)
+	require.NoError(t, err)
+
 	// Simulate the back-dated-migration hole by removing one applied record.
 	var victim int64
 	require.NoError(t, ds.primary.Get(&victim,
 		`SELECT version_id FROM migration_status_tables WHERE is_applied ORDER BY version_id LIMIT 1`))
-	_, err := ds.primary.Exec(`DELETE FROM migration_status_tables WHERE version_id = $1`, victim)
+	_, err = ds.primary.Exec(`DELETE FROM migration_status_tables WHERE version_id = $1`, victim)
 	require.NoError(t, err)
 
 	err = ds.checkPGBelowMarkerDrift(ctx, marker)
