@@ -3066,10 +3066,10 @@ INSERT INTO
   )
 VALUES
   (?, ?, ?, ?, CURRENT_TIMESTAMP)
-` + ds.dialect.OnDuplicateKey("team_id,name", `
+` + ds.dialect.OnDuplicateKeyGuarded("mdm_windows_configuration_profiles", "team_id,name", `
   uploaded_at = CASE WHEN mdm_windows_configuration_profiles.syncml = VALUES(syncml) AND mdm_windows_configuration_profiles.name = VALUES(name) THEN mdm_windows_configuration_profiles.uploaded_at ELSE CURRENT_TIMESTAMP END,
   name = VALUES(name),
-  syncml = VALUES(syncml)`)
+  syncml = VALUES(syncml)`, "syncml")
 
 	// use a profile team id of 0 if no-team
 	var profTeamID uint

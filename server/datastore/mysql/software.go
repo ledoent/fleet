@@ -3359,6 +3359,9 @@ func (ds *Datastore) InsertSoftwareVulnerability(
 
 	var args []interface{}
 
+	// Deliberately unguarded: the bound updated_at param always changes, so on
+	// MySQL re-upserting an existing vuln already reports "did update"; a PG
+	// no-op guard would diverge from that, not match it.
 	stmt := `
 		INSERT INTO software_cve (cve, source, software_id, resolved_in_version)
 		VALUES (?,?,?,?)
@@ -7428,8 +7431,10 @@ func batchNewSoftwareCategoriesDB(ctx context.Context, q sqlx.ExtContext, teamID
 	// upsert lets the existing row win instead of failing the batch with a 1062
 	// duplicate-entry error; it also tolerates concurrent inserts of the same
 	// default categories.
+	// VALUES(name) rather than the bare column: on PG this rewrites to
+	// EXCLUDED.name, while a bare RHS `name` is ambiguous (SQLSTATE 42702).
 	stmt := `INSERT INTO software_categories (name, team_id) VALUES ` + placeholders +
-		` ON DUPLICATE KEY UPDATE name = name`
+		` ON DUPLICATE KEY UPDATE name = VALUES(name)`
 	args := make([]any, 0, len(names)*2)
 	for _, name := range names {
 		args = append(args, name, teamID)

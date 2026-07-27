@@ -41,3 +41,15 @@ func TestPostgresDialectVersionQueryOrdering(t *testing.T) {
 	require.NoError(t, rows.Close())
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// TestMySQLDialectCreateTableNoIfNotExists guards the MySQL bootstrap
+// fail-safe: ensureVersionTableExists swallows dbVersionQuery errors and falls
+// back to creating the version table, so on a populated database that create
+// MUST fail with "table already exists" instead of silently re-seeding and
+// replaying every migration. IF NOT EXISTS belongs to the PostgreSQL dialect
+// only.
+func TestMySQLDialectCreateTableNoIfNotExists(t *testing.T) {
+	sql := MySqlDialect{}.createVersionTableSql("migration_status_tables")
+	require.NotContains(t, sql, "IF NOT EXISTS")
+	require.Contains(t, PostgresDialect{}.createVersionTableSql("migration_status_tables"), "IF NOT EXISTS")
+}

@@ -846,9 +846,11 @@ INSERT INTO vpp_apps_teams
 	(adam_id, global_or_team_id, team_id, platform, self_service, vpp_token_id, install_during_setup)
 VALUES
 	(?, ?, ?, ?, ?, ?, COALESCE(?, false))
-` + dialect.OnDuplicateKey("global_or_team_id, adam_id, platform", `
+` + // install_during_setup's RHS is table-qualified: inside a PG DO UPDATE
+		// clause an unqualified column is ambiguous against EXCLUDED (42702).
+		dialect.OnDuplicateKey("global_or_team_id, adam_id, platform", `
 	self_service = VALUES(self_service),
-	install_during_setup = COALESCE(?, install_during_setup)`)
+	install_during_setup = COALESCE(?, vpp_apps_teams.install_during_setup)`)
 
 	var globalOrTmID uint
 	if teamID != nil {
@@ -871,9 +873,12 @@ VALUES
 		return 0, ctxerr.Wrap(ctx, err, "inserting app store app")
 	}
 
+	// This upsert is deliberately unguarded: the result only gates which way
+	// the row ID is fetched (LastInsertId vs the SELECT below), and both paths
+	// return the correct ID on either dialect.
 	var id int64
 	if insertOnDuplicateDidInsertOrUpdate(res) {
-		id, _ = res.LastInsertId() // PG: returns 0, fallback below
+		id, _ = res.LastInsertId()
 	}
 	if id == 0 {
 		stmt := `SELECT id FROM vpp_apps_teams WHERE adam_id = ? AND platform = ? AND global_or_team_id = ?`

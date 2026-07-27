@@ -1660,13 +1660,24 @@ func insertOnDuplicateDidInsertOrUpdate(res sql.Result) bool {
 	// already holds:
 	// https://github.com/go-sql-driver/mysql/blob/bcc459a906419e2890a50fc2c99ea6dd927a88f2/result.go
 
+	// PostgreSQL contract: the statement MUST be built with
+	// dialect.OnDuplicateKeyGuarded so an identical re-upsert affects zero
+	// rows. ON CONFLICT DO UPDATE otherwise rewrites the row unconditionally,
+	// and for identity tables the rebind driver's RETURNING support makes
+	// LastInsertId succeed with the row's ID — both branches below would then
+	// report an unconditional true. With the guard: insert → aff=1 with a
+	// non-zero returned ID; changed update → aff=1; identical re-upsert →
+	// aff=0 and no returned row → false, matching MySQL.
 	aff, _ := res.RowsAffected()
 	lastID, err := res.LastInsertId()
 	if err != nil {
-		// PostgreSQL doesn't support LastInsertId — fall back to RowsAffected only
+		// PostgreSQL, non-identity table (no RETURNING) — RowsAffected alone
+		// distinguishes the cases when the statement is guarded.
 		return aff > 0
 	}
-	// MySQL: something was inserted (lastID != 0) AND row was found (aff > 0)
+	// MySQL: something was inserted (lastID != 0) AND row was found (aff > 0).
+	// PG identity tables: the guard makes a no-op return zero rows, so
+	// lastID == 0 and aff == 0.
 	return lastID != 0 && aff > 0
 }
 

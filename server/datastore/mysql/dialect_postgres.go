@@ -66,6 +66,30 @@ func (postgresDialect) OnDuplicateKey(conflictTarget, updateClause string) strin
 	return "ON CONFLICT (" + conflictTarget + ") DO UPDATE SET " + translateValuesToExcluded(cleaned)
 }
 
+// OnDuplicateKeyGuarded is OnDuplicateKey plus a no-op-update guard:
+//
+//	WHERE (<table>.<c1>, …) IS DISTINCT FROM (EXCLUDED.<c1>, …)
+//
+// so re-upserting identical values affects zero rows. This makes
+// insertOnDuplicateDidInsertOrUpdate's RowsAffected-based fallback report
+// MySQL-equivalent results (insert → true, changed update → true, identical
+// re-upsert → false), and skips the dead-tuple churn of rewriting unchanged
+// rows. Guard columns are table-qualified because unqualified references in a
+// DO UPDATE clause are ambiguous against EXCLUDED (SQLSTATE 42702).
+func (d postgresDialect) OnDuplicateKeyGuarded(table, conflictTarget, updateClause string, guardCols ...string) string {
+	base := d.OnDuplicateKey(conflictTarget, updateClause)
+	if len(guardCols) == 0 {
+		return base
+	}
+	current := make([]string, len(guardCols))
+	excluded := make([]string, len(guardCols))
+	for i, col := range guardCols {
+		current[i] = table + "." + col
+		excluded[i] = "EXCLUDED." + col
+	}
+	return base + "\nWHERE (" + strings.Join(current, ", ") + ") IS DISTINCT FROM (" + strings.Join(excluded, ", ") + ")"
+}
+
 // OnConflictDoNothing returns ON CONFLICT [(<conflictTarget>)] DO NOTHING.
 // When conflictTarget is empty, the target-less form matches ANY constraint
 // violation — equivalent to MySQL's INSERT IGNORE behavior for tables that

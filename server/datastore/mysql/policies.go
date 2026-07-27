@@ -1730,7 +1730,7 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			patch_software_title_id,
 			continuous_automations_enabled
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		` + ds.dialect.OnDuplicateKey("checksum", `query = VALUES(query),
+		` + ds.dialect.OnDuplicateKeyGuarded("policies", "checksum", `query = VALUES(query),
 			description = VALUES(description),
 			author_id = VALUES(author_id),
 			resolution = VALUES(resolution),
@@ -1743,7 +1743,10 @@ func (ds *Datastore) ApplyPolicySpecs(ctx context.Context, authorID uint, specs 
 			conditional_access_enabled = VALUES(conditional_access_enabled),
 			type = VALUES(type),
 			patch_software_title_id = VALUES(patch_software_title_id),
-			continuous_automations_enabled = VALUES(continuous_automations_enabled)`)
+			continuous_automations_enabled = VALUES(continuous_automations_enabled)`,
+			"query", "description", "author_id", "resolution", "platforms", "critical",
+			"calendar_events_enabled", "software_installer_id", "vpp_apps_teams_id", "script_id",
+			"conditional_access_enabled", "type", "patch_software_title_id", "continuous_automations_enabled")
 		for teamID, teamPolicySpecs := range teamIDToPolicies {
 			for _, spec := range teamPolicySpecs {
 				var softwareInstallerID *uint

@@ -255,25 +255,17 @@ func (ds *Datastore) BatchUpsertCertificateTemplates(ctx context.Context, certif
 
 	// On duplicate (team_id, name), this is a no-op for content-bearing fields. SubjectName,
 	// CertificateAuthorityID, and SubjectAlternativeName changes are handled upstream, so the
-	// upsert intentionally does not propagate updates.
-	var sqlInsertCertificate string
-	if ds.dialect.IsPostgres() {
-		// PG: ON CONFLICT DO NOTHING since the UPDATE only sets columns to themselves (no-op).
-		// This ensures RowsAffected()=0 for existing rows, so insertOnDuplicateDidInsertOrUpdate
-		// correctly detects no modification occurred.
-		sqlInsertCertificate = ds.dialect.InsertIgnoreInto() + ` certificate_templates (
-			name, team_id, certificate_authority_id, subject_name, subject_alternative_name
-		) VALUES (?, ?, ?, ?, ?)` + ds.dialect.OnConflictDoNothing("team_id,name")
-	} else {
-		sqlInsertCertificate = `
-		INSERT INTO certificate_templates (
-			name, team_id, certificate_authority_id, subject_name, subject_alternative_name
-		) VALUES (?, ?, ?, ?, ?)
-		` + ds.dialect.OnDuplicateKey("team_id,name", `
-			name = VALUES(name),
-			team_id = VALUES(team_id)
-		`)
-	}
+	// upsert intentionally does not propagate updates. The guard columns are the conflict
+	// columns themselves, so on PG the DO UPDATE never fires (RowsAffected()=0 for existing
+	// rows, matching MySQL's no-op semantics).
+	sqlInsertCertificate := `
+	INSERT INTO certificate_templates (
+		name, team_id, certificate_authority_id, subject_name, subject_alternative_name
+	) VALUES (?, ?, ?, ?, ?)
+	` + ds.dialect.OnDuplicateKeyGuarded("certificate_templates", "team_id,name", `
+		name = VALUES(name),
+		team_id = VALUES(team_id)
+	`, "name", "team_id")
 
 	teamsModifiedSet := make(map[uint]struct{})
 	for _, cert := range certificateTemplates {

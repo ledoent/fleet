@@ -2073,6 +2073,40 @@ func (ds *Datastore) SetCommandForPendingSCEPRenewal(ctx context.Context, assocs
 		return nil
 	}
 
+	if ds.dialect.IsPostgres() {
+		// This function must only ever update existing associations. The MySQL
+		// path detects an accidental insert via ON DUPLICATE KEY affected-rows
+		// arithmetic (1 = insert, 2 = update), which PG cannot reproduce — ON
+		// CONFLICT reports 1 for both. Use a plain UPDATE ... FROM (VALUES ...)
+		// instead and require every association to have matched.
+		var sb strings.Builder
+		args := make([]any, 0, len(assocs)*3)
+		for i, assoc := range assocs {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("(?, ?, ?)")
+			args = append(args, assoc.HostUUID, assoc.SHA256, cmdUUID)
+		}
+		stmt := `
+		UPDATE nano_cert_auth_associations AS a
+		SET renew_command_uuid = v.renew_command_uuid
+		FROM (VALUES ` + sb.String() + `) AS v(id, sha256, renew_command_uuid)
+		WHERE a.id = v.id AND a.sha256 = v.sha256`
+
+		return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
+			res, err := tx.ExecContext(ctx, stmt, args...)
+			if err != nil {
+				return fmt.Errorf("failed to update cert associations: %w", err)
+			}
+			affected, _ := res.RowsAffected()
+			if affected != int64(len(assocs)) {
+				return errors.New("this function can only be used to update existing associations")
+			}
+			return nil
+		})
+	}
+
 	var sb strings.Builder
 	args := make([]any, len(assocs)*3)
 	for i, assoc := range assocs {

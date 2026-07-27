@@ -90,8 +90,14 @@ type MySqlDialect struct{}
 
 func (MySqlDialect) DriverName() string { return "mysql" }
 
+// createVersionTableSql deliberately omits IF NOT EXISTS (matching upstream):
+// ensureVersionTableExists swallows dbVersionQuery errors and calls this as a
+// fallback, so on a populated database a transient query failure must abort on
+// "table already exists" rather than silently re-seeding the version table and
+// replaying every migration. Only the PostgreSQL dialect (whose bootstrap path
+// races the baseline load) uses IF NOT EXISTS.
 func (m MySqlDialect) createVersionTableSql(name string) string {
-	return `CREATE TABLE IF NOT EXISTS ` + name + ` (
+	return `CREATE TABLE ` + name + ` (
                 id serial NOT NULL,
                 version_id bigint NOT NULL,
                 is_applied boolean NOT NULL,

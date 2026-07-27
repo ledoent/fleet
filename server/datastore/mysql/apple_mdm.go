@@ -2728,13 +2728,13 @@ INSERT INTO
 VALUES
   -- see https://stackoverflow.com/a/51393124/1094941
   ( CONCAT('` + fleet.MDMAppleProfileUUIDPrefix + `', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, ?, ?, UNHEX(MD5(?)), CURRENT_TIMESTAMP(6), ?)
-` + ds.dialect.OnDuplicateKey("team_id,identifier", `
+` + ds.dialect.OnDuplicateKeyGuarded("mdm_apple_configuration_profiles", "team_id,identifier", `
   uploaded_at = CASE WHEN mdm_apple_configuration_profiles.checksum = VALUES(checksum) AND mdm_apple_configuration_profiles.name = VALUES(name) THEN mdm_apple_configuration_profiles.uploaded_at ELSE CURRENT_TIMESTAMP END,
   secrets_updated_at = VALUES(secrets_updated_at),
   checksum = VALUES(checksum),
   name = VALUES(name),
   mobileconfig = VALUES(mobileconfig)
-`)
+`, "secrets_updated_at", "checksum", "name", "mobileconfig")
 
 	// use a profile team id of 0 if no-team
 	var profTeamID uint
@@ -4009,11 +4009,11 @@ func (ds *Datastore) SetOrUpdateMDMAppleSetupAssistant(ctx context.Context, asst
 			mdm_apple_setup_assistants (team_id, global_or_team_id, name, profile)
 		VALUES
 			(?, ?, ?, ?)
-		` + ds.dialect.OnDuplicateKey("global_or_team_id", `
+		` + ds.dialect.OnDuplicateKeyGuarded("mdm_apple_setup_assistants", "global_or_team_id", `
 			updated_at = CASE WHEN mdm_apple_setup_assistants.profile = VALUES(profile) AND mdm_apple_setup_assistants.name = VALUES(name) THEN mdm_apple_setup_assistants.updated_at ELSE CURRENT_TIMESTAMP END,
 			name = VALUES(name),
 			profile = VALUES(profile)
-`)
+`, "name", "profile")
 	var globalOrTmID uint
 	if asst.TeamID != nil {
 		globalOrTmID = *asst.TeamID
@@ -5020,14 +5020,16 @@ INSERT INTO mdm_apple_declarations (
 VALUES (
 	?,?,?,?,?,?,NOW(6),?
 )
-` + ds.dialect.OnDuplicateKey("declaration_uuid", `
+` + // conflict target is (team_id, identifier): declaration_uuid is freshly
+		// generated on every call, so on PG it can never be the conflicting key.
+		ds.dialect.OnDuplicateKeyGuarded("mdm_apple_declarations", "team_id,identifier", `
   uploaded_at = CASE WHEN mdm_apple_declarations.raw_json = VALUES(raw_json) AND mdm_apple_declarations.name = VALUES(name) AND COALESCE(mdm_apple_declarations.secrets_updated_at = VALUES(secrets_updated_at), TRUE) THEN mdm_apple_declarations.uploaded_at ELSE NOW() END,
   secrets_updated_at = VALUES(secrets_updated_at),
   name = VALUES(name),
   identifier = VALUES(identifier),
   scope = VALUES(scope),
   raw_json = VALUES(raw_json)
-`)
+`, "secrets_updated_at", "name", "scope", "raw_json")
 
 	updatedDeclarationUUIDs := make([]string, 0, len(incomingDeclarations))
 	for _, d := range incomingDeclarations {

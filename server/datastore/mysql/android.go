@@ -1923,11 +1923,13 @@ WHERE
 		raw_json,
 		uploaded_at
 	) VALUES (CONCAT('` + fleet.MDMAndroidProfileUUIDPrefix + `', CONVERT(uuid() USING utf8mb4)), ?, ?, ?, CURRENT_TIMESTAMP(6))
-	` + ds.dialect.OnDuplicateKey("profile_uuid", `
+	` + // conflict target is (team_id, name): profile_uuid is freshly generated
+		// on every call, so on PG it can never be the conflicting key.
+		ds.dialect.OnDuplicateKeyGuarded("mdm_android_configuration_profiles", "team_id,name", `
 		raw_json = VALUES(raw_json),
 		name = VALUES(name),
 		uploaded_at = CASE WHEN mdm_android_configuration_profiles.raw_json = VALUES(raw_json) AND mdm_android_configuration_profiles.name = VALUES(name) THEN mdm_android_configuration_profiles.uploaded_at ELSE CURRENT_TIMESTAMP END
-`)
+`, "raw_json")
 	for _, p := range profiles {
 		var res sql.Result
 		if res, err = tx.ExecContext(ctx, insertNewOrEditedProfile, profileTeamID, p.Name, p.RawJSON); err != nil {

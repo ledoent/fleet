@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,17 +119,13 @@ func TestPostgresNewHostViaTestHelper(t *testing.T) {
 
 	// Now try the operations that follow in typical test setup
 	err = ds.RecordLabelQueryExecutions(ctx, created, map[uint]*bool{}, time.Now(), false)
-	if err != nil {
-		t.Logf("RecordLabelQueryExecutions error: %v", err)
-	}
+	require.NoError(t, err, "RecordLabelQueryExecutions")
 
 	// Try saving host users
 	err = ds.SaveHostUsers(ctx, created.ID, []fleet.HostUser{
 		{Username: "testuser", Uid: 1001},
 	})
-	if err != nil {
-		t.Logf("SaveHostUsers error: %v", err)
-	}
+	require.NoError(t, err, "SaveHostUsers")
 }
 
 // TestPostgresDatastoreOperations exercises a broad set of datastore operations
@@ -153,46 +150,33 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 
 	t.Run("HostByIdentifier", func(t *testing.T) {
 		h, err := ds.HostByIdentifier(ctx, "pg-ops-uuid-1")
-		if err != nil {
-			t.Logf("FAIL HostByIdentifier: %v", err)
-			return
-		}
+		require.NoError(t, err, "HostByIdentifier")
 		assert.Equal(t, host.ID, h.ID)
 	})
 
 	t.Run("UpdateHost", func(t *testing.T) {
 		host.Hostname = "pg-ops-hostname-updated"
 		err := ds.UpdateHost(ctx, host)
-		if err != nil {
-			t.Logf("FAIL UpdateHost: %v", err)
-		}
+		require.NoError(t, err, "UpdateHost")
 	})
 
 	t.Run("Host", func(t *testing.T) {
 		h, err := ds.Host(ctx, host.ID)
-		if err != nil {
-			t.Logf("FAIL Host: %v", err)
-			return
-		}
+		require.NoError(t, err, "Host")
 		assert.Equal(t, "pg-ops-hostname-updated", h.Hostname)
 	})
 
 	// --- Labels ---
 	t.Run("Labels", func(t *testing.T) {
 		labels, err := ds.ListLabels(ctx, fleet.TeamFilter{User: &fleet.User{GlobalRole: new("admin")}}, fleet.ListOptions{}, false)
-		if err != nil {
-			t.Logf("FAIL ListLabels: %v", err)
-			return
-		}
+		require.NoError(t, err, "ListLabels")
 		t.Logf("Labels found: %d", len(labels))
 	})
 
 	t.Run("RecordLabelQueryExecutions", func(t *testing.T) {
 		trueVal := true
 		err := ds.RecordLabelQueryExecutions(ctx, host, map[uint]*bool{1: &trueVal}, time.Now(), false)
-		if err != nil {
-			t.Logf("FAIL RecordLabelQueryExecutions: %v", err)
-		}
+		require.NoError(t, err, "RecordLabelQueryExecutions")
 	})
 
 	// --- Queries ---
@@ -203,18 +187,12 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 			Query:       "SELECT 1",
 			Logging:     fleet.LoggingSnapshot,
 		})
-		if err != nil {
-			t.Logf("FAIL NewQuery: %v", err)
-			return
-		}
+		require.NoError(t, err, "NewQuery")
 		assert.NotZero(t, q.ID)
 
 		// List queries
 		queries, _, _, _, err := ds.ListQueries(ctx, fleet.ListQueryOptions{ListOptions: fleet.ListOptions{}})
-		if err != nil {
-			t.Logf("FAIL ListQueries: %v", err)
-			return
-		}
+		require.NoError(t, err, "ListQueries")
 		t.Logf("Queries found: %d", len(queries))
 	})
 
@@ -223,10 +201,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 		p, err := ds.NewPack(ctx, &fleet.Pack{
 			Name: "pg-test-pack",
 		})
-		if err != nil {
-			t.Logf("FAIL NewPack: %v", err)
-			return
-		}
+		require.NoError(t, err, "NewPack")
 		assert.NotZero(t, p.ID)
 	})
 
@@ -238,18 +213,12 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 			Password:   []byte("test-password-hash"),
 			GlobalRole: new("admin"),
 		})
-		if err != nil {
-			t.Logf("FAIL NewUser: %v", err)
-			return
-		}
+		require.NoError(t, err, "NewUser")
 		assert.NotZero(t, u.ID)
 
 		// Find user by email
 		found, err := ds.UserByEmail(ctx, "pg-test@example.com")
-		if err != nil {
-			t.Logf("FAIL UserByEmail: %v", err)
-			return
-		}
+		require.NoError(t, err, "UserByEmail")
 		assert.Equal(t, u.ID, found.ID)
 	})
 
@@ -258,10 +227,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 		team, err := ds.NewTeam(ctx, &fleet.Team{
 			Name: "pg-test-team",
 		})
-		if err != nil {
-			t.Logf("FAIL NewTeam: %v", err)
-			return
-		}
+		require.NoError(t, err, "NewTeam")
 		assert.NotZero(t, team.ID)
 	})
 
@@ -271,10 +237,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 			Name:  "pg-test-policy",
 			Query: "SELECT 1",
 		})
-		if err != nil {
-			t.Logf("FAIL NewGlobalPolicy: %v", err)
-			return
-		}
+		require.NoError(t, err, "NewGlobalPolicy")
 		assert.NotZero(t, p.ID)
 	})
 
@@ -282,9 +245,7 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 	t.Run("SaveHostAdditional", func(t *testing.T) {
 		additional := json.RawMessage(`{"test_field": "test_value"}`)
 		err := ds.SaveHostAdditional(ctx, host.ID, &additional)
-		if err != nil {
-			t.Logf("FAIL SaveHostAdditional: %v", err)
-		}
+		require.NoError(t, err, "SaveHostAdditional")
 	})
 
 	// --- Software ---
@@ -293,23 +254,16 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 			{Name: "pg-test-sw", Version: "1.0", Source: "test"},
 		}
 		_, err := ds.UpdateHostSoftware(ctx, host.ID, sw)
-		if err != nil {
-			t.Logf("FAIL UpdateHostSoftware: %v", err)
-		}
+		require.NoError(t, err, "UpdateHostSoftware")
 	})
 
 	// --- Sessions ---
 	t.Run("NewSession", func(t *testing.T) {
 		users, err := ds.ListUsers(ctx, fleet.UserListOptions{ListOptions: fleet.ListOptions{}})
-		if err != nil || len(users) == 0 {
-			t.Logf("SKIP NewSession: no users")
-			return
-		}
+		require.NoError(t, err, "ListUsers")
+		require.NotEmpty(t, users, "NewSession requires the NewUser subtest's user")
 		sess, err := ds.NewSession(ctx, users[0].ID, 64)
-		if err != nil {
-			t.Logf("FAIL NewSession: %v", err)
-			return
-		}
+		require.NoError(t, err, "NewSession")
 		assert.NotZero(t, sess.ID)
 	})
 
@@ -318,47 +272,33 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 		err := ds.ApplyEnrollSecrets(ctx, nil, []*fleet.EnrollSecret{
 			{Secret: "pg-test-secret"},
 		})
-		if err != nil {
-			t.Logf("FAIL ApplyEnrollSecrets: %v", err)
-		}
+		require.NoError(t, err, "ApplyEnrollSecrets")
 	})
 
 	// --- App config ---
 	t.Run("AppConfig", func(t *testing.T) {
 		cfg, err := ds.AppConfig(ctx)
-		if err != nil {
-			t.Logf("FAIL AppConfig: %v", err)
-			return
-		}
+		require.NoError(t, err, "AppConfig")
 		assert.NotNil(t, cfg)
 	})
 
 	// --- ListHosts ---
 	t.Run("ListHosts", func(t *testing.T) {
 		hosts, err := ds.ListHosts(ctx, fleet.TeamFilter{User: &fleet.User{GlobalRole: new("admin")}}, fleet.HostListOptions{ListOptions: fleet.ListOptions{}})
-		if err != nil {
-			t.Logf("FAIL ListHosts: %v", err)
-			return
-		}
+		require.NoError(t, err, "ListHosts")
 		assert.GreaterOrEqual(t, len(hosts), 1)
 	})
 
 	// --- CountHosts ---
 	t.Run("CountHosts", func(t *testing.T) {
 		count, err := ds.CountHosts(ctx, fleet.TeamFilter{User: &fleet.User{GlobalRole: new("admin")}}, fleet.HostListOptions{})
-		if err != nil {
-			t.Logf("FAIL CountHosts: %v", err)
-			return
-		}
+		require.NoError(t, err, "CountHosts")
 		assert.GreaterOrEqual(t, count, 1)
 	})
 
 	t.Run("HostLite", func(t *testing.T) {
 		h, err := ds.HostLite(ctx, host.ID)
-		if err != nil {
-			t.Logf("FAIL HostLite: %v", err)
-			return
-		}
+		require.NoError(t, err, "HostLite")
 		assert.Equal(t, host.ID, h.ID)
 	})
 
@@ -369,48 +309,34 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 			fleet.HostTargets{HostIDs: []uint{host.ID}},
 			time.Now(),
 		)
-		if err != nil {
-			t.Logf("FAIL CountHostsInTargets: %v", err)
-			return
-		}
+		require.NoError(t, err, "CountHostsInTargets")
 		assert.GreaterOrEqual(t, metrics.TotalHosts, uint(1))
 	})
 
 	// --- Host disk encryption key ---
 	t.Run("SetOrUpdateHostDiskEncryptionKey", func(t *testing.T) {
 		_, err := ds.SetOrUpdateHostDiskEncryptionKey(ctx, host, "test-key", "test-client", new(bool))
-		if err != nil {
-			t.Logf("FAIL SetOrUpdateHostDiskEncryptionKey: %v", err)
-		}
+		require.NoError(t, err, "SetOrUpdateHostDiskEncryptionKey")
 	})
 
 	// --- Cron stats ---
 	t.Run("InsertCronStats", func(t *testing.T) {
 		id, err := ds.InsertCronStats(ctx, fleet.CronStatsTypeScheduled, "test-cron", "test-instance", fleet.CronStatsStatusPending)
-		if err != nil {
-			t.Logf("FAIL InsertCronStats: %v", err)
-			return
-		}
+		require.NoError(t, err, "InsertCronStats")
 		assert.NotZero(t, id)
 	})
 
 	// --- ListPolicies ---
 	t.Run("ListGlobalPolicies", func(t *testing.T) {
 		policies, err := ds.ListGlobalPolicies(ctx, fleet.ListOptions{}, "")
-		if err != nil {
-			t.Logf("FAIL ListGlobalPolicies: %v", err)
-			return
-		}
+		require.NoError(t, err, "ListGlobalPolicies")
 		assert.GreaterOrEqual(t, len(policies), 1)
 	})
 
 	// --- Invites ---
 	t.Run("ListInvites", func(t *testing.T) {
 		invites, err := ds.ListInvites(ctx, fleet.ListOptions{})
-		if err != nil {
-			t.Logf("FAIL ListInvites: %v", err)
-			return
-		}
+		require.NoError(t, err, "ListInvites")
 		_ = invites
 	})
 }
@@ -631,6 +557,118 @@ func TestPostgresInsertCVEMeta(t *testing.T) {
 	require.NotNil(t, got.CVSSScore)
 	require.InDelta(t, 8.1, *got.CVSSScore, 0.001)
 	require.Equal(t, "first-updated", got.Description)
+}
+
+// TestPostgresUpsertDidUpdate regression-covers insertOnDuplicateDidInsertOrUpdate
+// on PG: without the OnDuplicateKeyGuarded no-op guard, ON CONFLICT DO UPDATE
+// rewrites the row unconditionally and the helper reports true for identical
+// re-upserts (spurious activities / MDM profile re-delivery on every GitOps
+// apply). Exercises a representative guarded call site end-to-end.
+func TestPostgresUpsertDidUpdate(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	asst := &fleet.MDMAppleSetupAssistant{
+		Name:    "pg-asst",
+		Profile: json.RawMessage(`{"a": 1}`),
+	}
+
+	// Fresh insert.
+	created, err := ds.SetOrUpdateMDMAppleSetupAssistant(ctx, asst)
+	require.NoError(t, err)
+	firstUploaded := created.UploadedAt
+
+	// Identical re-upsert: must be detected as a no-op (uploaded_at unchanged
+	// and, via the guarded result, no profile-UUID clearing).
+	again, err := ds.SetOrUpdateMDMAppleSetupAssistant(ctx, asst)
+	require.NoError(t, err)
+	require.Equal(t, firstUploaded, again.UploadedAt, "identical re-upsert must not rewrite the row")
+
+	// Changed re-upsert: must apply.
+	asst.Profile = json.RawMessage(`{"a": 2}`)
+	changed, err := ds.SetOrUpdateMDMAppleSetupAssistant(ctx, asst)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"a": 2}`, string(changed.Profile))
+}
+
+// TestPostgresAndroidProfileUpsert regression-covers the Android profile batch
+// upsert's conflict target: profile_uuid is freshly generated per call, so the
+// upsert must conflict on (team_id, name) — on PG, targeting profile_uuid made
+// every re-applied profile fail with a duplicate key error.
+func TestPostgresAndroidProfileUpsert(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	profiles := []*fleet.MDMAndroidConfigProfile{
+		{Name: "pg-android-profile", RawJSON: json.RawMessage(`{"key": "v1"}`), TeamID: new(uint(0))},
+	}
+	updated, err := ds.batchSetMDMAndroidProfiles(ctx, ds.writer(ctx), nil, profiles, nil)
+	require.NoError(t, err, "first apply")
+	require.True(t, updated, "first apply inserts")
+
+	// Same profile, same content: idempotent re-apply, detected as a no-op.
+	updated, err = ds.batchSetMDMAndroidProfiles(ctx, ds.writer(ctx), nil, profiles, nil)
+	require.NoError(t, err, "identical re-apply")
+	require.False(t, updated, "identical re-apply must report no update")
+
+	// Same name, changed content: update in place, still one row.
+	profiles[0].RawJSON = json.RawMessage(`{"key": "v2"}`)
+	updated, err = ds.batchSetMDMAndroidProfiles(ctx, ds.writer(ctx), nil, profiles, nil)
+	require.NoError(t, err, "changed re-apply")
+	require.True(t, updated, "changed re-apply reports update")
+
+	var count int
+	require.NoError(t, ds.primary.Get(&count,
+		"SELECT COUNT(*) FROM mdm_android_configuration_profiles WHERE name = $1", "pg-android-profile"))
+	require.Equal(t, 1, count)
+}
+
+// TestPostgresACMERevokedBoolean regression-covers the ACME `revoked`
+// columns' type: the baseline created them as smallint while every query
+// (e.g. GetAccountByID's `revoked = false`) and the driver's boolean-column
+// rewrite treat `revoked` as boolean — `smallint = boolean` errors on PG.
+// Migration 20260727150000 converts them; this asserts the queries now work.
+func TestPostgresACMERevokedBoolean(t *testing.T) {
+	ds := CreatePostgresDS(t)
+
+	for _, table := range []string{"acme_accounts", "acme_enrollments"} {
+		var count int
+		require.NoError(t, ds.primary.Get(&count,
+			`SELECT COUNT(*) FROM `+table+` WHERE revoked = false`), //nolint:gosec // table from fixed list
+			"boolean comparison on %s.revoked", table)
+	}
+}
+
+// TestPostgresSetCommandForPendingSCEPRenewal regression-covers the SCEP
+// renewal tracking update: the MySQL path's affected-rows arithmetic (1 =
+// insert, 2 = update) cannot distinguish the cases on PG, which made every
+// legitimate update return an error. The PG path is a plain UPDATE ... FROM
+// (VALUES ...) that must match every association.
+func TestPostgresSetCommandForPendingSCEPRenewal(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	_, err := ds.primary.Exec(
+		`INSERT INTO nano_cert_auth_associations (id, sha256) VALUES ($1, $2)`,
+		"pg-scep-host-uuid", strings.Repeat("a", 64))
+	require.NoError(t, err)
+
+	// Updating the existing association succeeds.
+	err = ds.SetCommandForPendingSCEPRenewal(ctx, []fleet.SCEPIdentityAssociation{
+		{HostUUID: "pg-scep-host-uuid", SHA256: strings.Repeat("a", 64)},
+	}, "cmd-uuid-1")
+	require.NoError(t, err, "update of existing association")
+
+	var got string
+	require.NoError(t, ds.primary.Get(&got,
+		`SELECT renew_command_uuid FROM nano_cert_auth_associations WHERE id = $1`, "pg-scep-host-uuid"))
+	require.Equal(t, "cmd-uuid-1", got)
+
+	// An association that doesn't exist must error, not silently insert.
+	err = ds.SetCommandForPendingSCEPRenewal(ctx, []fleet.SCEPIdentityAssociation{
+		{HostUUID: "pg-scep-missing", SHA256: strings.Repeat("b", 64)},
+	}, "cmd-uuid-2")
+	require.Error(t, err, "missing association must error")
 }
 
 // TestPostgresGetHostMDM regression-covers the connected_to_fleet CASE in

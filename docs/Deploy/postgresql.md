@@ -201,7 +201,13 @@ needed if you cannot restart Fleet.
     against it (expects `Migrations completed.`), then runs `prepare db`
     a second time (expects `Migrations already completed`).
   - Post-smoke: every public-schema table is owned by `fleet`.
-- `test-go-postgres.yaml` runs the Go test suite against PG.
+- `test-go-postgres.yaml` runs the rebind-driver unit tests
+  (`server/platform/postgres/...`) and the `TestPostgres*` datastore tests
+  against a real PG 16. NOTE: the datastore job is filtered to `-run
+  "TestPostgres"` — it does not run the full dual-dialect datastore suite (the
+  `CreateDS` sites), which still has known PG failures (see "Known failing
+  tests" above). Widening that filter is tracked in
+  `pg-review-remediation.md` Phase 4.
 - `build-ledo.yml` refuses to publish images unless both of the above succeeded
   on the build SHA.
 

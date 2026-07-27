@@ -37,6 +37,19 @@ type DialectHelper interface {
 	// The PostgreSQL implementation translates VALUES(col) → EXCLUDED.col.
 	OnDuplicateKey(conflictTarget, updateClause string) string
 
+	// OnDuplicateKeyGuarded is OnDuplicateKey for upserts whose sql.Result is
+	// inspected by insertOnDuplicateDidInsertOrUpdate. PG's ON CONFLICT DO
+	// UPDATE rewrites the row even when every value is unchanged, which makes
+	// RowsAffected indistinguishable from a real update; the PostgreSQL
+	// implementation appends
+	//   WHERE (<table>.<guardCols>) IS DISTINCT FROM (EXCLUDED.<guardCols>)
+	// so a no-op re-upsert affects zero rows, matching MySQL's
+	// CLIENT_FOUND_ROWS semantics (insert → true, changed update → true,
+	// identical re-upsert → false). guardCols must be the content columns the
+	// update clause propagates (bookkeeping columns like uploaded_at CASEs
+	// excluded). The MySQL implementation ignores table and guardCols.
+	OnDuplicateKeyGuarded(table, conflictTarget, updateClause string, guardCols ...string) string
+
 	// OnConflictDoNothing returns the suffix for suppressing duplicate-key errors.
 	//   MySQL:      "" (handled by InsertIgnoreInto prefix)
 	//   PostgreSQL: " ON CONFLICT (" + conflictTarget + ") DO NOTHING"

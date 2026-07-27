@@ -29,6 +29,22 @@ and 15, so they gate every future rebase.
 
 ## Phase 1 — execution plan
 
+> **Status 2026-07-27: COMPLETE.** All items 1.1–1.8 landed. Implementing them
+> surfaced three additional PG bugs, all fixed in the same change:
+>
+> - `batchNewSoftwareCategoriesDB` (`software.go`): `ON DUPLICATE KEY UPDATE
+>   name = name` → `DO UPDATE SET name = name` is ambiguous on PG (42702);
+>   found the moment the smoke tests could fail (broke `NewTeam`). Now
+>   `name = VALUES(name)`.
+> - `insertOrUpdateDeclarations` (`apple_mdm.go`): same wrong-conflict-target
+>   class as finding 2 — conflict on `declaration_uuid`, which is freshly
+>   generated per call; real constraint is `(team_id, identifier)`. Fixed and
+>   guarded.
+> - `InsertVPPAppWithTeam` (`vpp.go`): `COALESCE(?, install_during_setup)`
+>   inside DO UPDATE has an unqualified column reference — ambiguous on PG
+>   (42702). Now table-qualified. (This upsert stays unguarded by design: its
+>   result only gates ID retrieval, correct on both paths.)
+
 ### 1.1 Make the smoke tests assert (finding 10)
 `server/datastore/mysql/postgres_smoke_test.go:120-131, 136-416`: replace every
 `t.Logf("FAIL …"); return` with `require.NoError` / `t.Errorf`. Expect some subtests to

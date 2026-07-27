@@ -32,6 +32,13 @@ func (mysqlDialect) OnDuplicateKey(_, updateClause string) string {
 	return "ON DUPLICATE KEY UPDATE " + updateClause
 }
 
+// OnDuplicateKeyGuarded is OnDuplicateKey on MySQL — CLIENT_FOUND_ROWS
+// affected-rows semantics already distinguish identical re-upserts, so the
+// table and guard columns are unused.
+func (d mysqlDialect) OnDuplicateKeyGuarded(_, conflictTarget, updateClause string, _ ...string) string {
+	return d.OnDuplicateKey(conflictTarget, updateClause)
+}
+
 // OnConflictDoNothing returns "" — MySQL handles ignore via the INSERT IGNORE prefix.
 func (mysqlDialect) OnConflictDoNothing(_ string) string { return "" }
 
