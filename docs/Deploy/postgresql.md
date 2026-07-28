@@ -191,14 +191,22 @@ needed if you cannot restart Fleet.
 - `validate-pg-compat.yml` runs on every PR that touches PG-relevant paths.
   Steps, in order:
   - `check_primary_keys` — every raw `ON DUPLICATE KEY UPDATE` site is
-    covered by `knownPrimaryKeys` in `rebind_driver.go`.
+    covered by `knownPrimaryKeys` in `rebind_driver.go`, and every entry's
+    columns match a real PK/UNIQUE constraint in the baseline.
   - `check_schema_drift` — MySQL `schema.sql` and PG `pg_baseline_schema.sql`
     table sets match (allowlist: `tools/pgcompat/known_schema_diff.txt`).
   - `check_column_drift` — for every table present in both schemas, the
     column sets match (allowlist: `tools/pgcompat/known_column_drift.txt`).
+  - `check_constraint_drift` — PK/UNIQUE/index/FK parity by column set
+    (allowlist: `tools/pgcompat/known_constraint_drift.txt`; the deferred FK
+    set lives there).
+  - `check_bool_col_split` — no column name typed boolean and smallint in
+    different tables (allowlist: `tools/pgcompat/known_bool_col_splits.txt`).
   - Gate-of-the-gate test (`go test ./tools/pgcompat/`) — synthetic-input
     regression checks that prove each validator fails when it should.
-  - `gen_bool_cols` is up to date with the baseline.
+  - Generated files are up to date: `gen_bool_cols`, `gen_identity_cols`,
+    `gen_updated_at_triggers` (the `ON UPDATE CURRENT_TIMESTAMP` trigger set
+    applied on every `prepare db`).
   - **Fresh-PG-install smoke test** — spins up empty PG via
     `docker-compose`, builds the `fleet` binary, runs `prepare db`
     against it (expects `Migrations completed.`), then runs `prepare db`
