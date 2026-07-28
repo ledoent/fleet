@@ -376,3 +376,37 @@ follow-up), full dual-dialect test suite (Phase 4), FOR UPDATE strip
 
 Nits: all addressed in P3.5 except execWithReturning per-row materialization
 cost (accepted: correctness first; unmeasured at this deployment's scale).
+
+---
+
+## Re-review outcome (2026-07-28)
+
+The full adversarial re-review returned **3 must-fix, 7 should-fix, 5 nits**
+— all three must-fixes fixed the same day (commit c68c758922):
+
+- **M1** `UpdateVulnerabilityHostCounts` failed every hourly run after the
+  Phase-3 swap change (bare `DROP TABLE` of the old table the swap now drops;
+  SQLSTATE 42P01, confirmed live in prod cron_stats). Fixed with IF EXISTS;
+  `TestPostgresHostCountCrons` now runs all four swap crons end-to-end.
+  *Introduced by Phase 2.6/3 — the swap-caller audit missed the one bare drop.*
+- **M2** Windows ESP tri-state `awaiting_configuration` collapsed Active=2→0
+  by the smallint bool-CASE rewrite. Split-typed names are now excluded from
+  ALL generic bool machinery (gen_bool_cols reads the splits allowlist);
+  `TestPostgresWindowsESPStateMachine` walks the real transitions.
+  *Pre-existing; the Phase-3 split validator identified the hazard but the
+  allowlist rationale wrongly claimed the smallint side was handled.*
+- **M3** `updated_at` frozen at insert time on ~125 tables (triggers existed
+  on only the 12 driver-created tables). New `gen_updated_at_triggers`
+  generates the full 138-trigger set from schema.sql, applied idempotently on
+  every prepare db; `fleet_set_updated_at` upgraded to exact MySQL semantics
+  (touch on change, no-op preserved, explicit assignment wins). CI staleness
+  gate added. *Pre-existing since the original baseline; same class as
+  finding 4 at larger scale.*
+
+Re-review should-fixes adopted: none required immediate action beyond M1-M3;
+the Migration-C backfill batching note is moot in practice (the migration is
+pre-new-marker — fresh installs take the baseline and every existing
+deployment has already run it) but the batching convention stands for future
+migrations. The re-reviewer's structural recommendation — treat Phase 4
+(full dual-dialect suite) as a merge gate, not a stretch goal — is adopted:
+**Phase 4 is a merge precondition for PR #6.**
