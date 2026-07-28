@@ -12,13 +12,14 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/fleetdm/fleet/v4/tools/pgcompat/internal/allowlist"
 )
 
 var (
@@ -31,16 +32,10 @@ func main() {
 	allowlistPath := flag.String("allowlist", "tools/pgcompat/known_bool_col_splits.txt", "path to allowlist")
 	flag.Parse()
 
-	allowed := map[string]bool{}
-	if f, err := os.Open(*allowlistPath); err == nil {
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line != "" && !strings.HasPrefix(line, "#") {
-				allowed[line] = true
-			}
-		}
-		f.Close()
+	allowed, err := allowlist.LoadLines(*allowlistPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", *allowlistPath, err)
+		os.Exit(2)
 	}
 
 	src, err := os.ReadFile(*pgPath)

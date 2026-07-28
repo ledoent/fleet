@@ -14,21 +14,22 @@
 // Allowlist format (tools/pgcompat/known_column_drift.txt): one line per
 // accepted difference, in the form
 //
-//   mysql-only: <table>.<column>    — column exists in MySQL but not PG
-//   pg-only:    <table>.<column>    — column exists in PG but not MySQL
+//	mysql-only: <table>.<column>    — column exists in MySQL but not PG
+//	pg-only:    <table>.<column>    — column exists in PG but not MySQL
 //
 // Lines starting with `#` are comments. Tables not present in both schemas
 // are ignored (they're covered by check_schema_drift).
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/fleetdm/fleet/v4/tools/pgcompat/internal/allowlist"
 )
 
 var (
@@ -56,7 +57,7 @@ func main() {
 	allowlistPath := flag.String("allowlist", "tools/pgcompat/known_column_drift.txt", "path to known-drift allowlist")
 	flag.Parse()
 
-	mysqlOnlyAllow, pgOnlyAllow, err := loadAllowlist(*allowlistPath)
+	mysqlOnlyAllow, pgOnlyAllow, err := allowlist.LoadTagged(*allowlistPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read %s: %v\n", *allowlistPath, err)
 		os.Exit(2)
@@ -261,40 +262,6 @@ func parseTables(path string, tableHeaderRe, colTokenRe *regexp.Regexp) (map[str
 		out[table] = cols
 	}
 	return out, nil
-}
-
-func loadAllowlist(path string) (mysqlOnly, pgOnly map[string]struct{}, err error) {
-	mysqlOnly = map[string]struct{}{}
-	pgOnly = map[string]struct{}{}
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return mysqlOnly, pgOnly, nil
-		}
-		return nil, nil, err
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			return nil, nil, fmt.Errorf("malformed allowlist line: %q", line)
-		}
-		tag, val := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-		switch tag {
-		case "mysql-only":
-			mysqlOnly[val] = struct{}{}
-		case "pg-only":
-			pgOnly[val] = struct{}{}
-		default:
-			return nil, nil, fmt.Errorf("unknown allowlist tag %q in line %q (expected mysql-only or pg-only)", tag, line)
-		}
-	}
-	return mysqlOnly, pgOnly, sc.Err()
 }
 
 func splitDotted(s string) (table, col string, ok bool) {

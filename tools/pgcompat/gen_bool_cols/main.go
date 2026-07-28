@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/fleetdm/fleet/v4/tools/pgcompat/internal/allowlist"
 )
 
 var reBoolCol = regexp.MustCompile(`^\s+([a-z][a-z0-9_]*)\s+boolean\b`)
@@ -28,16 +30,10 @@ func main() {
 	// enter the generic name-keyed bool machinery: the smallint side would be
 	// mis-rewritten (awaiting_configuration's tri-state collapse broke the
 	// Windows ESP state machine). check_bool_col_split guards the list.
-	splitNames := map[string]bool{}
-	if sf, err := os.Open(*splitsPath); err == nil {
-		ssc := bufio.NewScanner(sf)
-		for ssc.Scan() {
-			line := strings.TrimSpace(ssc.Text())
-			if line != "" && !strings.HasPrefix(line, "#") {
-				splitNames[line] = true
-			}
-		}
-		sf.Close()
+	splitNames, err := allowlist.LoadLines(*splitsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read %s: %v\n", *splitsPath, err)
+		os.Exit(1)
 	}
 
 	f, err := os.Open(*schemaPath)

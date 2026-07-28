@@ -23,13 +23,14 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/fleetdm/fleet/v4/tools/pgcompat/internal/allowlist"
 )
 
 type constraint struct {
@@ -68,7 +69,7 @@ func main() {
 		wantKind[strings.TrimSpace(k)] = true
 	}
 
-	mysqlOnlyAllow, pgOnlyAllow, err := loadAllowlist(*allowlistPath)
+	mysqlOnlyAllow, pgOnlyAllow, err := allowlist.LoadTagged(*allowlistPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read %s: %v\n", *allowlistPath, err)
 		os.Exit(2)
@@ -343,38 +344,4 @@ func parsePG(path string) ([]constraint, map[string]bool, error) {
 		}
 	}
 	return cons, tables, nil
-}
-
-func loadAllowlist(path string) (mysqlOnly, pgOnly map[string]struct{}, err error) {
-	mysqlOnly = map[string]struct{}{}
-	pgOnly = map[string]struct{}{}
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return mysqlOnly, pgOnly, nil
-		}
-		return nil, nil, err
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			return nil, nil, fmt.Errorf("malformed allowlist line: %q", line)
-		}
-		tag, val := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-		switch tag {
-		case "mysql-only":
-			mysqlOnly[val] = struct{}{}
-		case "pg-only":
-			pgOnly[val] = struct{}{}
-		default:
-			return nil, nil, fmt.Errorf("unknown allowlist tag %q in line %q", tag, line)
-		}
-	}
-	return mysqlOnly, pgOnly, sc.Err()
 }

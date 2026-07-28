@@ -19,8 +19,10 @@ func init() {
 // taken (equivalent leftovers from earlier cycles) are dropped. MySQL is a
 // no-op.
 //
-// Keep the DO block in sync with canonicalizeIndexNamesSQL in
-// server/datastore/mysql/dialect_postgres.go.
+// The DO block is a frozen snapshot of canonicalizeIndexNamesSQL
+// (server/datastore/mysql/dialect_postgres.go) as of 2026-07-27. It does NOT
+// need to track future changes to the dialect function: this migration is
+// applied history, and the dialect re-canonicalizes on every swap cycle.
 func Up_20260727170400(tx *sql.Tx) error {
 	if !isPostgres() {
 		return nil
