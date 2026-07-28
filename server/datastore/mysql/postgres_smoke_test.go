@@ -12,6 +12,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newPGTestHost creates a minimal darwin host for PG smoke tests; prefix
+// keys all its identifiers so tests stay collision-free within a shared DB.
+func newPGTestHost(t *testing.T, ds *Datastore, prefix string) *fleet.Host {
+	t.Helper()
+	host, err := ds.NewHost(context.Background(), &fleet.Host{
+		OsqueryHostID:   new(prefix + "-osquery"),
+		NodeKey:         new(prefix + "-key"),
+		UUID:            prefix + "-uuid",
+		Hostname:        prefix,
+		Platform:        "darwin",
+		DetailUpdatedAt: time.Now(),
+		LabelUpdatedAt:  time.Now(),
+		PolicyUpdatedAt: time.Now(),
+		SeenTime:        time.Now(),
+	})
+	require.NoError(t, err, "NewHost(%s)", prefix)
+	return host
+}
+
 // TestPostgresSmokeTest verifies basic PostgreSQL connectivity and dialect
 // SQL execution. Requires POSTGRES_TEST=1 and a running postgres_test container.
 func TestPostgresSmokeTest(t *testing.T) {
@@ -135,21 +154,10 @@ func TestPostgresDatastoreOperations(t *testing.T) {
 	ctx := context.Background()
 
 	// --- Host CRUD ---
-	host, err := ds.NewHost(ctx, &fleet.Host{
-		OsqueryHostID:   new("pg-ops-host-1"),
-		NodeKey:         new("pg-ops-key-1"),
-		UUID:            "pg-ops-uuid-1",
-		Hostname:        "pg-ops-hostname-1",
-		Platform:        "darwin",
-		DetailUpdatedAt: time.Now(),
-		LabelUpdatedAt:  time.Now(),
-		PolicyUpdatedAt: time.Now(),
-		SeenTime:        time.Now(),
-	})
-	require.NoError(t, err, "NewHost")
+	host := newPGTestHost(t, ds, "pg-ops")
 
 	t.Run("HostByIdentifier", func(t *testing.T) {
-		h, err := ds.HostByIdentifier(ctx, "pg-ops-uuid-1")
+		h, err := ds.HostByIdentifier(ctx, "pg-ops-uuid")
 		require.NoError(t, err, "HostByIdentifier")
 		assert.Equal(t, host.ID, h.ID)
 	})
@@ -689,18 +697,7 @@ func TestPostgresUpdatedAtTriggers(t *testing.T) {
 	ds := CreatePostgresDS(t)
 	ctx := context.Background()
 
-	host, err := ds.NewHost(ctx, &fleet.Host{
-		OsqueryHostID:   new("pg-touch-host"),
-		NodeKey:         new("pg-touch-key"),
-		UUID:            "pg-touch-uuid",
-		Hostname:        "pg-touch",
-		Platform:        "darwin",
-		DetailUpdatedAt: time.Now(),
-		LabelUpdatedAt:  time.Now(),
-		PolicyUpdatedAt: time.Now(),
-		SeenTime:        time.Now(),
-	})
-	require.NoError(t, err)
+	host := newPGTestHost(t, ds, "pg-touch")
 	require.NoError(t, ds.SetOrUpdateDeviceAuthToken(ctx, host.ID, "pg-touch-token-1"))
 
 	readUpdated := func() time.Time {
@@ -712,7 +709,7 @@ func TestPostgresUpdatedAtTriggers(t *testing.T) {
 	t0 := readUpdated()
 
 	// Data change → auto-touch.
-	_, err = ds.primary.Exec(`UPDATE host_device_auth SET token = 'pg-touch-token-2' WHERE host_id = $1`, host.ID)
+	_, err := ds.primary.Exec(`UPDATE host_device_auth SET token = 'pg-touch-token-2' WHERE host_id = $1`, host.ID)
 	require.NoError(t, err)
 	t1 := readUpdated()
 	require.True(t, t1.After(t0), "updated_at must advance on a data change (was frozen: %v)", t0)
@@ -735,6 +732,25 @@ func TestPostgresUpdatedAtTriggers(t *testing.T) {
 		SELECT COUNT(DISTINCT event_object_table) FROM information_schema.triggers
 		WHERE action_statement LIKE '%fleet_set_updated_at%' OR action_statement LIKE '%fleet_touch_column%'`))
 	require.GreaterOrEqual(t, count, 130, "the generated trigger set must cover the auto-touch tables")
+
+	// fleet_touch_column path: sessions.accessed_at is one of the three
+	// non-updated_at auto-touch columns; a data change must touch it.
+	user, err := ds.NewUser(ctx, &fleet.User{
+		Name:       "pg-touch-user",
+		Email:      "pg-touch@example.com",
+		Password:   []byte("pg-touch-password-hash"),
+		GlobalRole: new("admin"),
+	})
+	require.NoError(t, err)
+	session, err := ds.NewSession(ctx, user.ID, 64)
+	require.NoError(t, err)
+	var a0 time.Time
+	require.NoError(t, ds.primary.Get(&a0, `SELECT accessed_at FROM sessions WHERE id = $1`, session.ID))
+	_, err = ds.primary.Exec(`UPDATE sessions SET key = key || 'x' WHERE id = $1`, session.ID)
+	require.NoError(t, err)
+	var a1 time.Time
+	require.NoError(t, ds.primary.Get(&a1, `SELECT accessed_at FROM sessions WHERE id = $1`, session.ID))
+	require.True(t, a1.After(a0), "fleet_touch_column must auto-touch sessions.accessed_at on change")
 }
 
 // TestPostgresWindowsESPStateMachine regression-covers the Windows ESP
@@ -768,7 +784,9 @@ func TestPostgresWindowsESPStateMachine(t *testing.T) {
 
 	// None(0) → Pending(1) → Active(2) → None(0), asserting the stored value
 	// each step — state 2 is the one the old rewrite corrupted to 0.
-	transitions := []struct{ from, to fleet.WindowsMDMAwaitingConfiguration }{
+	transitions := []struct {
+		from, to fleet.WindowsMDMAwaitingConfiguration
+	}{
 		{fleet.WindowsMDMAwaitingConfigurationNone, fleet.WindowsMDMAwaitingConfigurationPending},
 		{fleet.WindowsMDMAwaitingConfigurationPending, fleet.WindowsMDMAwaitingConfigurationActive},
 		{fleet.WindowsMDMAwaitingConfigurationActive, fleet.WindowsMDMAwaitingConfigurationNone},
@@ -847,18 +865,7 @@ func TestPostgresGeneratedColumnTriggers(t *testing.T) {
 	ds := CreatePostgresDS(t)
 	ctx := context.Background()
 
-	host, err := ds.NewHost(ctx, &fleet.Host{
-		OsqueryHostID:   new("pg-gencol-host"),
-		NodeKey:         new("pg-gencol-key"),
-		UUID:            "pg-gencol-uuid",
-		Hostname:        "pg-gencol",
-		Platform:        "darwin",
-		DetailUpdatedAt: time.Now(),
-		LabelUpdatedAt:  time.Now(),
-		PolicyUpdatedAt: time.Now(),
-		SeenTime:        time.Now(),
-	})
-	require.NoError(t, err)
+	host := newPGTestHost(t, ds, "pg-gencol")
 
 	// enrollment_status matrix via SetOrUpdateMDMData (writes host_mdm).
 	cases := []struct {
@@ -913,7 +920,7 @@ func TestPostgresGeneratedColumnTriggers(t *testing.T) {
 	}
 	assertStatuses("pending_install", "pending_install")
 
-	_, err = ds.primary.Exec(`UPDATE host_software_installs SET install_script_exit_code = 0 WHERE id = $1`, installID)
+	_, err := ds.primary.Exec(`UPDATE host_software_installs SET install_script_exit_code = 0 WHERE id = $1`, installID)
 	require.NoError(t, err)
 	assertStatuses("installed", "installed")
 
@@ -1001,18 +1008,7 @@ func TestPostgresListPoliciesForHost(t *testing.T) {
 	ds := CreatePostgresDS(t)
 	ctx := context.Background()
 
-	host, err := ds.NewHost(ctx, &fleet.Host{
-		OsqueryHostID:   new("pg-hostpol-host"),
-		NodeKey:         new("pg-hostpol-key"),
-		UUID:            "pg-hostpol-uuid",
-		Hostname:        "pg-hostpol",
-		Platform:        "darwin",
-		DetailUpdatedAt: time.Now(),
-		LabelUpdatedAt:  time.Now(),
-		PolicyUpdatedAt: time.Now(),
-		SeenTime:        time.Now(),
-	})
-	require.NoError(t, err)
+	host := newPGTestHost(t, ds, "pg-hostpol")
 
 	pol, err := ds.NewGlobalPolicy(ctx, new(uint(0)), fleet.PolicyPayload{
 		Name:  "pg-hostpol-policy",
@@ -1092,18 +1088,7 @@ func TestPostgresGetHostMDM(t *testing.T) {
 	ds := CreatePostgresDS(t)
 	ctx := context.Background()
 
-	host, err := ds.NewHost(ctx, &fleet.Host{
-		OsqueryHostID:   new("pg-mdm-info-host"),
-		NodeKey:         new("pg-mdm-info-key"),
-		UUID:            "pg-mdm-info-uuid",
-		Hostname:        "pg-mdm-info",
-		Platform:        "darwin",
-		DetailUpdatedAt: time.Now(),
-		LabelUpdatedAt:  time.Now(),
-		PolicyUpdatedAt: time.Now(),
-		SeenTime:        time.Now(),
-	})
-	require.NoError(t, err)
+	host := newPGTestHost(t, ds, "pg-mdm-info")
 
 	require.NoError(t, ds.SetOrUpdateMDMData(ctx, host.ID,
 		false, true, "https://fleet.example.com", true, fleet.WellKnownMDMFleet, "", false))
