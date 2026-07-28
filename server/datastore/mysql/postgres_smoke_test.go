@@ -678,6 +678,127 @@ func TestPostgresDBDiagnostics(t *testing.T) {
 	require.Contains(t, status, "PostgreSQL")
 }
 
+// TestPostgresUpdatedAtTriggers regression-covers the ON UPDATE
+// CURRENT_TIMESTAMP mirror: the baseline had triggers on only 12 of ~137
+// auto-touch tables, so updated_at froze at insert time everywhere else
+// (BitLocker grace periods and the decryptable-recalc cron compare it). Uses
+// the re-review's exact repro table (host_device_auth) and asserts the full
+// MySQL semantics: touch on change, no touch on no-op, explicit assignment
+// wins.
+func TestPostgresUpdatedAtTriggers(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	host, err := ds.NewHost(ctx, &fleet.Host{
+		OsqueryHostID:   new("pg-touch-host"),
+		NodeKey:         new("pg-touch-key"),
+		UUID:            "pg-touch-uuid",
+		Hostname:        "pg-touch",
+		Platform:        "darwin",
+		DetailUpdatedAt: time.Now(),
+		LabelUpdatedAt:  time.Now(),
+		PolicyUpdatedAt: time.Now(),
+		SeenTime:        time.Now(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, ds.SetOrUpdateDeviceAuthToken(ctx, host.ID, "pg-touch-token-1"))
+
+	readUpdated := func() time.Time {
+		var ts time.Time
+		require.NoError(t, ds.primary.Get(&ts,
+			`SELECT updated_at FROM host_device_auth WHERE host_id = $1`, host.ID))
+		return ts
+	}
+	t0 := readUpdated()
+
+	// Data change → auto-touch.
+	_, err = ds.primary.Exec(`UPDATE host_device_auth SET token = 'pg-touch-token-2' WHERE host_id = $1`, host.ID)
+	require.NoError(t, err)
+	t1 := readUpdated()
+	require.True(t, t1.After(t0), "updated_at must advance on a data change (was frozen: %v)", t0)
+
+	// Value-identical update → no touch (MySQL parity).
+	_, err = ds.primary.Exec(`UPDATE host_device_auth SET token = 'pg-touch-token-2' WHERE host_id = $1`, host.ID)
+	require.NoError(t, err)
+	require.Equal(t, t1, readUpdated(), "no-op update must not touch updated_at")
+
+	// Explicit assignment wins over the auto-touch.
+	explicit := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	_, err = ds.primary.Exec(`UPDATE host_device_auth SET token = 'pg-touch-token-3', updated_at = $2 WHERE host_id = $1`, host.ID, explicit)
+	require.NoError(t, err)
+	require.Equal(t, explicit, readUpdated().UTC(), "explicit updated_at assignment must win")
+
+	// Coverage breadth: every table MySQL auto-touches must carry a trigger
+	// using fleet_set_updated_at or fleet_touch_column.
+	var count int
+	require.NoError(t, ds.primary.Get(&count, `
+		SELECT COUNT(DISTINCT event_object_table) FROM information_schema.triggers
+		WHERE action_statement LIKE '%fleet_set_updated_at%' OR action_statement LIKE '%fleet_touch_column%'`))
+	require.GreaterOrEqual(t, count, 130, "the generated trigger set must cover the auto-touch tables")
+}
+
+// TestPostgresWindowsESPStateMachine regression-covers the Windows ESP
+// awaiting_configuration tri-state: the driver's old bool-CASE rewrite
+// collapsed Active=2 to 0, silently breaking the setup-experience state
+// machine. Walks the real transitions through SetMDMWindowsAwaitingConfiguration.
+func TestPostgresWindowsESPStateMachine(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	device := &fleet.MDMWindowsEnrolledDevice{
+		MDMDeviceID:            "pg-esp-device",
+		MDMHardwareID:          "pg-esp-hwid-0123456789012345678901234567890123456789",
+		MDMDeviceState:         "2",
+		MDMDeviceType:          "CIMClient_Windows",
+		MDMDeviceName:          "PG-ESP-DESKTOP",
+		MDMEnrollType:          "ProgrammaticEnrollment",
+		MDMEnrollUserID:        "",
+		MDMEnrollProtoVersion:  "5.0",
+		MDMEnrollClientVersion: "10.0.19045.2965",
+		MDMNotInOOBE:           false,
+	}
+	require.NoError(t, ds.MDMWindowsInsertEnrolledDevice(ctx, device))
+
+	readState := func() int {
+		var s int
+		require.NoError(t, ds.primary.Get(&s,
+			`SELECT awaiting_configuration FROM mdm_windows_enrollments WHERE mdm_device_id = $1`, device.MDMDeviceID))
+		return s
+	}
+
+	// None(0) → Pending(1) → Active(2) → None(0), asserting the stored value
+	// each step — state 2 is the one the old rewrite corrupted to 0.
+	transitions := []struct{ from, to fleet.WindowsMDMAwaitingConfiguration }{
+		{fleet.WindowsMDMAwaitingConfigurationNone, fleet.WindowsMDMAwaitingConfigurationPending},
+		{fleet.WindowsMDMAwaitingConfigurationPending, fleet.WindowsMDMAwaitingConfigurationActive},
+		{fleet.WindowsMDMAwaitingConfigurationActive, fleet.WindowsMDMAwaitingConfigurationNone},
+	}
+	for _, tr := range transitions {
+		changed, err := ds.SetMDMWindowsAwaitingConfiguration(ctx, device.MDMDeviceID, tr.from, tr.to)
+		require.NoError(t, err, "transition %d→%d", tr.from, tr.to)
+		require.True(t, changed, "transition %d→%d must match a row", tr.from, tr.to)
+		require.Equal(t, int(tr.to), readState(), "stored state after %d→%d", tr.from, tr.to)
+	}
+}
+
+// TestPostgresHostCountCrons runs the four swap-based aggregation crons
+// end-to-end on PG. Regression for the vulnerability_host_counts caller's
+// bare DROP TABLE of the old table: the PG AtomicTableSwap drops it inside
+// the swap, so the caller's cleanup must be IF EXISTS — the bare form failed
+// every hourly cron run with SQLSTATE 42P01 (caught by the re-review, then
+// confirmed live in prod cron_stats).
+func TestPostgresHostCountCrons(t *testing.T) {
+	ds := CreatePostgresDS(t)
+	ctx := context.Background()
+
+	require.NoError(t, ds.SyncHostsSoftware(ctx, time.Now()), "SyncHostsSoftware")
+	require.NoError(t, ds.SyncHostsSoftwareTitles(ctx, time.Now()), "SyncHostsSoftwareTitles")
+	require.NoError(t, ds.UpdateVulnerabilityHostCounts(ctx, 1), "UpdateVulnerabilityHostCounts")
+	// Run the vulnerability counts twice: the second run exercises the
+	// swap against a table the previous cycle created.
+	require.NoError(t, ds.UpdateVulnerabilityHostCounts(ctx, 1), "UpdateVulnerabilityHostCounts second run")
+}
+
 // TestPostgresSwapIndexNamesStable regression-covers AtomicTableSwap's index
 // canonicalization: CREATE TABLE (LIKE …) derives index names from the swap
 // table's name, and without post-swap renames every cron cycle accreted

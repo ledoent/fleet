@@ -675,6 +675,9 @@ var pgBaselineSchemaSQL string
 //go:embed pg_baseline_post.sql
 var pgBaselinePostSQL string
 
+//go:embed pg_touch_triggers_gen.sql
+var pgTouchTriggersSQL string
+
 // pgBaselineMarkerRe matches the `pg-baseline-up-to-migration: <ts>` header
 // comment in pg_baseline_schema.sql. The timestamp records the highest
 // migration version embedded in the baseline.
@@ -726,6 +729,12 @@ func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
 	}
 	if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselinePostSQL); err != nil {
 		return ctxerr.Wrap(ctx, err, "applying PG post-baseline fixups")
+	}
+	// Install/converge the generated ON UPDATE CURRENT_TIMESTAMP trigger set
+	// (see tools/pgcompat/gen_updated_at_triggers). Must run after the post
+	// fixups, which define fleet_set_updated_at.
+	if _, err := ds.writer(ctx).ExecContext(ctx, pgTouchTriggersSQL); err != nil {
+		return ctxerr.Wrap(ctx, err, "applying PG updated_at trigger set")
 	}
 	// Seed unconditionally, not only on freshApply: an operator who loaded
 	// the baseline via psql has `hosts` present but an empty tracking table,

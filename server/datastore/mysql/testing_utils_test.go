@@ -616,6 +616,9 @@ func CreatePostgresDS(t testing.TB) *Datastore {
 	if _, err := testDB.DB.Exec(pgBaselinePostSQL); err != nil {
 		t.Logf("PG: post-baseline fixups warning: %v", err)
 	}
+	if _, err := testDB.DB.Exec(pgTouchTriggersSQL); err != nil {
+		t.Fatalf("PG: updated_at trigger set failed: %v", err)
+	}
 
 	// Verify minimum table count
 	var tableCount int

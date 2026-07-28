@@ -91,6 +91,12 @@ jobs:
           git diff --exit-code server/platform/postgres/schema_identity_cols_gen.go || \
             { echo "schema_identity_cols_gen.go is stale — run: go run ./tools/pgcompat/gen_identity_cols"; exit 1; }
 
+      - name: updated_at trigger set is up to date
+        run: |
+          go run ./tools/pgcompat/gen_updated_at_triggers
+          git diff --exit-code server/datastore/mysql/pg_touch_triggers_gen.sql || \
+            { echo "pg_touch_triggers_gen.sql is stale — run: go run ./tools/pgcompat/gen_updated_at_triggers"; exit 1; }
+
       # Pure-Go checks first; docker-dependent steps last so an infra hiccup
       # (image pull, network) doesn't mask a real schema/code regression.
       - name: schemaBoolCols generated file is up to date

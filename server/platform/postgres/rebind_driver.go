@@ -2559,10 +2559,16 @@ var reSoftwareUpdateProjection = regexp.MustCompile(
 // already handled by the knownBooleanColumns loop). Add new entries by
 // appending to smallintBoolColumns and re-running tests.
 var smallintBoolColumns = []string{
+	// NOTE: this list is ONLY for smallint columns whose Go representation is
+	// a bool. mdm_windows_enrollments.awaiting_configuration is deliberately
+	// absent: it is a TRI-STATE uint (None=0/Pending=1/Active=2) and the
+	// bool-CASE rewrite collapsed state 2 to 0, breaking the Windows ESP
+	// state machine. A uint arg maps to smallint natively with no rewrite;
+	// gen_bool_cols also excludes split-typed names (known_bool_col_splits.txt)
+	// so no other bool machinery touches it.
 	"expired",                 // carve_metadata.expired (smallint in PG, bool in fleet.CarveMetadata)
 	"enrolled_from_migration", // host_mdm.enrolled_from_migration (smallint in PG, bool in fleet.HostMDM)
 	"initiated_by_fleet",      // host_managed_local_account_passwords.initiated_by_fleet (smallint in PG, bool)
-	"awaiting_configuration",  // mdm_windows_enrollments.awaiting_configuration (smallint in PG; uint state in Go)
 	// Columns added by the 2026-05/06 upstream migrations (created via the
 	// TINYINT(1)→smallint DDL mapping, written as Go bools):
 	"poll_schedule_relaxed",          // mdm_windows_enrollments.poll_schedule_relaxed

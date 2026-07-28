@@ -823,8 +823,10 @@ func (ds *Datastore) atomicTableSwapVulnerabilityCounts(ctx context.Context, cou
 			}
 		}
 
-		// Clean up old table (drop it)
-		_, err := tx.ExecContext(ctx, "DROP TABLE vulnerability_host_counts_old")
+		// Clean up old table. IF EXISTS: the PG AtomicTableSwap already drops
+		// it (the swap owns the drop so it can canonicalize index names);
+		// this is a no-op there and the real cleanup on MySQL.
+		_, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS vulnerability_host_counts_old")
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "dropping old table")
 		}

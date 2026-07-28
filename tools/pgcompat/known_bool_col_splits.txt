@@ -5,6 +5,9 @@
 # (fleet.WindowsMDMAwaitingConfiguration: None=0/Pending=1/Active=2) and MUST
 # stay smallint (a boolean would reject the value 2); pg_baseline_post.sql
 # documents the conversion. host_mdm_apple_awaiting_configuration's column is
-# a true boolean. The driver handles the smallint side via
-# smallintBoolColumns' table-aware patterns.
+# a true boolean. Split names are EXCLUDED from all generic bool machinery
+# (gen_bool_cols skips them; smallintBoolColumns must not list them): the
+# Windows side's uint values map to smallint natively, and the Apple side's
+# Go bool maps to boolean natively — any name-keyed rewrite would corrupt one
+# of the two (the bool-CASE rewrite collapsed ESP state Active=2 to 0).
 awaiting_configuration

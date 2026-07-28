@@ -11,7 +11,6 @@ var schemaBoolCols = []string{
 	"admin_forced_password_reset",
 	"api_only",
 	"automations_enabled",
-	"awaiting_configuration",
 	"calendar_events_enabled",
 	"can_reverify",
 	"canceled",

@@ -87,9 +87,17 @@ END $$;
 -- CREATE/ALTER TABLE statements and emits a CREATE TRIGGER referencing this
 -- function instead. CREATE OR REPLACE makes the function declaration safe to
 -- run on every startup.
+-- Semantics mirror MySQL exactly: the column is touched only when the row
+-- actually changed AND the statement did not assign updated_at itself
+-- (explicit assignments — e.g. software_cve's updated_at = ? — win, and
+-- value-identical UPDATEs leave the timestamp alone, matching
+-- CLIENT_FOUND_ROWS-era behavior that several queries compare against).
 CREATE OR REPLACE FUNCTION public.fleet_set_updated_at() RETURNS trigger AS $fleet_set_updated_at$
 BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
+    IF NEW IS DISTINCT FROM OLD
+       AND NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
+        NEW.updated_at = CURRENT_TIMESTAMP;
+    END IF;
     RETURN NEW;
 END;
 $fleet_set_updated_at$ LANGUAGE plpgsql;

@@ -1152,3 +1152,23 @@ func TestRebindPlaceholderScanner(t *testing.T) {
 		})
 	}
 }
+
+// TestAwaitingConfigurationNotRewritten regression-covers the Windows ESP
+// state machine: mdm_windows_enrollments.awaiting_configuration is a
+// tri-state uint (None=0/Pending=1/Active=2). It must pass through the
+// driver untouched — the old smallintBoolColumns CASE rewrite collapsed
+// state 2 to 0, and the schemaBoolCols literal rewrite would turn `= 1`
+// into `= true` against a smallint column.
+func TestAwaitingConfigurationNotRewritten(t *testing.T) {
+	stmt := "UPDATE mdm_windows_enrollments SET awaiting_configuration = ? WHERE mdm_device_id = ? AND awaiting_configuration = ?"
+	got := rebindQuery(stmt)
+	require.Equal(t,
+		"UPDATE mdm_windows_enrollments SET awaiting_configuration = $1 WHERE mdm_device_id = $2 AND awaiting_configuration = $3",
+		got, "tri-state column must only get placeholder renumbering")
+
+	require.Equal(t, "WHERE awaiting_configuration = 2",
+		rebindQuery("WHERE awaiting_configuration = 2"))
+	require.Equal(t, "WHERE awaiting_configuration = 1",
+		rebindQuery("WHERE awaiting_configuration = 1"),
+		"= 1 must NOT become = true on the smallint column")
+}

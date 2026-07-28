@@ -21,7 +21,24 @@ var reBoolCol = regexp.MustCompile(`^\s+([a-z][a-z0-9_]*)\s+boolean\b`)
 func main() {
 	schemaPath := flag.String("schema", "server/datastore/mysql/pg_baseline_schema.sql", "path to PG baseline schema")
 	outPath := flag.String("output", "server/platform/postgres/schema_bool_cols_gen.go", "path to write generated file")
+	splitsPath := flag.String("splits", "tools/pgcompat/known_bool_col_splits.txt", "path to known bool/smallint split names to exclude")
 	flag.Parse()
+
+	// Split-typed names (boolean in one table, smallint in another) must not
+	// enter the generic name-keyed bool machinery: the smallint side would be
+	// mis-rewritten (awaiting_configuration's tri-state collapse broke the
+	// Windows ESP state machine). check_bool_col_split guards the list.
+	splitNames := map[string]bool{}
+	if sf, err := os.Open(*splitsPath); err == nil {
+		ssc := bufio.NewScanner(sf)
+		for ssc.Scan() {
+			line := strings.TrimSpace(ssc.Text())
+			if line != "" && !strings.HasPrefix(line, "#") {
+				splitNames[line] = true
+			}
+		}
+		sf.Close()
+	}
 
 	f, err := os.Open(*schemaPath)
 	if err != nil {
@@ -33,7 +50,9 @@ func main() {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		if m := reBoolCol.FindStringSubmatch(scanner.Text()); m != nil {
-			seen[m[1]] = true
+			if !splitNames[m[1]] {
+				seen[m[1]] = true
+			}
 		}
 	}
 	scanErr := scanner.Err()
