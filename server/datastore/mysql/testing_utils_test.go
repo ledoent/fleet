@@ -375,13 +375,18 @@ func initializeDatabase(t testing.TB, testName string, opts *testing_utils.Datas
 	return connectMySQL(t, testName, opts)
 }
 
-func createMySQLDSWithOptions(t testing.TB, opts *testing_utils.DatastoreTestOptions) *Datastore {
-	// Gate on the env like CreateDS does: without this, an unfiltered
-	// POSTGRES_TEST-only run (the PG CI job has no MySQL service) fails every
-	// MySQL-only test on connection errors instead of skipping them visibly.
+// skipUnlessMySQLTest gates MySQL-only helpers the same way CreateDS does:
+// without it, an unfiltered POSTGRES_TEST-only run (the PG CI job has no
+// MySQL service) fails every MySQL-only test on connection errors instead of
+// skipping it visibly. Use this in any helper that dials MySQL directly.
+func skipUnlessMySQLTest(t testing.TB) {
 	if _, ok := os.LookupEnv("MYSQL_TEST"); !ok {
 		t.Skip("MySQL-only test: requires MYSQL_TEST=1 (not yet converted to CreateDS dual-dialect)")
 	}
+}
+
+func createMySQLDSWithOptions(t testing.TB, opts *testing_utils.DatastoreTestOptions) *Datastore {
+	skipUnlessMySQLTest(t)
 	cleanTestName, opts := testing_utils.ProcessOptions(t, opts)
 	ds := initializeDatabase(t, cleanTestName, opts)
 	t.Cleanup(func() { ds.Close() })
@@ -456,9 +461,7 @@ func CreateNamedMySQLDS(t *testing.T, name string) *Datastore {
 // and the underlying database connections. This matches the production flow where
 // DBConnections are created first and shared across datastores.
 func CreateNamedMySQLDSWithConns(t *testing.T, name string) (*Datastore, *common_mysql.DBConnections) {
-	if _, ok := os.LookupEnv("MYSQL_TEST"); !ok {
-		t.Skip("MySQL tests are disabled")
-	}
+	skipUnlessMySQLTest(t)
 
 	ds := initializeDatabase(t, name, new(testing_utils.DatastoreTestOptions))
 	t.Cleanup(func() { ds.Close() })

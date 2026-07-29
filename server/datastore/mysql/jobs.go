@@ -67,10 +67,14 @@ ORDER BY
 LIMIT ?
 `
 
-	// When the caller doesn't pin a time, compare against the DATABASE clock:
-	// not_before is written with NOW() on insert, and comparing that against
-	// the application clock races clock skew (containerized DBs drift from
-	// the host) plus NOW() precision differences between dialects.
+	// When the caller doesn't pin a time, compare against the DATABASE clock.
+	// NewJob writes not_before from the app clock truncated to the whole
+	// second (always in the past on both dialects), so a DB-clock comparison
+	// sees fresh default jobs immediately; comparing against the app clock
+	// instead would race container clock skew against NOW() precision
+	// differences between dialects. Residual edge: a DB clock lagging the
+	// app clock by more than the truncation slack (up to ~1s) delays a fresh
+	// job by that lag — acceptable for a polling queue.
 	nowExpr := "?"
 	args := []interface{}{fleet.JobStateQueued}
 	if now.IsZero() {

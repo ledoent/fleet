@@ -815,9 +815,7 @@ func TestNewReadsPasswordFromDisk(t *testing.T) {
 func newDSWithConfig(t *testing.T, dbName string, config config.MysqlConfig) (*Datastore, error) {
 	// MySQL-only helper: gate like CreateDS so a POSTGRES_TEST-only run (the
 	// PG CI job has no MySQL service) skips instead of failing on dial.
-	if _, ok := os.LookupEnv("MYSQL_TEST"); !ok {
-		t.Skip("MySQL-only test: requires MYSQL_TEST=1")
-	}
+	skipUnlessMySQLTest(t)
 	db, err := sql.Open(
 		"mysql",
 		fmt.Sprintf("%s:%s@tcp(%s)/?multiStatements=true", testing_utils.TestUsername, testing_utils.TestPassword,
@@ -1479,9 +1477,7 @@ func TestGetContextTryStmt(t *testing.T) {
 func createTestDatabase(t *testing.T, dbName string) {
 	t.Helper()
 	// MySQL-only helper: see newDSWithConfig.
-	if _, ok := os.LookupEnv("MYSQL_TEST"); !ok {
-		t.Skip("MySQL-only test: requires MYSQL_TEST=1")
-	}
+	skipUnlessMySQLTest(t)
 	db, err := sql.Open(
 		"mysql",
 		fmt.Sprintf("%s:%s@tcp(%s)/?multiStatements=true", testing_utils.TestUsername, testing_utils.TestPassword,
