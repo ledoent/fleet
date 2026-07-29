@@ -460,3 +460,21 @@ statement; prod deploy only if datastore code changed during fixes.
 > shape). One MySQL-path fork bug found and fixed (LIMIT-in-IN subquery in
 > query-results cleanup). users/jobs converted to CreateDS. Baseline marker:
 > 20260729120000.
+
+### 4.5 Mid-phase rebase onto upstream/main (2026-07-29)
+
+The fork's `main` mirror auto-synced ~84 upstream commits mid-phase, so the
+branch was rebased onto the upstream tip (conflict-free). Two upstream
+migrations (20260727083533 apple software update assets, 20260727084359
+fleet vars) are timestamped BELOW our baseline marker — exactly the hazard
+the below-marker drift backstop exists for, and it correctly refused fresh
+deploys until Migration 20260729190000 ported them on PG (with a
+post-condition assert so a silent no-op can never record as applied;
+084359's insert is inlined because its integer literal for boolean
+`is_prefix` is a 42804 on PG). Two ordering/generation consequences landed
+with it: the generated `updated_at` trigger set now installs AFTER goose Up
+in both `prepare db` and the test harness (it references post-marker
+tables), and the baseline (marker 20260729190000), identity-column map
+(128 tables), and touch-trigger set (140 triggers) were regenerated. All
+five validators green; full unfiltered PG suite, driver, goose,
+migrations-on-MySQL, and fresh+idempotent prepare re-verified post-rebase.
