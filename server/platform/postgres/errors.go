@@ -156,7 +156,7 @@ func TranslateError(err error) error {
 		return nil
 	}
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == codeUniqueViolation && pgErr.TableName != "" {
+	if errors.As(err, &pgErr) && pgErr.Code == codeUniqueViolation && pgErr.TableName != "" && pgErr.ConstraintName != "" {
 		return &mysqlCompatDuplicateError{cause: err, table: pgErr.TableName, constraint: pgErr.ConstraintName}
 	}
 	return err
