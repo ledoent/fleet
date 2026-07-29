@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/md5" //nolint:gosec // MySQL parity in tests, not crypto
 	"encoding/json"
 	"strings"
 	"testing"
@@ -692,6 +693,14 @@ func TestPostgresBelowMarkerDriftCheck(t *testing.T) {
 		"ported back-dated versions with a pending goose-reachable wrapper are not drift")
 }
 
+// pgMustExec runs a statement against the PG datastore's primary and fails
+// the test with the statement text on error.
+func pgMustExec(t testing.TB, ds *Datastore, q string, args ...interface{}) {
+	t.Helper()
+	_, err := ds.primary.Exec(q, args...)
+	require.NoError(t, err, q)
+}
+
 // TestPostgresGeneratedColumnDedup executes Up_20260729120000 against a
 // database shaped like prod before it ran: duplicate software_titles rows
 // whose stored unique_identifier predates the current trigger formula (the
@@ -702,20 +711,20 @@ func TestPostgresBelowMarkerDriftCheck(t *testing.T) {
 func TestPostgresGeneratedColumnDedup(t *testing.T) {
 	ds := CreatePostgresDS(t)
 
-	mustExec := func(q string, args ...interface{}) {
-		_, err := ds.primary.Exec(q, args...)
-		require.NoError(t, err, q)
-	}
-	var keeper, loser uint
+	mustExec := func(q string, args ...interface{}) { pgMustExec(t, ds, q, args...) }
+	var keeper, loser, loser2 uint
 	require.NoError(t, ds.primary.Get(&keeper, `
 		INSERT INTO software_titles (name, source, extension_for) VALUES ('pg-dedup-pkg', 'python_packages', '') RETURNING id`))
-	// A second identical row can only exist with a stale unique_identifier;
-	// insert it the way prod got it — bypassing the current trigger.
+	// Further identical rows can only exist with stale unique_identifiers;
+	// insert them the way prod got them — bypassing the current trigger.
 	mustExec(`ALTER TABLE software_titles DISABLE TRIGGER software_titles_set_unique_id`)
 	mustExec(`ALTER TABLE software_titles DISABLE TRIGGER software_titles_additional_identifier`)
 	require.NoError(t, ds.primary.Get(&loser, `
 		INSERT INTO software_titles (name, source, extension_for, unique_identifier)
 		VALUES ('pg-dedup-pkg', 'python_packages', '', 'stale-old-formula-value') RETURNING id`))
+	require.NoError(t, ds.primary.Get(&loser2, `
+		INSERT INTO software_titles (name, source, extension_for, unique_identifier)
+		VALUES ('pg-dedup-pkg', 'python_packages', '', 'stale-older-formula-value') RETURNING id`))
 	mustExec(`ALTER TABLE software_titles ENABLE TRIGGER software_titles_set_unique_id`)
 	mustExec(`ALTER TABLE software_titles ENABLE TRIGGER software_titles_additional_identifier`)
 
@@ -723,6 +732,24 @@ func TestPostgresGeneratedColumnDedup(t *testing.T) {
 		VALUES ('pg-dedup-pkg', '1.0', 'python_packages', 'pg-dedup-checksum', $1)`, loser)
 	mustExec(`INSERT INTO software_titles_host_counts (software_title_id, hosts_count, team_id, global_stats, updated_at)
 		VALUES ($1, 3, 0, true, NOW())`, loser)
+	// Keeper and loser carry a display name for the same team: the repoint
+	// would collide on (team_id, software_title_id), so the dedup must take
+	// the delete-before-repoint branch and keep the keeper's row.
+	mustExec(`INSERT INTO software_title_display_names (team_id, software_title_id, display_name)
+		VALUES (0, $1, 'keeper display'), (0, $2, 'loser display')`, keeper, loser)
+	// Two LOSERS carry a display name for a team the keeper has no row for:
+	// repointing both would collide with each other, so exactly one — the
+	// lower loser id's — must survive and land on the keeper.
+	mustExec(`INSERT INTO software_title_display_names (team_id, software_title_id, display_name)
+		VALUES (7, $1, 'loser display t7'), (7, $2, 'loser2 display t7')`, loser, loser2)
+	// A team pinned both keeper and loser: PK (team_id, title_id) collides
+	// on repoint; the loser's pin must be dropped.
+	mustExec(`INSERT INTO software_title_team_pins (team_id, title_id, pinned_version)
+		VALUES (5, $1, '1.0'), (5, $2, '2.0')`, keeper, loser)
+	// A patch policy on a loser with no conflicting keeper policy: must be
+	// repointed, not orphaned (policies has no FK on PG).
+	mustExec(`INSERT INTO policies (name, query, description, checksum, team_id, patch_software_title_id)
+		VALUES ('pg-dedup-policy', 'SELECT 1', '', 'pg-dedup-pol-ck', 5, $1)`, loser2)
 
 	tx, err := ds.primary.DB.Begin()
 	require.NoError(t, err)
@@ -740,6 +767,66 @@ func TestPostgresGeneratedColumnDedup(t *testing.T) {
 	var uid string
 	require.NoError(t, ds.primary.Get(&uid, `SELECT unique_identifier FROM software_titles WHERE id = $1`, keeper))
 	require.Equal(t, "pg-dedup-pkg", uid, "survivor recomputed by the touch")
+	var displays []string
+	require.NoError(t, ds.primary.Select(&displays,
+		`SELECT display_name FROM software_title_display_names
+		 WHERE software_title_id IN ($1, $2, $3) ORDER BY team_id`, keeper, loser, loser2))
+	require.Equal(t, []string{"keeper display", "loser display t7"}, displays,
+		"keeper's row beats a loser; between losers the lower id survives, repointed")
+	var pins []string
+	require.NoError(t, ds.primary.Select(&pins,
+		`SELECT pinned_version FROM software_title_team_pins WHERE team_id = 5`))
+	require.Equal(t, []string{"1.0"}, pins, "loser's conflicting pin dropped, keeper's kept")
+	var patchTitle uint
+	require.NoError(t, ds.primary.Get(&patchTitle,
+		`SELECT patch_software_title_id FROM policies WHERE name = 'pg-dedup-policy'`))
+	require.Equal(t, keeper, patchTitle, "patch policy repointed, not orphaned")
+}
+
+// TestPostgresRemainingGeneratedColumns asserts the three trigger formulas
+// installed by Migration 20260729120000 that TestPostgresGeneratedColumnDedup
+// does not touch, against expected values computed independently in Go —
+// MySQL parity is unhex(md5(...)) for the checksums/tokens and dash-formatted
+// uppercase HEX() for calendar uuids, so a formula drift in the plpgsql
+// bodies fails here instead of silently diverging from MySQL.
+func TestPostgresRemainingGeneratedColumns(t *testing.T) {
+	ds := CreatePostgresDS(t)
+
+	// mdm_windows_configuration_profiles.checksum = md5 of the raw syncml.
+	syncml := []byte("<SyncBody>pg-gen-cols</SyncBody>")
+	var winChecksum []byte
+	require.NoError(t, ds.primary.Get(&winChecksum, `
+		INSERT INTO mdm_windows_configuration_profiles (profile_uuid, team_id, name, syncml)
+		VALUES ('w-pg-gen-cols', 0, 'pg-gen-cols-win', $1)
+		RETURNING checksum`, syncml))
+	expWin := md5.Sum(syncml) //nolint:gosec // MySQL parity, not crypto
+	require.Equal(t, expWin[:], winChecksum, "windows profile checksum")
+
+	// mdm_apple_declarations.token = md5(raw_json || secrets-epoch-or-empty);
+	// with secrets_updated_at NULL that is md5 of the raw JSON alone.
+	rawJSON := `{"Type":"com.apple.configuration.test","Identifier":"pg-gen-cols"}`
+	var token []byte
+	require.NoError(t, ds.primary.Get(&token, `
+		INSERT INTO mdm_apple_declarations (declaration_uuid, team_id, identifier, name, raw_json)
+		VALUES ('d-pg-gen-cols', 0, 'pg-gen-cols-decl', 'pg-gen-cols-decl', $1)
+		RETURNING token`, rawJSON))
+	expTok := md5.Sum([]byte(rawJSON)) //nolint:gosec // MySQL parity, not crypto
+	require.Equal(t, expTok[:], token, "declaration token, NULL secrets_updated_at")
+
+	// A secrets rotation must change the token (epoch text participates).
+	var rotated []byte
+	require.NoError(t, ds.primary.Get(&rotated, `
+		UPDATE mdm_apple_declarations SET secrets_updated_at = '2026-07-29 12:00:00'
+		WHERE declaration_uuid = 'd-pg-gen-cols' RETURNING token`))
+	require.NotEqual(t, token, rotated, "token changes when secrets are rotated")
+
+	// calendar_events.uuid = dash-formatted uppercase hex of uuid_bin.
+	var uuid string
+	require.NoError(t, ds.primary.Get(&uuid, `
+		INSERT INTO calendar_events (email, event, uuid_bin)
+		VALUES ('pg-gen-cols@example.com', '{}', decode('00112233445566778899aabbccddeeff', 'hex'))
+		RETURNING uuid`))
+	require.Equal(t, "00112233-4455-6677-8899-AABBCCDDEEFF", uuid, "calendar uuid formatting")
 }
 
 // TestPostgresPortBackdatedWrapper executes Up_20260729190000's PG path
@@ -751,10 +838,7 @@ func TestPostgresGeneratedColumnDedup(t *testing.T) {
 func TestPostgresPortBackdatedWrapper(t *testing.T) {
 	ds := CreatePostgresDS(t)
 
-	mustExec := func(q string, args ...interface{}) {
-		_, err := ds.primary.Exec(q, args...)
-		require.NoError(t, err, q)
-	}
+	mustExec := func(q string, args ...interface{}) { pgMustExec(t, ds, q, args...) }
 	mustExec(`DROP TABLE IF EXISTS apple_software_update_assets CASCADE`)
 	mustExec(`DROP TABLE IF EXISTS host_mdm_apple_os_updates CASCADE`)
 	mustExec(`DELETE FROM fleet_variables WHERE name LIKE 'FLEET_VAR_HOST_TARGET%'`)

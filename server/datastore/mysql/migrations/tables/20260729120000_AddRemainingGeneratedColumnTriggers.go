@@ -57,9 +57,15 @@ func Up_20260729120000(tx *sql.Tx) error {
 		// unique keys make impossible accumulated on PG; recomputing on the
 		// touch below would then collide on idx_unique_sw_titles. Group by
 		// the trigger's current formula, keep the lowest id, delete
-		// per-title aggregates (crons rebuild them), repoint references —
-		// deleting the loser's row first where the target table's unique
-		// key includes the title id and the keeper already has the row.
+		// per-title aggregates (crons rebuild them), and repoint references.
+		//
+		// For tables whose unique key includes the title id, the row that
+		// would land on an occupied (keeper, key) slot is deleted first. The
+		// occupant may be the keeper's own row OR another loser's row headed
+		// for the same slot (two losers in one group, same team): the guard
+		// keeps exactly one winner per slot — the keeper's row when present,
+		// else the row of the lowest loser id (COALESCE(od.id, 0) ranks the
+		// keeper's own rows, which join to no loser, below every loser).
 		`CREATE TEMP TABLE st_dup_losers ON COMMIT DROP AS
 			SELECT id, keeper FROM (
 				SELECT id, MIN(id) OVER (PARTITION BY
@@ -71,34 +77,89 @@ func Up_20260729120000(tx *sql.Tx) error {
 		`DELETE FROM kernel_host_counts WHERE software_title_id IN (SELECT id FROM st_dup_losers)`,
 		`DELETE FROM software_installers t USING st_dup_losers d
 			WHERE t.title_id = d.id AND EXISTS (
-				SELECT 1 FROM software_installers k WHERE k.title_id = d.keeper
-					AND k.global_or_team_id = t.global_or_team_id
-					AND k.dedup_token IS NOT DISTINCT FROM t.dedup_token)`,
+				SELECT 1 FROM software_installers o
+				LEFT JOIN st_dup_losers od ON od.id = o.title_id
+				WHERE COALESCE(od.keeper, o.title_id) = d.keeper
+					AND o.global_or_team_id = t.global_or_team_id
+					AND o.dedup_token IS NOT DISTINCT FROM t.dedup_token
+					AND COALESCE(od.id, 0) < d.id)`,
 		`UPDATE software_installers t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
 		`DELETE FROM software_title_display_names t USING st_dup_losers d
 			WHERE t.software_title_id = d.id AND EXISTS (
-				SELECT 1 FROM software_title_display_names k WHERE k.software_title_id = d.keeper
-					AND k.team_id IS NOT DISTINCT FROM t.team_id)`,
+				SELECT 1 FROM software_title_display_names o
+				LEFT JOIN st_dup_losers od ON od.id = o.software_title_id
+				WHERE COALESCE(od.keeper, o.software_title_id) = d.keeper
+					AND o.team_id IS NOT DISTINCT FROM t.team_id
+					AND COALESCE(od.id, 0) < d.id)`,
 		`UPDATE software_title_display_names t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
 		`DELETE FROM software_title_icons t USING st_dup_losers d
 			WHERE t.software_title_id = d.id AND EXISTS (
-				SELECT 1 FROM software_title_icons k WHERE k.software_title_id = d.keeper
-					AND k.team_id IS NOT DISTINCT FROM t.team_id)`,
+				SELECT 1 FROM software_title_icons o
+				LEFT JOIN st_dup_losers od ON od.id = o.software_title_id
+				WHERE COALESCE(od.keeper, o.software_title_id) = d.keeper
+					AND o.team_id IS NOT DISTINCT FROM t.team_id
+					AND COALESCE(od.id, 0) < d.id)`,
 		`UPDATE software_title_icons t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
 		`DELETE FROM software_update_schedules t USING st_dup_losers d
 			WHERE t.title_id = d.id AND EXISTS (
-				SELECT 1 FROM software_update_schedules k WHERE k.title_id = d.keeper
-					AND k.team_id IS NOT DISTINCT FROM t.team_id)`,
+				SELECT 1 FROM software_update_schedules o
+				LEFT JOIN st_dup_losers od ON od.id = o.title_id
+				WHERE COALESCE(od.keeper, o.title_id) = d.keeper
+					AND o.team_id IS NOT DISTINCT FROM t.team_id
+					AND COALESCE(od.id, 0) < d.id)`,
 		`UPDATE software_update_schedules t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
+		// PK (team_id, title_id): a team that pinned both the keeper and a
+		// loser collides on repoint exactly like the tables above.
+		`DELETE FROM software_title_team_pins t USING st_dup_losers d
+			WHERE t.title_id = d.id AND EXISTS (
+				SELECT 1 FROM software_title_team_pins o
+				LEFT JOIN st_dup_losers od ON od.id = o.title_id
+				WHERE COALESCE(od.keeper, o.title_id) = d.keeper
+					AND o.team_id = t.team_id
+					AND COALESCE(od.id, 0) < d.id)`,
+		`UPDATE software_title_team_pins t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
+		// UNIQUE (team_id, patch_software_title_id); MySQL's FK is ON DELETE
+		// CASCADE, so deleting the colliding duplicate patch policy matches
+		// what deleting the loser title would do there.
+		`DELETE FROM policies t USING st_dup_losers d
+			WHERE t.patch_software_title_id = d.id AND EXISTS (
+				SELECT 1 FROM policies o
+				LEFT JOIN st_dup_losers od ON od.id = o.patch_software_title_id
+				WHERE COALESCE(od.keeper, o.patch_software_title_id) = d.keeper
+					AND o.team_id IS NOT DISTINCT FROM t.team_id
+					AND COALESCE(od.id, 0) < d.id)`,
+		`UPDATE policies t SET patch_software_title_id = d.keeper FROM st_dup_losers d WHERE t.patch_software_title_id = d.id`,
 		`UPDATE software t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
 		`UPDATE host_software_installs t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
 		`UPDATE software_install_upcoming_activities t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
-		`UPDATE software_title_team_pins t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
 		`UPDATE vpp_apps t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
 		`UPDATE in_house_apps t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
 		`UPDATE in_house_app_install_tokens t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
 		`UPDATE in_house_app_upcoming_activities t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
 		`DELETE FROM software_titles WHERE id IN (SELECT id FROM st_dup_losers)`,
+
+		// The touch below also backfills additional_identifier for the first
+		// time, activating idx_software_titles_bundle_identifier
+		// (bundle_identifier, additional_identifier) — a second constraint
+		// that NULL additional_identifier values kept vacuously satisfied.
+		// The dedup key above does not imply uniqueness under it (same
+		// bundle across two non-iOS sources, or same bundle+source with
+		// different extension_for). Fail with an actionable message instead
+		// of an opaque 23505 from inside the backfill.
+		`DO $$
+		DECLARE bad text;
+		BEGIN
+			SELECT string_agg(bundle_identifier || ' x' || cnt::text, ', ') INTO bad FROM (
+				SELECT bundle_identifier, COUNT(*) AS cnt
+				FROM software_titles
+				WHERE bundle_identifier IS NOT NULL
+				GROUP BY bundle_identifier,
+					CASE WHEN source = 'ios_apps' THEN 1 WHEN source = 'ipados_apps' THEN 2 ELSE 0 END
+				HAVING COUNT(*) > 1) x;
+			IF bad IS NOT NULL THEN
+				RAISE EXCEPTION 'software_titles rows would collide on idx_software_titles_bundle_identifier once additional_identifier is backfilled (%). Merge these rows manually, then re-run the migration.', bad;
+			END IF;
+		END $$`,
 
 		`CREATE OR REPLACE FUNCTION software_titles_set_additional_identifier() RETURNS trigger AS $$
 		BEGIN
