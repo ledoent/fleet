@@ -692,6 +692,56 @@ func TestPostgresBelowMarkerDriftCheck(t *testing.T) {
 		"ported back-dated versions with a pending goose-reachable wrapper are not drift")
 }
 
+// TestPostgresGeneratedColumnDedup executes Up_20260729120000 against a
+// database shaped like prod before it ran: duplicate software_titles rows
+// whose stored unique_identifier predates the current trigger formula (the
+// state that made the first Phase-4 prod migration collide on
+// idx_unique_sw_titles when the backfill touch recomputed it). The dedup
+// must merge the group into the lowest id, repoint references, clear
+// per-title aggregates, and leave the recompute collision-free.
+func TestPostgresGeneratedColumnDedup(t *testing.T) {
+	ds := CreatePostgresDS(t)
+
+	mustExec := func(q string, args ...interface{}) {
+		_, err := ds.primary.Exec(q, args...)
+		require.NoError(t, err, q)
+	}
+	var keeper, loser uint
+	require.NoError(t, ds.primary.Get(&keeper, `
+		INSERT INTO software_titles (name, source, extension_for) VALUES ('pg-dedup-pkg', 'python_packages', '') RETURNING id`))
+	// A second identical row can only exist with a stale unique_identifier;
+	// insert it the way prod got it — bypassing the current trigger.
+	mustExec(`ALTER TABLE software_titles DISABLE TRIGGER software_titles_set_unique_id`)
+	mustExec(`ALTER TABLE software_titles DISABLE TRIGGER software_titles_additional_identifier`)
+	require.NoError(t, ds.primary.Get(&loser, `
+		INSERT INTO software_titles (name, source, extension_for, unique_identifier)
+		VALUES ('pg-dedup-pkg', 'python_packages', '', 'stale-old-formula-value') RETURNING id`))
+	mustExec(`ALTER TABLE software_titles ENABLE TRIGGER software_titles_set_unique_id`)
+	mustExec(`ALTER TABLE software_titles ENABLE TRIGGER software_titles_additional_identifier`)
+
+	mustExec(`INSERT INTO software (name, version, source, checksum, title_id)
+		VALUES ('pg-dedup-pkg', '1.0', 'python_packages', 'pg-dedup-checksum', $1)`, loser)
+	mustExec(`INSERT INTO software_titles_host_counts (software_title_id, hosts_count, team_id, global_stats, updated_at)
+		VALUES ($1, 3, 0, true, NOW())`, loser)
+
+	tx, err := ds.primary.DB.Begin()
+	require.NoError(t, err)
+	require.NoError(t, tables.Up_20260729120000(tx))
+	require.NoError(t, tx.Commit())
+
+	var n int
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM software_titles WHERE name = 'pg-dedup-pkg'`))
+	require.Equal(t, 1, n, "duplicate title merged")
+	var gotTitle uint
+	require.NoError(t, ds.primary.Get(&gotTitle, `SELECT title_id FROM software WHERE checksum = 'pg-dedup-checksum'`))
+	require.Equal(t, keeper, gotTitle, "software repointed to keeper")
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM software_titles_host_counts WHERE software_title_id = $1`, loser))
+	require.Zero(t, n, "loser aggregates deleted")
+	var uid string
+	require.NoError(t, ds.primary.Get(&uid, `SELECT unique_identifier FROM software_titles WHERE id = $1`, keeper))
+	require.Equal(t, "pg-dedup-pkg", uid, "survivor recomputed by the touch")
+}
+
 // TestPostgresPortBackdatedWrapper executes Up_20260729190000's PG path
 // directly against a database shaped like prod before the port ran: the
 // back-dated upstream DDL absent and no history rows for the ported versions.

@@ -50,6 +50,56 @@ func Up_20260729120000(tx *sql.Tx) error {
 			FOR EACH ROW EXECUTE FUNCTION mdm_apple_declarations_set_token()`,
 		`UPDATE mdm_apple_declarations SET declaration_uuid = declaration_uuid`,
 
+		// Before touching software_titles (which fires the baseline-post
+		// unique_identifier trigger and the new additional_identifier one):
+		// merge duplicate rows. While unique_identifier held values from an
+		// older formula (or NULL), rows that MySQL's generated column +
+		// unique keys make impossible accumulated on PG; recomputing on the
+		// touch below would then collide on idx_unique_sw_titles. Group by
+		// the trigger's current formula, keep the lowest id, delete
+		// per-title aggregates (crons rebuild them), repoint references —
+		// deleting the loser's row first where the target table's unique
+		// key includes the title id and the keeper already has the row.
+		`CREATE TEMP TABLE st_dup_losers ON COMMIT DROP AS
+			SELECT id, keeper FROM (
+				SELECT id, MIN(id) OVER (PARTITION BY
+					COALESCE(NULLIF(bundle_identifier, ''), NULLIF(application_id, ''), NULLIF(upgrade_code, ''), name),
+					source, extension_for) AS keeper
+				FROM software_titles) d
+			WHERE id <> keeper`,
+		`DELETE FROM software_titles_host_counts WHERE software_title_id IN (SELECT id FROM st_dup_losers)`,
+		`DELETE FROM kernel_host_counts WHERE software_title_id IN (SELECT id FROM st_dup_losers)`,
+		`DELETE FROM software_installers t USING st_dup_losers d
+			WHERE t.title_id = d.id AND EXISTS (
+				SELECT 1 FROM software_installers k WHERE k.title_id = d.keeper
+					AND k.global_or_team_id = t.global_or_team_id
+					AND k.dedup_token IS NOT DISTINCT FROM t.dedup_token)`,
+		`UPDATE software_installers t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
+		`DELETE FROM software_title_display_names t USING st_dup_losers d
+			WHERE t.software_title_id = d.id AND EXISTS (
+				SELECT 1 FROM software_title_display_names k WHERE k.software_title_id = d.keeper
+					AND k.team_id IS NOT DISTINCT FROM t.team_id)`,
+		`UPDATE software_title_display_names t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
+		`DELETE FROM software_title_icons t USING st_dup_losers d
+			WHERE t.software_title_id = d.id AND EXISTS (
+				SELECT 1 FROM software_title_icons k WHERE k.software_title_id = d.keeper
+					AND k.team_id IS NOT DISTINCT FROM t.team_id)`,
+		`UPDATE software_title_icons t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
+		`DELETE FROM software_update_schedules t USING st_dup_losers d
+			WHERE t.title_id = d.id AND EXISTS (
+				SELECT 1 FROM software_update_schedules k WHERE k.title_id = d.keeper
+					AND k.team_id IS NOT DISTINCT FROM t.team_id)`,
+		`UPDATE software_update_schedules t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
+		`UPDATE software t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
+		`UPDATE host_software_installs t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
+		`UPDATE software_install_upcoming_activities t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
+		`UPDATE software_title_team_pins t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
+		`UPDATE vpp_apps t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
+		`UPDATE in_house_apps t SET title_id = d.keeper FROM st_dup_losers d WHERE t.title_id = d.id`,
+		`UPDATE in_house_app_install_tokens t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
+		`UPDATE in_house_app_upcoming_activities t SET software_title_id = d.keeper FROM st_dup_losers d WHERE t.software_title_id = d.id`,
+		`DELETE FROM software_titles WHERE id IN (SELECT id FROM st_dup_losers)`,
+
 		`CREATE OR REPLACE FUNCTION software_titles_set_additional_identifier() RETURNS trigger AS $$
 		BEGIN
 			NEW.additional_identifier :=
