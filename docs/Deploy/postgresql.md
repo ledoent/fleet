@@ -122,6 +122,25 @@ The drift is also enforced at build time by the unit test referenced above —
 images will not pass CI if the baseline is stale relative to the code on the
 same branch.
 
+### Back-dated upstream migrations
+
+Upstream numbers migrations at authoring time, so a rebase can pull in a
+migration timestamped *below* the baseline marker. Goose only runs versions
+above a database's max applied version, so on existing deployments that
+migration would be skipped silently, forever. `prepare db` refuses to
+proceed in that state ("PG migration drift: N migration(s) below this
+database's max applied version…").
+
+The remedy is a **porting wrapper**: a new above-marker migration that
+re-runs the back-dated `Up` functions on PG (guarded for idempotency, with
+a post-condition assert), records the ported versions in goose history, and
+registers itself in `PortedBelowMarker` — the map the drift check consults
+to admit a deploy whose imminent goose Up runs the wrapper. See Migration
+`20260729190000` for the reference implementation, and
+`TestPostgresPortBackdatedWrapper` for how to exercise the wrapper's PG
+path against a prod-shaped database (fresh test DBs seed it as applied, so
+without that test the path would first run in production).
+
 ## Object ownership
 
 The application user (e.g., `fleet`) must own all tables and sequences in the

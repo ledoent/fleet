@@ -478,3 +478,15 @@ tables), and the baseline (marker 20260729190000), identity-column map
 (128 tables), and touch-trigger set (140 triggers) were regenerated. All
 five validators green; full unfiltered PG suite, driver, goose,
 migrations-on-MySQL, and fresh+idempotent prepare re-verified post-rebase.
+
+The first prod migration attempt was refused by the backstop itself: the
+check runs before the goose Up that would execute the wrapper, and prod
+(unlike fresh test DBs, which seed history through the marker) has no rows
+for the ported versions. Fixed by declaring `PortedBelowMarker` next to the
+wrapper — the check admits a version whose wrapper is applied or pending
+above the DB max, everything else still fails — and having the wrapper
+record the ported versions in goose history so steady state needs no
+exemption. `TestPostgresPortBackdatedWrapper` now executes the wrapper's
+PG path against a prod-shaped DB; previously that path would have run for
+the first time in production. Pattern documented in
+`docs/Deploy/postgresql.md` § Back-dated upstream migrations.
