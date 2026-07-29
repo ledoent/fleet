@@ -490,3 +490,26 @@ exemption. `TestPostgresPortBackdatedWrapper` now executes the wrapper's
 PG path against a prod-shaped DB; previously that path would have run for
 the first time in production. Pattern documented in
 `docs/Deploy/postgresql.md` § Back-dated upstream migrations.
+
+The second attempt failed on data, not mechanism: Migration E's
+software_titles backfill touch recomputes unique_identifier (baseline-post
+trigger), and 95 duplicate titles — impossible under MySQL's generated
+column + unique keys, accumulated on PG while stored values lagged the
+formula — collided on idx_unique_sw_titles. The migration now merges each
+duplicate group into its lowest id first (aggregates deleted for cron
+rebuild; 14 referencing tables repointed with delete-before-repoint where
+their unique keys include the title id). Rehearsed against prod data in a
+rolled-back transaction (95 losers, 102 software rows repointed, recompute
+collision-free, zero orphans) and covered by
+`TestPostgresGeneratedColumnDedup`, which fabricates the prod shape with
+triggers disabled.
+
+**Deployed 2026-07-29 (third attempt, image 2b0f7200f46e):** both pending
+migrations applied cleanly — max version 20260729190000, ported versions
+recorded in goose history, both new upstream tables present, 2 fleet vars,
+0 duplicate title groups, 0 orphaned software references, 138
+updated_at-trigger tables, all crons completing, 8 hosts checked in within
+5 minutes of the roll. Boot logs show a cosmetic "unknown migrations"
+warning for three June versions recorded in prod history but no longer
+registered in code (fork migrations superseded by a rebase) — harmless,
+noted for a future cleanup.
