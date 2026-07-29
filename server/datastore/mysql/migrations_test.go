@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"testing"
 
@@ -175,6 +176,11 @@ func TestMigrations(t *testing.T) {
 }
 
 func createMySQLDSForMigrationTests(t *testing.T, dbName string) *Datastore {
+	// MySQL-only: these tests replay MySQL migration DDL. Skip visibly in a
+	// POSTGRES_TEST-only environment (the PG CI job has no MySQL service).
+	if _, ok := os.LookupEnv("MYSQL_TEST"); !ok {
+		t.Skip("MySQL-only migration test: requires MYSQL_TEST=1")
+	}
 	// Create a datastore client in order to run migrations as usual
 	config := config.MysqlConfig{
 		Username: testing_utils.TestUsername,

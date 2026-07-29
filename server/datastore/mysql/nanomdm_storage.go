@@ -242,6 +242,18 @@ func (s *NanoMDMStorage) EnqueueDeviceLockCommand(
 	pin string,
 ) error {
 	return common_mysql.WithRetryTxx(ctx, s.db, func(tx sqlx.ExtContext) error {
+		// On PG, serialize concurrent lock attempts for the same host with a
+		// transaction-scoped advisory lock: when no host_mdm_actions row
+		// exists yet, FOR UPDATE locks nothing — MySQL's InnoDB gap lock
+		// papers over that (concurrent inserters block on the index range),
+		// but PG has no gap locks, so every concurrent request would pass the
+		// existence check and enqueue its own command.
+		if s.dialect.IsPostgres() {
+			if _, err := tx.ExecContext(ctx,
+				`SELECT pg_advisory_xact_lock(hashtext('host_mdm_actions'), ?)`, host.ID); err != nil {
+				return ctxerr.Wrap(ctx, err, "acquiring advisory lock for DeviceLock")
+			}
+		}
 		// check if a lock already exists using SELECT FOR UPDATE to prevent a race
 		var existingLockRef *string
 		err := sqlx.GetContext(ctx, tx, &existingLockRef,
