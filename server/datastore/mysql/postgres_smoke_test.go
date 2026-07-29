@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fleetdm/fleet/v4/server/datastore/mysql/migrations/tables"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -667,6 +668,72 @@ func TestPostgresBelowMarkerDriftCheck(t *testing.T) {
 	err = ds.checkPGBelowMarkerDrift(ctx, marker)
 	require.Error(t, err, "missing below-marker record must error")
 	require.Contains(t, err.Error(), "PG migration drift")
+	_, err = ds.primary.Exec(`INSERT INTO migration_status_tables (version_id, is_applied) VALUES ($1, true)`, victim)
+	require.NoError(t, err)
+
+	// Back-dated versions with a declared porting wrapper are exempt — both
+	// when the wrapper is already applied (steady state after the port ran)…
+	require.NotEmpty(t, tables.PortedBelowMarker)
+	var wrapper int64
+	for ported, w := range tables.PortedBelowMarker {
+		wrapper = w
+		_, err = ds.primary.Exec(`DELETE FROM migration_status_tables WHERE version_id = $1`, ported)
+		require.NoError(t, err)
+	}
+	require.NoError(t, ds.checkPGBelowMarkerDrift(ctx, marker),
+		"ported back-dated versions with an applied wrapper are not drift")
+
+	// …and when the wrapper is itself pending above the DB max (the boot
+	// that is about to run it — the exact state of the first Phase-4 prod
+	// deploy, which the check aborted before this exemption existed).
+	_, err = ds.primary.Exec(`DELETE FROM migration_status_tables WHERE version_id = $1`, wrapper)
+	require.NoError(t, err)
+	require.NoError(t, ds.checkPGBelowMarkerDrift(ctx, marker),
+		"ported back-dated versions with a pending goose-reachable wrapper are not drift")
+}
+
+// TestPostgresPortBackdatedWrapper executes Up_20260729190000's PG path
+// directly against a database shaped like prod before the port ran: the
+// back-dated upstream DDL absent and no history rows for the ported versions.
+// Fresh test DBs seed the wrapper as applied (its effects are in the
+// baseline), so without this test the wrapper's real code path would only
+// ever run for the first time in production.
+func TestPostgresPortBackdatedWrapper(t *testing.T) {
+	ds := CreatePostgresDS(t)
+
+	mustExec := func(q string, args ...interface{}) {
+		_, err := ds.primary.Exec(q, args...)
+		require.NoError(t, err, q)
+	}
+	mustExec(`DROP TABLE IF EXISTS apple_software_update_assets CASCADE`)
+	mustExec(`DROP TABLE IF EXISTS host_mdm_apple_os_updates CASCADE`)
+	mustExec(`DELETE FROM fleet_variables WHERE name LIKE 'FLEET_VAR_HOST_TARGET%'`)
+	for ported := range tables.PortedBelowMarker {
+		mustExec(`DELETE FROM migration_status_tables WHERE version_id = $1`, ported)
+	}
+
+	runWrapper := func() {
+		tx, err := ds.primary.DB.Begin()
+		require.NoError(t, err)
+		require.NoError(t, tables.Up_20260729190000(tx))
+		require.NoError(t, tx.Commit())
+	}
+	runWrapper()
+
+	var n int
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM apple_software_update_assets`))
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM host_mdm_apple_os_updates`))
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM fleet_variables WHERE name LIKE 'FLEET_VAR_HOST_TARGET%'`))
+	require.Equal(t, 2, n, "both fleet vars inserted")
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM migration_status_tables WHERE version_id IN (20260727083533, 20260727084359) AND is_applied`))
+	require.Equal(t, 2, n, "ported versions recorded in goose history")
+
+	// Idempotent: a re-run must not duplicate vars or history rows.
+	runWrapper()
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM fleet_variables WHERE name LIKE 'FLEET_VAR_HOST_TARGET%'`))
+	require.Equal(t, 2, n)
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM migration_status_tables WHERE version_id IN (20260727083533, 20260727084359)`))
+	require.Equal(t, 2, n)
 }
 
 // TestPostgresDBDiagnostics regression-covers DBLocks and InnoDBStatus on PG:

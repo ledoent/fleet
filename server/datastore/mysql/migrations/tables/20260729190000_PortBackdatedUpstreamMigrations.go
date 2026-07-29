@@ -9,6 +9,16 @@ func init() {
 	MigrationClient.AddMigration(Up_20260729190000, Down_20260729190000)
 }
 
+// PortedBelowMarker maps each back-dated upstream migration version to the
+// post-marker wrapper migration that ports its DDL on PG. The below-marker
+// drift backstop consults this so a deploy carrying the wrapper is allowed
+// through (the wrapper runs in the same goose Up); any other unapplied
+// below-marker version still fails the check.
+var PortedBelowMarker = map[int64]int64{
+	20260727083533: 20260729190000,
+	20260727084359: 20260729190000,
+}
+
 // Up_20260729190000 ports upstream migrations 20260727083533 (apple software
 // update assets + host OS update tracking) and 20260727084359 (host target OS
 // version fleet vars) to existing PostgreSQL databases. Both are numbered
@@ -60,6 +70,18 @@ func Up_20260729190000(tx *sql.Tx) error {
 	INSERT INTO fleet_variables (name, is_prefix, created_at) VALUES
 		('FLEET_VAR_HOST_TARGET_OS_VERSION', false, '2026-07-27 00:00:00'),
 		('FLEET_VAR_HOST_TARGET_OS_DEADLINE', false, '2026-07-27 00:00:00')`); err != nil {
+			return err
+		}
+	}
+	// Record the ported versions in goose's history so the below-marker
+	// drift check is satisfied by real state on every later boot, not by
+	// the PortedBelowMarker exemption (which only needs to cover the boot
+	// that runs this wrapper).
+	for _, v := range []int64{20260727083533, 20260727084359} {
+		if _, err := tx.Exec(`
+	INSERT INTO migration_status_tables (version_id, is_applied)
+	SELECT ?, true
+	WHERE NOT EXISTS (SELECT 1 FROM migration_status_tables WHERE version_id = ?)`, v, v); err != nil {
 			return err
 		}
 	}

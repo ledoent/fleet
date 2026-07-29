@@ -795,11 +795,27 @@ func (ds *Datastore) checkPGBelowMarkerDrift(ctx context.Context, marker int64) 
 			dbMax = v
 		}
 	}
+	registered := make(map[int64]struct{}, len(tables.MigrationClient.Migrations))
+	for _, m := range tables.MigrationClient.Migrations {
+		registered[m.Version] = struct{}{}
+	}
 	var missing []int64
 	for _, m := range tables.MigrationClient.Migrations {
-		if _, ok := appliedSet[m.Version]; !ok && m.Version < dbMax {
-			missing = append(missing, m.Version)
+		if _, ok := appliedSet[m.Version]; ok || m.Version >= dbMax {
+			continue
 		}
+		// A back-dated migration with a declared porting wrapper is not
+		// drift when that wrapper already ran, or is registered above the
+		// DB's max version so the goose Up following this check runs it.
+		if wrapper, ok := tables.PortedBelowMarker[m.Version]; ok {
+			if _, done := appliedSet[wrapper]; done {
+				continue
+			}
+			if _, reg := registered[wrapper]; reg && wrapper > dbMax {
+				continue
+			}
+		}
+		missing = append(missing, m.Version)
 	}
 	if len(missing) == 0 {
 		return nil
