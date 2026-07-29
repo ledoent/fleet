@@ -661,6 +661,17 @@ func (ds *Datastore) MigrateTables(ctx context.Context) error {
 		if err := ds.migratePGBaseline(ctx); err != nil {
 			return err
 		}
+		if err := tables.MigrationClient.Up(ds.writer(ctx).DB, ""); err != nil {
+			return err
+		}
+		// The generated updated_at trigger set references every table with a
+		// MySQL ON UPDATE CURRENT_TIMESTAMP column — including tables created
+		// by post-marker migrations — so it must run AFTER goose Up.
+		// CREATE OR REPLACE keeps it idempotent across prepare runs.
+		if _, err := ds.writer(ctx).ExecContext(ctx, pgTouchTriggersSQL); err != nil {
+			return ctxerr.Wrap(ctx, err, "applying PG updated_at trigger set")
+		}
+		return nil
 	}
 	return tables.MigrationClient.Up(ds.writer(ctx).DB, "")
 }
@@ -735,12 +746,6 @@ func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
 	}
 	if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselinePostSQL); err != nil {
 		return ctxerr.Wrap(ctx, err, "applying PG post-baseline fixups")
-	}
-	// Install/converge the generated ON UPDATE CURRENT_TIMESTAMP trigger set
-	// (see tools/pgcompat/gen_updated_at_triggers). Must run after the post
-	// fixups, which define fleet_set_updated_at.
-	if _, err := ds.writer(ctx).ExecContext(ctx, pgTouchTriggersSQL); err != nil {
-		return ctxerr.Wrap(ctx, err, "applying PG updated_at trigger set")
 	}
 	// Seed unconditionally, not only on freshApply: an operator who loaded
 	// the baseline via psql has `hosts` present but an empty tracking table,

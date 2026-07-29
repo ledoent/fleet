@@ -622,9 +622,9 @@ func CreatePostgresDS(t testing.TB) *Datastore {
 	if _, err := testDB.DB.Exec(pgBaselinePostSQL); err != nil {
 		t.Logf("PG: post-baseline fixups warning: %v", err)
 	}
-	if _, err := testDB.DB.Exec(pgTouchTriggersSQL); err != nil {
-		t.Fatalf("PG: updated_at trigger set failed: %v", err)
-	}
+	// NOTE: the updated_at trigger set is applied in CreatePostgresDS AFTER
+	// the post-baseline migration replay — it references tables that only
+	// exist once post-marker migrations have run.
 
 	// Verify minimum table count
 	var tableCount int
@@ -673,6 +673,8 @@ func CreatePostgresDS(t testing.TB) *Datastore {
 		"seed PG migration history")
 	require.NoError(t, tables.MigrationClient.Up(ds.writer(migCtx).DB, ""),
 		"apply post-baseline migrations on PG")
+	_, terr := ds.writer(migCtx).ExecContext(migCtx, pgTouchTriggersSQL)
+	require.NoError(t, terr, "apply PG updated_at trigger set")
 
 	return ds
 }

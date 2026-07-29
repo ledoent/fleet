@@ -18,6 +18,7 @@ var schemaIdentityCols = map[string]string{
 	"android_app_configurations":                "id",
 	"android_devices":                           "id",
 	"android_enterprises":                       "id",
+	"apple_software_update_assets":              "id",
 	"batch_activities":                          "id",
 	"batch_activity_host_results":               "id",
 	"ca_config_assets":                          "id",

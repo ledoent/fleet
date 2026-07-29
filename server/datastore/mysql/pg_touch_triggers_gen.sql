@@ -28,6 +28,7 @@ CREATE OR REPLACE TRIGGER android_devices_set_updated_at BEFORE UPDATE ON public
 CREATE OR REPLACE TRIGGER android_enterprises_set_updated_at BEFORE UPDATE ON public.android_enterprises FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER android_policy_requests_set_updated_at BEFORE UPDATE ON public.android_policy_requests FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER app_config_json_set_updated_at BEFORE UPDATE ON public.app_config_json FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+CREATE OR REPLACE TRIGGER apple_software_update_assets_set_updated_at BEFORE UPDATE ON public.apple_software_update_assets FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER batch_activities_set_updated_at BEFORE UPDATE ON public.batch_activities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER batch_activity_host_results_set_updated_at BEFORE UPDATE ON public.batch_activity_host_results FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER ca_config_assets_set_updated_at BEFORE UPDATE ON public.ca_config_assets FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
@@ -59,6 +60,7 @@ CREATE OR REPLACE TRIGGER host_mdm_set_updated_at BEFORE UPDATE ON public.host_m
 CREATE OR REPLACE TRIGGER host_mdm_android_profiles_set_updated_at BEFORE UPDATE ON public.host_mdm_android_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_apple_device_names_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_device_names FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_apple_enrollment_permissions_set_delivered_at BEFORE UPDATE ON public.host_mdm_apple_enrollment_permissions FOR EACH ROW EXECUTE FUNCTION public.fleet_touch_column('delivered_at');
+CREATE OR REPLACE TRIGGER host_mdm_apple_os_updates_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_os_updates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_apple_profiles_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_commands_set_updated_at BEFORE UPDATE ON public.host_mdm_commands FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_idp_accounts_set_updated_at BEFORE UPDATE ON public.host_mdm_idp_accounts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
