@@ -88,11 +88,11 @@ func (ds *Datastore) BulkUpsertHostDeviceNameEnforcement(ctx context.Context, te
 func (ds *Datastore) DeleteHostDeviceNameEnforcementForTeam(ctx context.Context, teamID *uint) error {
 	teamFilter, args := deviceNameTeamScope(teamID)
 
+	// Keyed-subquery form instead of MySQL-only `DELETE alias FROM ... JOIN`
+	// (fork convention: cross-dialect DELETEs).
 	stmt := `
-		DELETE hmadn
-		FROM host_mdm_apple_device_names hmadn
-		JOIN hosts h ON h.uuid = hmadn.host_uuid
-		WHERE ` + teamFilter
+		DELETE FROM host_mdm_apple_device_names
+		WHERE host_uuid IN (SELECT h.uuid FROM hosts h WHERE ` + teamFilter + `)`
 
 	if _, err := ds.writer(ctx).ExecContext(ctx, stmt, args...); err != nil {
 		return ctxerr.Wrap(ctx, err, "delete host device name enforcement for team")
@@ -323,19 +323,26 @@ func (ds *Datastore) resendDeviceNamesForSecretChange(ctx context.Context, chang
 	if len(changedSecretNames) == 0 {
 		return nil
 	}
-	pattern := "FLEET_SECRET_(" + strings.Join(changedSecretNames, "|") + `)\b`
+	// Word-boundary escape differs by dialect: MySQL (ICU) uses \b, PG (ARE)
+	// uses \y (\b is a literal backspace there).
+	boundary := `\b`
+	if ds.dialect.IsPostgres() {
+		boundary = `\y`
+	}
+	pattern := "FLEET_SECRET_(" + strings.Join(changedSecretNames, "|") + `)` + boundary
 
-	// Teams whose template references a changed secret.
+	// Teams whose template references a changed secret. RegexpMatch: REGEXP is
+	// MySQL-only syntax (PG uses ~).
 	var teamIDs []uint
 	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &teamIDs,
-		`SELECT id FROM teams WHERE COALESCE(config->>'$.mdm.name_template', '') REGEXP ?`, pattern); err != nil {
+		`SELECT id FROM teams WHERE `+ds.dialect.RegexpMatch(`COALESCE(config->>'$.mdm.name_template', '')`, "?"), pattern); err != nil {
 		return ctxerr.Wrap(ctx, err, "select teams using changed secret in device name template")
 	}
 
 	// The "No team" (global) template.
 	var noTeamMatches bool
 	if err := sqlx.GetContext(ctx, ds.reader(ctx), &noTeamMatches,
-		`SELECT COALESCE(`+deviceNameNoTeamTemplateExpr+`, '') REGEXP ?`, pattern); err != nil {
+		`SELECT `+ds.dialect.RegexpMatch(`COALESCE(`+deviceNameNoTeamTemplateExpr+`, '')`, "?"), pattern); err != nil {
 		return ctxerr.Wrap(ctx, err, "check no-team device name template for changed secret")
 	}
 
@@ -395,11 +402,11 @@ func (ds *Datastore) ReconcileHostDeviceNamesForHosts(ctx context.Context, hostI
 // deleteHostDeviceNameRowsForHostsDB removes enforcement rows for the given
 // hosts.
 func deleteHostDeviceNameRowsForHostsDB(ctx context.Context, tx sqlx.ExtContext, hostIDs []uint) error {
+	// Keyed-subquery form instead of MySQL-only `DELETE alias FROM ... JOIN`
+	// (fork convention: cross-dialect DELETEs).
 	stmt, args, err := sqlx.In(`
-		DELETE hmadn
-		FROM host_mdm_apple_device_names hmadn
-		JOIN hosts h ON h.uuid = hmadn.host_uuid
-		WHERE h.id IN (?)`, hostIDs)
+		DELETE FROM host_mdm_apple_device_names
+		WHERE host_uuid IN (SELECT h.uuid FROM hosts h WHERE h.id IN (?))`, hostIDs)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "build reconcile device name delete")
 	}

@@ -66,8 +66,10 @@ func TestListOperatingSystemsForPlatform(t *testing.T) {
 		for _, v := range []string{
 			"16 (2026-05-01)", "14 (2025-06-01)", "16 (2026-01-01)", "14 (2025-03-01)",
 		} {
+			// Insert-if-missing via the dialect (raw ON DUPLICATE KEY UPDATE
+			// id=id has no knownPrimaryKeys mapping and is MySQL-only).
 			if _, err := q.ExecContext(ctx,
-				`INSERT INTO operating_systems (name, version, arch, kernel_version, platform, os_version_id) VALUES (?, ?, '', '', ?, 0) ON DUPLICATE KEY UPDATE id=id`,
+				ds.dialect.InsertIgnoreInto()+` operating_systems (name, version, arch, kernel_version, platform, os_version_id) VALUES (?, ?, '', '', ?, 0)`+ds.dialect.OnConflictDoNothing(""),
 				"Android", v, "android"); err != nil {
 				return err
 			}

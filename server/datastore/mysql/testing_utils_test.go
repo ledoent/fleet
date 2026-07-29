@@ -376,6 +376,12 @@ func initializeDatabase(t testing.TB, testName string, opts *testing_utils.Datas
 }
 
 func createMySQLDSWithOptions(t testing.TB, opts *testing_utils.DatastoreTestOptions) *Datastore {
+	// Gate on the env like CreateDS does: without this, an unfiltered
+	// POSTGRES_TEST-only run (the PG CI job has no MySQL service) fails every
+	// MySQL-only test on connection errors instead of skipping them visibly.
+	if _, ok := os.LookupEnv("MYSQL_TEST"); !ok {
+		t.Skip("MySQL-only test: requires MYSQL_TEST=1 (not yet converted to CreateDS dual-dialect)")
+	}
 	cleanTestName, opts := testing_utils.ProcessOptions(t, opts)
 	ds := initializeDatabase(t, cleanTestName, opts)
 	t.Cleanup(func() { ds.Close() })
@@ -538,7 +544,7 @@ func CreatePostgresDS(t testing.TB) *Datastore {
 	})
 
 	// Connect to the test database
-	testDSN := fmt.Sprintf("host=localhost port=%s user=fleet password=insecure dbname=%s sslmode=disable", port, dbName)
+	testDSN := fmt.Sprintf("host=localhost port=%s user=fleet password=insecure dbname=%s sslmode=disable default_query_exec_mode=describe_exec", port, dbName)
 	testDB, err := sqlx.Open("pgx-rebind", testDSN)
 	require.NoError(t, err)
 
@@ -630,22 +636,11 @@ func CreatePostgresDS(t testing.TB) *Datastore {
 
 	// Insert required seed data (app_config_json needs at least one row)
 	_, _ = testDB.Exec(`INSERT INTO app_config_json (id, json_value) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING`)
-	// Insert built-in labels that migrations would normally create
-	if _, err := testDB.Exec(`INSERT INTO labels (name, query, label_type, label_membership_type) VALUES
-		('All Hosts', 'SELECT 1', 1, 0),
-		('macOS', 'SELECT 1', 1, 0),
-		('Ubuntu Linux', 'SELECT 1', 1, 0),
-		('CentOS Linux', 'SELECT 1', 1, 0),
-		('Windows', 'SELECT 1', 1, 0),
-		('Red Hat Linux', 'SELECT 1', 1, 0),
-		('All Linux', 'SELECT 1', 1, 0),
-		('chrome', 'SELECT 1', 1, 0),
-		('iOS', 'SELECT 1', 1, 0),
-		('iPadOS', 'SELECT 1', 1, 0),
-		('Fedora Linux', 'SELECT 1', 1, 0)
-		ON CONFLICT (name) DO NOTHING`); err != nil {
-		t.Logf("PG seed data: labels insert error: %v", err)
-	}
+	// NO builtin-label seeding: MySQL test databases are schema-only (data
+	// migrations never run there), and upstream tests that need builtin
+	// labels create them via test.AddBuiltinLabels/AddAllHostsLabel — which
+	// collide with pre-seeded rows on idx_label_unique_name. Environment
+	// parity means starting empty exactly like MySQL.
 	// Insert mdm delivery status and operation type seed data
 	_, _ = testDB.Exec(`INSERT INTO mdm_delivery_status (status) VALUES ('failed'), ('applied'), ('pending'), ('verified'), ('verifying') ON CONFLICT (status) DO NOTHING`)
 	_, _ = testDB.Exec(`INSERT INTO mdm_operation_types (operation_type) VALUES ('install'), ('remove') ON CONFLICT (operation_type) DO NOTHING`)
@@ -767,6 +762,10 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 			// a prior test left the sequence elevated.
 			_, _ = db.ExecContext(ctx, `TRUNCATE TABLE "`+tbl+`" RESTART IDENTITY CASCADE`)
 		}
+		// Same cache hygiene as the MySQL path below: without this, the
+		// in-process software-title cache says a truncated title still
+		// exists and UpdateHostSoftware skips recreating it.
+		ds.clearKnownSoftwareTitleKeys()
 		return
 	}
 

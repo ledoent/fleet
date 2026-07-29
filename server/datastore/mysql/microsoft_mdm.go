@@ -1383,8 +1383,11 @@ func updateMDMWindowsHostProfileStatusFromResponseDB(
 			continue
 		}
 
-		args = append(args, hp.HostUUID, hp.ProfileUUID, payload.Detail, payload.Status, hp.Retries, hp.Checksum)
-		sb.WriteString("(?, ?, ?, ?, ?, command_uuid, ?),")
+		// command_uuid is bound to its current value rather than the MySQL-only
+		// bare-column-reference trick (invalid on PG): the ON DUPLICATE clause
+		// doesn't touch it, so the existing value is preserved either way.
+		args = append(args, hp.HostUUID, hp.ProfileUUID, payload.Detail, payload.Status, hp.Retries, hp.CommandUUID, hp.Checksum)
+		sb.WriteString("(?, ?, ?, ?, ?, ?, ?),")
 	}
 
 	// Execute batched UPSERT for the upsert bucket.

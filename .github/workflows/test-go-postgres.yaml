@@ -143,10 +143,13 @@ jobs:
 
       - name: Run PostgreSQL Go Tests
         run: |
+          # No -run filter: the full datastore suite runs against PG. Tests
+          # converted to CreateDS execute; MySQL-only tests (CreateMySQLDS)
+          # skip visibly — the skip ledger in validate-pg-compat.yml reports
+          # the remaining conversion debt.
           gotestsum --format=testdox --jsonfile=/tmp/test-output.json -- \
             -v \
             -timeout=$GO_TEST_TIMEOUT \
-            -run "TestPostgres" \
             ./server/datastore/mysql/... 2>&1 | tee /tmp/gotest.log
         env:
           POSTGRES_TEST: "1"

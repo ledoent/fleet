@@ -1172,3 +1172,19 @@ func TestAwaitingConfigurationNotRewritten(t *testing.T) {
 		rebindQuery("WHERE awaiting_configuration = 1"),
 		"= 1 must NOT become = true on the smallint column")
 }
+
+func TestRewriteSubstringIndex(t *testing.T) {
+	require.Equal(t,
+		"SELECT split_part(fma.slug, '/', 1) AS app_token",
+		rebindQuery("SELECT SUBSTRING_INDEX(fma.slug, '/', 1) AS app_token"))
+	// Only count=1 translates; other counts must pass through for PG to reject.
+	require.Contains(t,
+		rebindQuery("SELECT SUBSTRING_INDEX(slug, '/', 2)"), "SUBSTRING_INDEX")
+}
+
+func TestRewriteJSONType(t *testing.T) {
+	got := rebindQuery(`SELECT IF(JSON_TYPE(JSON_EXTRACT(json_value, '$.mdm.name_template')) = 'STRING', 1, 0)`)
+	require.Contains(t, got, "upper(jsonb_typeof(")
+	require.Contains(t, got, "= 'STRING'")
+	require.NotContains(t, got, "JSON_TYPE(")
+}

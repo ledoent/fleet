@@ -410,3 +410,53 @@ deployment has already run it) but the batching convention stands for future
 migrations. The re-reviewer's structural recommendation — treat Phase 4
 (full dual-dialect suite) as a merge gate, not a stretch goal — is adopted:
 **Phase 4 is a merge precondition for PR #6.**
+
+---
+
+## Phase 4 — execution plan (dual-dialect gate)
+
+Goal (the PR #6 merge gate): the PG CI job runs the datastore package with NO
+`-run` filter — every dual-dialect (`CreateDS`) test executes against PG,
+unconverted tests skip visibly, and the skip ledger reports the debt.
+
+### 4.1 Make the unfiltered run well-defined
+`CreateMySQLDS` connects unconditionally; under a PG-only environment (CI has
+no MySQL service) an unfiltered run fails on connection errors instead of
+skipping. Gate it like `CreateDS`: skip with a "requires MYSQL_TEST=1"
+message when the env is absent. MySQL CI (`test-go.yaml`) sets MYSQL_TEST=1
+everywhere, so nothing changes there.
+
+### 4.2 Inventory and fix the converted set
+Full `POSTGRES_TEST=1 go test ./server/datastore/mysql/` (no filter) →
+classify every failure in the ~31 converted files + `TestPostgres*`; fix all
+of them (Phases 1–3 likely fixed many of the historically-listed classes
+already — the inventory is the truth, not the old docs list).
+
+### 4.3 Convert the named-failure suites
+Convert `users_test.go` and `jobs_test.go` to `CreateDS` — the two suites
+whose PG failures were individually diagnosed in docs/Deploy/postgresql.md
+(local-tz precision; `not_before <= NOW()` semantics) — and fix those for
+real. The giant suites (hosts, software, policies, apple/microsoft MDM;
+30k+ test lines) are explicitly deferred: each is its own conversion project,
+and the honest gate makes their unconverted status visible as skips rather
+than hiding it behind a filter.
+
+### 4.4 Drop the filter
+`test-go-postgres.yaml`: remove `-run "TestPostgres"`, keep the driver-test
+step, verify job runtime stays acceptable; docs updated to the new coverage
+statement; prod deploy only if datastore code changed during fixes.
+
+> **Phase 4 status 2026-07-29: COMPLETE.** The unfiltered PG run is green:
+> 121 top-level tests pass, 59 MySQL-only tests skip visibly, zero failures.
+> Fix classes closed en route: MySQL-only `DELETE alias FROM` (device names,
+> display names), raw `REGEXP`/word-boundary portability, `SUBSTRING_INDEX`
+> and `JSON_TYPE` driver rewrites, bare column reference in a VALUES tuple
+> (windows profiles), four more orphaned generated columns (Migration
+> 20260729120000: windows checksum, declarations token,
+> additional_identifier, calendar uuid), builtin-label seed parity, the
+> title-cache clear on PG truncation, duplicate-key message parity
+> (TranslateError), DB-clock job scheduling, and pgx `describe_exec` mode
+> (the statement cache broke under live DDL — which is also our deploy
+> shape). One MySQL-path fork bug found and fixed (LIMIT-in-IN subquery in
+> query-results cleanup). users/jobs converted to CreateDS. Baseline marker:
+> 20260729120000.

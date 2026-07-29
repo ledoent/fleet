@@ -499,13 +499,19 @@ func newPostgresDB(conf *config.MysqlConfig) (*sqlx.DB, error) {
 		host = conf.Address
 		port = "5432"
 	}
+	// default_query_exec_mode=describe_exec: pgx's default statement cache
+	// breaks with "cached plan must not change result type" (SQLSTATE 0A000)
+	// when DDL lands under a live connection — exactly our deploy flow, where
+	// `prepare db` migrations run while previous-version pods still serve.
+	// cache_describe caches parameter/field descriptions (cheap) without
+	// binding a server-side plan to the result shape.
 	dsn := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable default_query_exec_mode=describe_exec",
 		host, port, conf.Username, conf.Password, conf.Database,
 	)
 	if conf.TLSCA != "" {
 		dsn = fmt.Sprintf(
-			"host=%s port=%s user=%s password=%s dbname=%s sslmode=verify-ca sslrootcert=%s",
+			"host=%s port=%s user=%s password=%s dbname=%s sslmode=verify-ca sslrootcert=%s default_query_exec_mode=describe_exec",
 			host, port, conf.Username, conf.Password, conf.Database, conf.TLSCA,
 		)
 	}

@@ -1700,12 +1700,16 @@ func (ds *Datastore) DeleteSoftwareInstaller(ctx context.Context, id uint) error
 
 		// The display name is title-level (shared across sibling packages), so only remove it
 		// when this is the last installer on the title/team.
-		if _, err := tx.ExecContext(ctx, `DELETE dn FROM software_title_display_names dn
-			JOIN software_installers si ON si.title_id = dn.software_title_id AND si.global_or_team_id = dn.team_id
-			WHERE si.id = ?
-			AND NOT EXISTS (
-				SELECT 1 FROM software_installers other
-				WHERE other.title_id = si.title_id AND other.global_or_team_id = si.global_or_team_id AND other.id != si.id
+		// Keyed-subquery form instead of MySQL-only `DELETE alias FROM ... JOIN`
+		// (fork convention: cross-dialect DELETEs).
+		if _, err := tx.ExecContext(ctx, `DELETE FROM software_title_display_names
+			WHERE (software_title_id, team_id) IN (
+				SELECT si.title_id, si.global_or_team_id FROM software_installers si
+				WHERE si.id = ?
+				AND NOT EXISTS (
+					SELECT 1 FROM software_installers other
+					WHERE other.title_id = si.title_id AND other.global_or_team_id = si.global_or_team_id AND other.id != si.id
+				)
 			)`, id); err != nil {
 			return ctxerr.Wrap(ctx, err, "delete software title display name for installer being deleted")
 		}

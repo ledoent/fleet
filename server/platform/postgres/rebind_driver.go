@@ -47,6 +47,9 @@ var (
 	reTimeDiff      = regexp.MustCompile(`TIMEDIFF\(([^,]+),\s*([^)]+)\)`)
 	reTimeToSec     = regexp.MustCompile(`TIME_TO_SEC\(([^)]+)\)`)
 	reFromDual      = regexp.MustCompile(`(?i)\s+FROM\s+DUAL\b`)
+	// SUBSTRING_INDEX(expr, 'delim', 1): expr is a simple (possibly
+	// alias-qualified) column reference; delim a quoted literal.
+	reSubstringIndexOne = regexp.MustCompile(`(?i)SUBSTRING_INDEX\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*('[^']*')\s*,\s*1\s*\)`)
 	reSeparator     = regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
 	// reTimestamp matches MySQL DML TIMESTAMP(<expr>) casts and rewrites them to
 	// PG's `(<expr>)::timestamp`. The first character of the argument must be
@@ -511,6 +514,15 @@ func rebindQuery(query string) string {
 			return "SELECT 1"
 		}
 	}
+	// MySQL JSON_TYPE(x) → upper(jsonb_typeof(x)): PG's type names are
+	// lowercase ('string'), MySQL's uppercase ('STRING'); upper() lets the
+	// caller's literal comparison work unchanged on both.
+	query = rewriteJSONType(query)
+	// MySQL SUBSTRING_INDEX(expr, delim, 1) → PG split_part(expr, delim, 1).
+	// Only count=1 is equivalent (everything before the first delimiter);
+	// other counts have no direct PG counterpart and are left for PG to
+	// reject loudly.
+	query = reSubstringIndexOne.ReplaceAllString(query, "split_part($1, $2, 1)")
 	// MySQL RAND() → PG random()
 	query = strings.ReplaceAll(query, "RAND()", "random()")
 	query = strings.ReplaceAll(query, "rand()", "random()")
@@ -820,7 +832,7 @@ func (c *rebindConn) ExecContext(ctx context.Context, query string, args []drive
 			}
 			res, err := ec.ExecContext(ctx, stmt, stmtArgs)
 			if err != nil {
-				return nil, err
+				return nil, TranslateError(err)
 			}
 			lastResult = res
 		}
@@ -886,7 +898,7 @@ func execWithReturning(ctx context.Context, qc driver.QueryerContext, query stri
 	_ = col // reserved for future per-column type handling
 	rows, err := qc.QueryContext(ctx, query, args)
 	if err != nil {
-		return nil, err
+		return nil, TranslateError(err)
 	}
 	defer rows.Close()
 
@@ -931,7 +943,7 @@ func (c *rebindConn) QueryContext(ctx context.Context, query string, args []driv
 		coerced := coerceTimeArgsToUTC(coerceBinaryArgs(stripNullBytes(coerceIntArgsForBoolColumns(rebound, coerceBoolArgsForTextCast(rebound, args)))))
 		rows, err := qc.QueryContext(ctx, rebound, coerced)
 		if err != nil {
-			return nil, err
+			return nil, TranslateError(err)
 		}
 		return &rebindRows{Rows: rows}, nil
 	}
@@ -2807,4 +2819,39 @@ func parseJoinBlock(joinBlock string) ([]string, []string) {
 		onConditions = append(onConditions, cond)
 	}
 	return fromTables, onConditions
+}
+
+// rewriteJSONType converts MySQL JSON_TYPE(expr) to upper(jsonb_typeof(expr)),
+// scanning for the matching close paren so nested calls (JSON_EXTRACT etc.)
+// stay intact. upper() bridges the type-name case difference (PG 'string' vs
+// MySQL 'STRING') so caller comparisons work verbatim.
+func rewriteJSONType(query string) string {
+	const marker = "JSON_TYPE("
+	for {
+		idx := strings.Index(query, marker)
+		if idx < 0 {
+			return query
+		}
+		depth := 1
+		end := -1
+		for i := idx + len(marker); i < len(query); i++ {
+			switch query[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					end = i
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 {
+			return query // unbalanced; leave for PG to reject
+		}
+		inner := query[idx+len(marker) : end]
+		query = query[:idx] + "upper(jsonb_typeof(" + inner + "))" + query[end+1:]
+	}
 }

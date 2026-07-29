@@ -25,7 +25,7 @@
 -- Then run the schema-drift validator:
 --   make check-pg-compat
 --
--- pg-baseline-up-to-migration: 20260727210000
+-- pg-baseline-up-to-migration: 20260729120000
 --
 --
 -- PostgreSQL database dump
@@ -37,6 +37,21 @@
 
 
 --
+-- Name: calendar_events_set_uuid(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.calendar_events_set_uuid() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+		DECLARE h text;
+		BEGIN
+			h := upper(encode(NEW.uuid_bin, 'hex'));
+			NEW.uuid := substr(h,1,8) || '-' || substr(h,9,4) || '-' || substr(h,13,4) || '-' || substr(h,17,4) || '-' || substr(h,21,12);
+			RETURN NEW;
+		END $$;
+
+
+--
 -- Name: fleet_set_updated_at(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -44,7 +59,10 @@ CREATE FUNCTION public.fleet_set_updated_at() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    NEW.updated_at = CURRENT_TIMESTAMP;
+    IF NEW IS DISTINCT FROM OLD
+       AND NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
+        NEW.updated_at = CURRENT_TIMESTAMP;
+    END IF;
     RETURN NEW;
 END;
 $$;
@@ -67,6 +85,22 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+
+--
+-- Name: fleet_touch_column(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.fleet_touch_column() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW IS DISTINCT FROM OLD
+       AND (to_jsonb(NEW)->TG_ARGV[0]) IS NOT DISTINCT FROM (to_jsonb(OLD)->TG_ARGV[0]) THEN
+        NEW := jsonb_populate_record(NEW, jsonb_build_object(TG_ARGV[0], CURRENT_TIMESTAMP));
+    END IF;
+    RETURN NEW;
+END $$;
 
 
 --
@@ -118,6 +152,51 @@ CREATE FUNCTION public.host_software_installs_set_statuses() RETURNS trigger
 				END;
 			NEW.execution_status := exec_status;
 			NEW.status := CASE WHEN NEW.removed = true THEN NULL ELSE exec_status END;
+			RETURN NEW;
+		END $$;
+
+
+--
+-- Name: mdm_apple_declarations_set_token(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.mdm_apple_declarations_set_token() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+		BEGIN
+			NEW.token := decode(md5(NEW.raw_json::text || COALESCE(extract(epoch from NEW.secrets_updated_at)::text, '')), 'hex');
+			RETURN NEW;
+		END $$;
+
+
+--
+-- Name: mdm_windows_configuration_profiles_set_checksum(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.mdm_windows_configuration_profiles_set_checksum() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+		BEGIN
+			NEW.checksum := decode(md5(NEW.syncml), 'hex');
+			RETURN NEW;
+		END $$;
+
+
+--
+-- Name: software_titles_set_additional_identifier(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.software_titles_set_additional_identifier() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+		BEGIN
+			NEW.additional_identifier :=
+				CASE
+					WHEN NEW.source = 'ios_apps' THEN 1
+					WHEN NEW.source = 'ipados_apps' THEN 2
+					WHEN NEW.bundle_identifier IS NOT NULL THEN 0
+					ELSE NULL
+				END;
 			RETURN NEW;
 		END $$;
 
@@ -10168,10 +10247,213 @@ CREATE UNIQUE INDEX vulnerability_host_counts_cve_team_id_global_stats_idx ON pu
 
 
 --
+-- Name: abm_tokens abm_tokens_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER abm_tokens_set_updated_at BEFORE UPDATE ON public.abm_tokens FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: acme_accounts acme_accounts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER acme_accounts_set_updated_at BEFORE UPDATE ON public.acme_accounts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: acme_authorizations acme_authorizations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER acme_authorizations_set_updated_at BEFORE UPDATE ON public.acme_authorizations FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: acme_challenges acme_challenges_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER acme_challenges_set_updated_at BEFORE UPDATE ON public.acme_challenges FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: acme_enrollments acme_enrollments_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER acme_enrollments_set_updated_at BEFORE UPDATE ON public.acme_enrollments FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: acme_orders acme_orders_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER acme_orders_set_updated_at BEFORE UPDATE ON public.acme_orders FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: aggregated_stats aggregated_stats_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER aggregated_stats_set_updated_at BEFORE UPDATE ON public.aggregated_stats FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: android_app_configurations android_app_configurations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER android_app_configurations_set_updated_at BEFORE UPDATE ON public.android_app_configurations FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: android_devices android_devices_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER android_devices_set_updated_at BEFORE UPDATE ON public.android_devices FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: android_enterprises android_enterprises_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER android_enterprises_set_updated_at BEFORE UPDATE ON public.android_enterprises FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: android_policy_requests android_policy_requests_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER android_policy_requests_set_updated_at BEFORE UPDATE ON public.android_policy_requests FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: app_config_json app_config_json_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER app_config_json_set_updated_at BEFORE UPDATE ON public.app_config_json FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: batch_activities batch_activities_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER batch_activities_set_updated_at BEFORE UPDATE ON public.batch_activities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: batch_activity_host_results batch_activity_host_results_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER batch_activity_host_results_set_updated_at BEFORE UPDATE ON public.batch_activity_host_results FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: ca_config_assets ca_config_assets_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER ca_config_assets_set_updated_at BEFORE UPDATE ON public.ca_config_assets FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: calendar_events calendar_events_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER calendar_events_set_updated_at BEFORE UPDATE ON public.calendar_events FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: calendar_events calendar_events_uuid; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER calendar_events_uuid BEFORE INSERT OR UPDATE ON public.calendar_events FOR EACH ROW EXECUTE FUNCTION public.calendar_events_set_uuid();
+
+
+--
+-- Name: certificate_authorities certificate_authorities_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER certificate_authorities_set_updated_at BEFORE UPDATE ON public.certificate_authorities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: certificate_templates certificate_templates_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER certificate_templates_set_updated_at BEFORE UPDATE ON public.certificate_templates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: challenges challenges_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER challenges_set_updated_at BEFORE UPDATE ON public.challenges FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: conditional_access_scep_certificates conditional_access_scep_certificates_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER conditional_access_scep_certificates_set_updated_at BEFORE UPDATE ON public.conditional_access_scep_certificates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: cron_stats cron_stats_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER cron_stats_set_updated_at BEFORE UPDATE ON public.cron_stats FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: custom_host_vitals custom_host_vitals_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER custom_host_vitals_set_updated_at BEFORE UPDATE ON public.custom_host_vitals FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: default_team_config_json default_team_config_json_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER default_team_config_json_set_updated_at BEFORE UPDATE ON public.default_team_config_json FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: distributed_query_campaigns distributed_query_campaigns_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER distributed_query_campaigns_set_updated_at BEFORE UPDATE ON public.distributed_query_campaigns FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: fleet_maintained_apps fleet_maintained_apps_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER fleet_maintained_apps_set_updated_at BEFORE UPDATE ON public.fleet_maintained_apps FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_batteries host_batteries_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_batteries_set_updated_at BEFORE UPDATE ON public.host_batteries FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_calendar_events host_calendar_events_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_calendar_events_set_updated_at BEFORE UPDATE ON public.host_calendar_events FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_certificate_templates host_certificate_templates_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_certificate_templates_set_updated_at BEFORE UPDATE ON public.host_certificate_templates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_conditional_access host_conditional_access_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_conditional_access_set_updated_at BEFORE UPDATE ON public.host_conditional_access FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 
 
 --
@@ -10182,10 +10464,87 @@ CREATE TRIGGER host_custom_host_vitals_set_updated_at BEFORE UPDATE ON public.ho
 
 
 --
+-- Name: host_device_auth host_device_auth_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_device_auth_set_updated_at BEFORE UPDATE ON public.host_device_auth FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_disk_encryption_keys host_disk_encryption_keys_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_disk_encryption_keys_set_updated_at BEFORE UPDATE ON public.host_disk_encryption_keys FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_disks host_disks_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_disks_set_updated_at BEFORE UPDATE ON public.host_disks FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_emails host_emails_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_emails_set_updated_at BEFORE UPDATE ON public.host_emails FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_identity_scep_certificates host_identity_scep_certificates_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_identity_scep_certificates_set_updated_at BEFORE UPDATE ON public.host_identity_scep_certificates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_in_house_software_installs host_in_house_software_installs_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_in_house_software_installs_set_updated_at BEFORE UPDATE ON public.host_in_house_software_installs FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_issues host_issues_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_issues_set_updated_at BEFORE UPDATE ON public.host_issues FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_last_known_locations host_last_known_locations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_last_known_locations_set_updated_at BEFORE UPDATE ON public.host_last_known_locations FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_managed_local_account_passwords host_managed_local_account_passwords_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_managed_local_account_passwords_set_updated_at BEFORE UPDATE ON public.host_managed_local_account_passwords FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_mdm_android_profiles host_mdm_android_profiles_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_android_profiles_set_updated_at BEFORE UPDATE ON public.host_mdm_android_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: host_mdm_apple_device_names host_mdm_apple_device_names_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER host_mdm_apple_device_names_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_device_names FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_mdm_apple_enrollment_permissions host_mdm_apple_enrollment_permissions_set_delivered_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_apple_enrollment_permissions_set_delivered_at BEFORE UPDATE ON public.host_mdm_apple_enrollment_permissions FOR EACH ROW EXECUTE FUNCTION public.fleet_touch_column('delivered_at');
 
 
 --
@@ -10196,10 +10555,52 @@ CREATE TRIGGER host_mdm_apple_enrollment_permissions_set_updated_at BEFORE UPDAT
 
 
 --
+-- Name: host_mdm_apple_profiles host_mdm_apple_profiles_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_apple_profiles_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_mdm_commands host_mdm_commands_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_commands_set_updated_at BEFORE UPDATE ON public.host_mdm_commands FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: host_mdm host_mdm_enrollment_status; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER host_mdm_enrollment_status BEFORE INSERT OR UPDATE ON public.host_mdm FOR EACH ROW EXECUTE FUNCTION public.host_mdm_set_enrollment_status();
+
+
+--
+-- Name: host_mdm_idp_accounts host_mdm_idp_accounts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_idp_accounts_set_updated_at BEFORE UPDATE ON public.host_mdm_idp_accounts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_mdm_managed_certificates host_mdm_managed_certificates_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_managed_certificates_set_updated_at BEFORE UPDATE ON public.host_mdm_managed_certificates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_mdm host_mdm_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_set_updated_at BEFORE UPDATE ON public.host_mdm FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_mdm_windows_profiles host_mdm_windows_profiles_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_windows_profiles_set_updated_at BEFORE UPDATE ON public.host_mdm_windows_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 
 
 --
@@ -10210,10 +10611,115 @@ CREATE TRIGGER host_mdm_windows_profiles_status_set_updated_at BEFORE UPDATE ON 
 
 
 --
+-- Name: host_recovery_key_passwords host_recovery_key_passwords_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_recovery_key_passwords_set_updated_at BEFORE UPDATE ON public.host_recovery_key_passwords FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_scd_data host_scd_data_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_scd_data_set_updated_at BEFORE UPDATE ON public.host_scd_data FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_script_results host_script_results_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_script_results_set_updated_at BEFORE UPDATE ON public.host_script_results FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_software_installs host_software_installs_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_software_installs_set_updated_at BEFORE UPDATE ON public.host_software_installs FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: host_software_installs host_software_installs_statuses; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER host_software_installs_statuses BEFORE INSERT OR UPDATE ON public.host_software_installs FOR EACH ROW EXECUTE FUNCTION public.host_software_installs_set_statuses();
+
+
+--
+-- Name: host_vpp_software_installs host_vpp_software_installs_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_vpp_software_installs_set_updated_at BEFORE UPDATE ON public.host_vpp_software_installs FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: hosts hosts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER hosts_set_updated_at BEFORE UPDATE ON public.hosts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: identity_certificates identity_certificates_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER identity_certificates_set_updated_at BEFORE UPDATE ON public.identity_certificates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: in_house_app_configurations in_house_app_configurations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER in_house_app_configurations_set_updated_at BEFORE UPDATE ON public.in_house_app_configurations FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: in_house_app_labels in_house_app_labels_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER in_house_app_labels_set_updated_at BEFORE UPDATE ON public.in_house_app_labels FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: in_house_app_upcoming_activities in_house_app_upcoming_activities_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER in_house_app_upcoming_activities_set_updated_at BEFORE UPDATE ON public.in_house_app_upcoming_activities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: in_house_apps in_house_apps_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER in_house_apps_set_updated_at BEFORE UPDATE ON public.in_house_apps FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: invites invites_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER invites_set_updated_at BEFORE UPDATE ON public.invites FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: jobs jobs_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER jobs_set_updated_at BEFORE UPDATE ON public.jobs FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: label_membership label_membership_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER label_membership_set_updated_at BEFORE UPDATE ON public.label_membership FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: labels labels_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER labels_set_updated_at BEFORE UPDATE ON public.labels FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 
 
 --
@@ -10231,6 +10737,34 @@ CREATE TRIGGER mdm_android_commands_set_updated_at BEFORE UPDATE ON public.mdm_a
 
 
 --
+-- Name: mdm_apple_bootstrap_packages mdm_apple_bootstrap_packages_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_apple_bootstrap_packages_set_updated_at BEFORE UPDATE ON public.mdm_apple_bootstrap_packages FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: mdm_apple_declarations mdm_apple_declarations_token; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_apple_declarations_token BEFORE INSERT OR UPDATE ON public.mdm_apple_declarations FOR EACH ROW EXECUTE FUNCTION public.mdm_apple_declarations_set_token();
+
+
+--
+-- Name: mdm_apple_default_setup_assistants mdm_apple_default_setup_assistants_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_apple_default_setup_assistants_set_updated_at BEFORE UPDATE ON public.mdm_apple_default_setup_assistants FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: mdm_apple_enrollment_profiles mdm_apple_enrollment_profiles_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_apple_enrollment_profiles_set_updated_at BEFORE UPDATE ON public.mdm_apple_enrollment_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: mdm_apple_psso_devices mdm_apple_psso_devices_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -10245,10 +10779,332 @@ CREATE TRIGGER mdm_apple_psso_keys_set_updated_at BEFORE UPDATE ON public.mdm_ap
 
 
 --
+-- Name: mdm_apple_setup_assistant_profiles mdm_apple_setup_assistant_profiles_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_apple_setup_assistant_profiles_set_updated_at BEFORE UPDATE ON public.mdm_apple_setup_assistant_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: mdm_apple_setup_assistants mdm_apple_setup_assistants_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_apple_setup_assistants_set_updated_at BEFORE UPDATE ON public.mdm_apple_setup_assistants FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: mdm_configuration_profile_labels mdm_configuration_profile_labels_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_configuration_profile_labels_set_updated_at BEFORE UPDATE ON public.mdm_configuration_profile_labels FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: mdm_idp_accounts mdm_idp_accounts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_idp_accounts_set_updated_at BEFORE UPDATE ON public.mdm_idp_accounts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: mdm_windows_configuration_profiles mdm_windows_configuration_profiles_checksum; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_windows_configuration_profiles_checksum BEFORE INSERT OR UPDATE ON public.mdm_windows_configuration_profiles FOR EACH ROW EXECUTE FUNCTION public.mdm_windows_configuration_profiles_set_checksum();
+
+
+--
+-- Name: mdm_windows_enrollments mdm_windows_enrollments_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_windows_enrollments_set_updated_at BEFORE UPDATE ON public.mdm_windows_enrollments FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: microsoft_compliance_partner_host_statuses microsoft_compliance_partner_host_statuses_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER microsoft_compliance_partner_host_statuses_set_updated_at BEFORE UPDATE ON public.microsoft_compliance_partner_host_statuses FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: microsoft_compliance_partner_integrations microsoft_compliance_partner_integrations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER microsoft_compliance_partner_integrations_set_updated_at BEFORE UPDATE ON public.microsoft_compliance_partner_integrations FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: mobile_device_management_solutions mobile_device_management_solutions_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mobile_device_management_solutions_set_updated_at BEFORE UPDATE ON public.mobile_device_management_solutions FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: nano_cert_auth_associations nano_cert_auth_associations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER nano_cert_auth_associations_set_updated_at BEFORE UPDATE ON public.nano_cert_auth_associations FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: nano_command_results nano_command_results_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER nano_command_results_set_updated_at BEFORE UPDATE ON public.nano_command_results FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: nano_commands nano_commands_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER nano_commands_set_updated_at BEFORE UPDATE ON public.nano_commands FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: nano_dep_names nano_dep_names_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER nano_dep_names_set_updated_at BEFORE UPDATE ON public.nano_dep_names FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: nano_devices nano_devices_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER nano_devices_set_updated_at BEFORE UPDATE ON public.nano_devices FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: nano_enrollment_queue nano_enrollment_queue_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER nano_enrollment_queue_set_updated_at BEFORE UPDATE ON public.nano_enrollment_queue FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: nano_enrollments nano_enrollments_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER nano_enrollments_set_updated_at BEFORE UPDATE ON public.nano_enrollments FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: nano_push_certs nano_push_certs_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER nano_push_certs_set_updated_at BEFORE UPDATE ON public.nano_push_certs FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: nano_users nano_users_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER nano_users_set_updated_at BEFORE UPDATE ON public.nano_users FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: network_interfaces network_interfaces_set_created_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER network_interfaces_set_created_at BEFORE UPDATE ON public.network_interfaces FOR EACH ROW EXECUTE FUNCTION public.fleet_touch_column('created_at');
+
+
+--
+-- Name: network_interfaces network_interfaces_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER network_interfaces_set_updated_at BEFORE UPDATE ON public.network_interfaces FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: operating_system_version_vulnerabilities operating_system_version_vulnerabilities_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER operating_system_version_vulnerabilities_set_updated_at BEFORE UPDATE ON public.operating_system_version_vulnerabilities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: operating_system_vulnerabilities operating_system_vulnerabilities_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER operating_system_vulnerabilities_set_updated_at BEFORE UPDATE ON public.operating_system_vulnerabilities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: packs packs_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER packs_set_updated_at BEFORE UPDATE ON public.packs FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: password_reset_requests password_reset_requests_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER password_reset_requests_set_updated_at BEFORE UPDATE ON public.password_reset_requests FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: policies policies_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER policies_set_updated_at BEFORE UPDATE ON public.policies FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: policy_labels policy_labels_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER policy_labels_set_updated_at BEFORE UPDATE ON public.policy_labels FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: policy_membership policy_membership_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER policy_membership_set_updated_at BEFORE UPDATE ON public.policy_membership FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: policy_stats policy_stats_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER policy_stats_set_updated_at BEFORE UPDATE ON public.policy_stats FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: queries queries_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER queries_set_updated_at BEFORE UPDATE ON public.queries FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: query_labels query_labels_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER query_labels_set_updated_at BEFORE UPDATE ON public.query_labels FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: scheduled_queries scheduled_queries_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER scheduled_queries_set_updated_at BEFORE UPDATE ON public.scheduled_queries FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: scim_groups scim_groups_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER scim_groups_set_updated_at BEFORE UPDATE ON public.scim_groups FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: scim_last_request scim_last_request_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER scim_last_request_set_updated_at BEFORE UPDATE ON public.scim_last_request FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: scim_user_emails scim_user_emails_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER scim_user_emails_set_updated_at BEFORE UPDATE ON public.scim_user_emails FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: scim_users scim_users_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER scim_users_set_updated_at BEFORE UPDATE ON public.scim_users FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: script_upcoming_activities script_upcoming_activities_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER script_upcoming_activities_set_updated_at BEFORE UPDATE ON public.script_upcoming_activities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: scripts scripts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER scripts_set_updated_at BEFORE UPDATE ON public.scripts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: secret_variables secret_variables_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER secret_variables_set_updated_at BEFORE UPDATE ON public.secret_variables FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: sessions sessions_set_accessed_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER sessions_set_accessed_at BEFORE UPDATE ON public.sessions FOR EACH ROW EXECUTE FUNCTION public.fleet_touch_column('accessed_at');
+
+
+--
+-- Name: setup_experience_scripts setup_experience_scripts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER setup_experience_scripts_set_updated_at BEFORE UPDATE ON public.setup_experience_scripts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: software_categories software_categories_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER software_categories_set_updated_at BEFORE UPDATE ON public.software_categories FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: software_cpe software_cpe_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER software_cpe_set_updated_at BEFORE UPDATE ON public.software_cpe FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: software_cve software_cve_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER software_cve_set_updated_at BEFORE UPDATE ON public.software_cve FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: software_host_counts software_host_counts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER software_host_counts_set_updated_at BEFORE UPDATE ON public.software_host_counts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: software_install_upcoming_activities software_install_upcoming_activities_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER software_install_upcoming_activities_set_updated_at BEFORE UPDATE ON public.software_install_upcoming_activities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: software_installer_labels software_installer_labels_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER software_installer_labels_set_updated_at BEFORE UPDATE ON public.software_installer_labels FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: software_installers software_installers_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER software_installers_set_updated_at BEFORE UPDATE ON public.software_installers FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 
 
 --
@@ -10259,6 +11115,20 @@ CREATE TRIGGER software_title_team_pins_set_updated_at BEFORE UPDATE ON public.s
 
 
 --
+-- Name: software_titles software_titles_additional_identifier; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER software_titles_additional_identifier BEFORE INSERT OR UPDATE ON public.software_titles FOR EACH ROW EXECUTE FUNCTION public.software_titles_set_additional_identifier();
+
+
+--
+-- Name: software_titles_host_counts software_titles_host_counts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER software_titles_host_counts_set_updated_at BEFORE UPDATE ON public.software_titles_host_counts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: software_titles software_titles_set_unique_id; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -10266,10 +11136,136 @@ CREATE TRIGGER software_titles_set_unique_id BEFORE INSERT OR UPDATE ON public.s
 
 
 --
+-- Name: statistics statistics_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER statistics_set_updated_at BEFORE UPDATE ON public.statistics FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: trace_sampler_settings trace_sampler_settings_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trace_sampler_settings_set_updated_at BEFORE UPDATE ON public.trace_sampler_settings FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: upcoming_activities upcoming_activities_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER upcoming_activities_set_updated_at BEFORE UPDATE ON public.upcoming_activities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: users_deleted users_deleted_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER users_deleted_set_updated_at BEFORE UPDATE ON public.users_deleted FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: users users_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER users_set_updated_at BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: vpp_app_configurations vpp_app_configurations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vpp_app_configurations_set_updated_at BEFORE UPDATE ON public.vpp_app_configurations FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: vpp_app_team_labels vpp_app_team_labels_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vpp_app_team_labels_set_updated_at BEFORE UPDATE ON public.vpp_app_team_labels FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: vpp_app_upcoming_activities vpp_app_upcoming_activities_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vpp_app_upcoming_activities_set_updated_at BEFORE UPDATE ON public.vpp_app_upcoming_activities FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: vpp_apps vpp_apps_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vpp_apps_set_updated_at BEFORE UPDATE ON public.vpp_apps FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: vpp_apps_teams vpp_apps_teams_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vpp_apps_teams_set_updated_at BEFORE UPDATE ON public.vpp_apps_teams FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: vpp_client_users vpp_client_users_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vpp_client_users_set_updated_at BEFORE UPDATE ON public.vpp_client_users FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: vpp_tokens vpp_tokens_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vpp_tokens_set_updated_at BEFORE UPDATE ON public.vpp_tokens FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: vulnerability_host_counts vulnerability_host_counts_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER vulnerability_host_counts_set_updated_at BEFORE UPDATE ON public.vulnerability_host_counts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: windows_mdm_command_queue windows_mdm_command_queue_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER windows_mdm_command_queue_set_updated_at BEFORE UPDATE ON public.windows_mdm_command_queue FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: windows_mdm_command_results windows_mdm_command_results_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER windows_mdm_command_results_set_updated_at BEFORE UPDATE ON public.windows_mdm_command_results FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: windows_mdm_commands windows_mdm_commands_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER windows_mdm_commands_set_updated_at BEFORE UPDATE ON public.windows_mdm_commands FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: windows_mdm_responses windows_mdm_responses_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER windows_mdm_responses_set_updated_at BEFORE UPDATE ON public.windows_mdm_responses FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: wstep_cert_auth_associations wstep_cert_auth_associations_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER wstep_cert_auth_associations_set_updated_at BEFORE UPDATE ON public.wstep_cert_auth_associations FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: wstep_certificates wstep_certificates_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER wstep_certificates_set_updated_at BEFORE UPDATE ON public.wstep_certificates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 
 
 --

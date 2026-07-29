@@ -212,12 +212,17 @@ func (ds *Datastore) CleanupExcessQueryResultRows(ctx context.Context, maxQueryR
 	// Delete excess rows from each query, in batches.
 	if len(queryCutoffs) > 0 {
 		for _, c := range queryCutoffs {
+			// Derived-table wrapper: MySQL rejects LIMIT directly inside an
+			// IN subquery (error 1235); the extra SELECT layer is accepted by
+			// both dialects.
 			deleteStmt := `
                 DELETE FROM query_results
                 WHERE id IN (
-                    SELECT id FROM query_results
-                    WHERE query_id = ? AND id < ? AND has_data = true
-                    LIMIT ?
+                    SELECT id FROM (
+                        SELECT id FROM query_results
+                        WHERE query_id = ? AND id < ? AND has_data = true
+                        LIMIT ?
+                    ) batch
                 )
             `
 			for {

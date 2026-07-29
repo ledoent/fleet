@@ -24,11 +24,19 @@ INSERT INTO jobs (
     error,
     not_before
 )
-VALUES (?, ?, ?, ?, ?, COALESCE(?, NOW()))
+VALUES (?, ?, ?, ?, ?, ?)
 `
-	var notBefore *time.Time
-	if !job.NotBefore.IsZero() {
-		notBefore = &job.NotBefore
+	// Default not_before in the application rather than SQL NOW(): callers
+	// (and tests) compare the stored value against the app clock, and a
+	// containerized DB's clock can sit hundreds of milliseconds away — on
+	// MySQL the mismatch was masked by NOW()'s whole-second truncation, on PG
+	// it surfaced as freshly-queued jobs reporting a not_before in the future.
+	notBefore := job.NotBefore
+	if notBefore.IsZero() {
+		// Whole-second: MySQL TIMESTAMP rounds sub-second values (possibly
+		// up, into the future); truncating keeps the default in the past on
+		// both dialects.
+		notBefore = time.Now().UTC().Truncate(time.Second)
 	}
 	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), query, job.Name, job.Args, job.State, job.Retries, job.Error, notBefore)
 	if err != nil {
@@ -52,18 +60,24 @@ FROM
     jobs
 WHERE
     state = ? AND
-    not_before <= ?
+    not_before <= %s
 	%s
 ORDER BY
     updated_at ASC
 LIMIT ?
 `
 
+	// When the caller doesn't pin a time, compare against the DATABASE clock:
+	// not_before is written with NOW() on insert, and comparing that against
+	// the application clock races clock skew (containerized DBs drift from
+	// the host) plus NOW() precision differences between dialects.
+	nowExpr := "?"
+	args := []interface{}{fleet.JobStateQueued}
 	if now.IsZero() {
-		now = time.Now().UTC()
+		nowExpr = "NOW()"
+	} else {
+		args = append(args, now)
 	}
-
-	args := []interface{}{fleet.JobStateQueued, now}
 
 	// Add job name filter if needed
 	var nameClause string
@@ -76,7 +90,7 @@ LIMIT ?
 		args = append(args, nameArgs...)
 	}
 
-	query = fmt.Sprintf(query, nameClause)
+	query = fmt.Sprintf(query, nowExpr, nameClause)
 	args = append(args, maxNumJobs)
 	var jobs []*fleet.Job
 	err := sqlx.SelectContext(ctx, ds.reader(ctx), &jobs, query, args...)

@@ -154,28 +154,15 @@ needed if you cannot restart Fleet.
   - `STRAIGHT_JOIN`, `USE INDEX`, `FORCE INDEX`, `LOCK IN SHARE MODE`
   Fleet has no migrations using any of these post-marker today; the
   fresh-PG-install smoke test in CI will detect a future regression.
-- **Test coverage.** As of 2026-05-12, the following umbrella tests in
-  `server/datastore/mysql/` run cleanly against PG (via `CreateDS(t)`):
-  Sessions, Scripts, Carves, OperatingSystems (8 tests),
-  CAConfigAssets, Locks, PasswordReset, SecretVariables,
-  ManagedLocalAccount, ConditionalAccessBypass, AndroidDevices,
-  AndroidEnterprises, CronStats (4 tests), Delete, EmailChanges,
-  MDMIdPAccountsReconciliation, AggregatedStats, CertificateAuthority,
-  ConditionalAccess (microsoft), ExtractWindowsBuildVersion, Unicode,
-  DiskEncryption, Vulnerabilities, SelectSoftwareTitlesSQLGeneration.
-  Queries runs partial (Apply blocked by a label-seed/test-collision).
-  Larger surfaces still MySQL-only: Hosts, Apple/Microsoft MDM,
-  LinuxMDM, MDMShared, Software (broad, 40 failing subtests),
-  SoftwareInstallers, SoftwareTitles, SoftwareTitleIcons,
-  SoftwareUpgradeCode, Policies (17 failing subtests), Activities,
-  Labels, Packs, Teams, Scim, QueryResults, MaintainedApps,
-  InHouseApps, VPP, Calendar, Invites, Statistics, Targets, Wstep,
-  HostIdentitySCEP, HostCertificates, HostCertificateTemplates,
-  CertificateTemplates, ConditionalAccessSCEP, SetupExperience,
-  ScheduledQueries, AppConfig, Campaigns, Jobs, NanoMDMStorage,
-  OperatingSystemVulnerabilities*.
-  See "Adding PG test coverage" below for the conversion procedure and
-  the running gap inventory after that section.
+- **Test coverage.** As of 2026-07-29 (review-remediation Phase 4) the FULL
+  datastore suite runs against PG in CI with no filter: 121 top-level test
+  functions pass, and 59 MySQL-only suites skip visibly pending CreateDS
+  conversion (the giants: Hosts, Software, SoftwareInstallers/Titles,
+  Policies, Apple/Microsoft/Linux MDM, Labels, Teams, Packs, VPP, and
+  friends — each is its own conversion project). The converted set includes
+  Users, Jobs, Queries, QueryResults, Scripts, SecretVariables,
+  MaintainedApps, HostCertificates, SoftwareTitleIcons, OperatingSystems,
+  ConditionalAccess, DiskEncryption, Sessions, Carves, Locks, and ~15 more.
 - **Performance.** No formal benchmarks vs MySQL; the rebind driver adds a
   per-statement string-rewrite cost that is negligible for OLTP but unmeasured
   for the vulnerability-cron's batch workloads.
@@ -213,12 +200,11 @@ needed if you cannot restart Fleet.
     a second time (expects `Migrations already completed`).
   - Post-smoke: every public-schema table is owned by `fleet`.
 - `test-go-postgres.yaml` runs the rebind-driver unit tests
-  (`server/platform/postgres/...`) and the `TestPostgres*` datastore tests
-  against a real PG 16. NOTE: the datastore job is filtered to `-run
-  "TestPostgres"` — it does not run the full dual-dialect datastore suite (the
-  `CreateDS` sites), which still has known PG failures (see "Known failing
-  tests" above). Widening that filter is tracked in
-  `pg-review-remediation.md` Phase 4.
+  (`server/platform/postgres/...`) and the FULL datastore suite against a
+  real PG 16 with no `-run` filter (review-remediation Phase 4): every
+  dual-dialect (`CreateDS`) test executes on PG, and MySQL-only tests skip
+  visibly — the skip ledger in validate-pg-compat.yml reports the remaining
+  conversion debt.
 - `build-ledo.yml` refuses to publish images unless both of the above succeeded
   on the build SHA.
 

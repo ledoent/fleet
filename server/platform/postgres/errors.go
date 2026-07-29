@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"syscall"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // PostgreSQL error codes (from SQLSTATE).
@@ -118,4 +120,44 @@ func hasErrorCode(err error, code string) bool {
 
 	// Fallback: check error string for the code (defensive).
 	return strings.Contains(err.Error(), code)
+}
+
+// mysqlCompatDuplicateError wraps a PG unique-violation so its message carries
+// MySQL's `for key 'table.constraint'` phrasing. Fleet code (and its tests)
+// matches duplicate errors by that substring — e.g. "users.invite_id" — which
+// PG's native `violates unique constraint "invite_id"` never contains.
+// Unwrap preserves the original error so SQLState()-based classification
+// (IsDuplicate etc.) keeps working.
+type mysqlCompatDuplicateError struct {
+	cause      error
+	table      string
+	constraint string
+}
+
+func (e *mysqlCompatDuplicateError) Error() string {
+	return e.cause.Error() + " (Duplicate entry for key '" + e.table + "." + e.constraint + "')"
+}
+
+func (e *mysqlCompatDuplicateError) Unwrap() error { return e.cause }
+
+func (e *mysqlCompatDuplicateError) SQLState() string {
+	var pgErr *pgconn.PgError
+	if errors.As(e.cause, &pgErr) {
+		return pgErr.SQLState()
+	}
+	return ""
+}
+
+// TranslateError augments PG errors with MySQL-compatible metadata where
+// Fleet's callers depend on it. Currently: unique violations gain the
+// `table.constraint` key phrasing. Non-matching errors pass through.
+func TranslateError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == codeUniqueViolation && pgErr.TableName != "" {
+		return &mysqlCompatDuplicateError{cause: err, table: pgErr.TableName, constraint: pgErr.ConstraintName}
+	}
+	return err
 }
