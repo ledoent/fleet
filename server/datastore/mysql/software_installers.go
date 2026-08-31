@@ -4268,20 +4268,23 @@ func (ds *Datastore) isSoftwareLabelScoped(ctx context.Context, softwareID, host
 
 			UNION
 
-			-- include any
-			SELECT
-				COUNT(*) AS count_installer_labels,
-				COUNT(lm.label_id) AS count_host_labels,
-				0 as count_host_updated_after_labels
-			FROM
-				%[1]s_labels sil
-				LEFT OUTER JOIN label_membership lm ON lm.label_id = sil.label_id
-				AND lm.host_id = :host_id
+			-- include any (aliases filtered from a wrapping SELECT, since PG does
+			-- not allow SELECT aliases in HAVING)
+			SELECT * FROM (
+				SELECT
+					COUNT(*) AS count_installer_labels,
+					COUNT(lm.label_id) AS count_host_labels,
+					0 as count_host_updated_after_labels
+				FROM
+					%[1]s_labels sil
+					LEFT OUTER JOIN label_membership lm ON lm.label_id = sil.label_id
+					AND lm.host_id = :host_id
+				WHERE
+					sil.%[1]s_id = :software_id
+					AND sil.exclude = false
+					AND sil.require_all = false
+			) include_any
 			WHERE
-				sil.%[1]s_id = :software_id
-				AND sil.exclude = false
-				AND sil.require_all = false
-			HAVING
 				count_installer_labels > 0 AND count_host_labels > 0
 
 			UNION
@@ -4290,6 +4293,7 @@ func (ds *Datastore) isSoftwareLabelScoped(ctx context.Context, softwareID, host
 			-- _after_ the label_updated_at timestamp of the host (because
 			-- we don't have results for that label yet, the host may or may
 			-- not be a member).
+			SELECT * FROM (
 			SELECT
 				COUNT(*) AS count_installer_labels,
 				COUNT(lm.label_id) AS count_host_labels,
@@ -4312,25 +4316,28 @@ func (ds *Datastore) isSoftwareLabelScoped(ctx context.Context, softwareID, host
 				sil.%[1]s_id = :software_id
 				AND sil.exclude = true
 				AND sil.require_all = false
-			HAVING
+			) exclude_any
+			WHERE
 				count_installer_labels > 0 AND count_installer_labels = count_host_updated_after_labels AND count_host_labels = 0
 
 			UNION
 
 			-- include all
-			SELECT
-				COUNT(*) AS count_installer_labels,
-				COUNT(lm.label_id) AS count_host_labels,
-				0 as count_host_updated_after_labels
-			FROM
-				%[1]s_labels sil
-				LEFT OUTER JOIN label_membership lm ON lm.label_id = sil.label_id
-				AND lm.host_id = :host_id
+			SELECT * FROM (
+				SELECT
+					COUNT(*) AS count_installer_labels,
+					COUNT(lm.label_id) AS count_host_labels,
+					0 as count_host_updated_after_labels
+				FROM
+					%[1]s_labels sil
+					LEFT OUTER JOIN label_membership lm ON lm.label_id = sil.label_id
+					AND lm.host_id = :host_id
+				WHERE
+					sil.%[1]s_id = :software_id
+					AND sil.exclude = false
+					AND sil.require_all = true
+			) include_all
 			WHERE
-				sil.%[1]s_id = :software_id
-				AND sil.exclude = false
-				AND sil.require_all = true
-			HAVING
 				count_installer_labels > 0 AND count_host_labels = count_installer_labels
 			) t
 	`
@@ -4370,19 +4377,22 @@ FROM (
 
 		UNION
 
-		-- include any
-		SELECT
-			COUNT(*) AS count_installer_labels,
-			COUNT(lm.label_id) AS count_host_labels,
-			0 AS count_host_updated_after_labels
-		FROM
-			%[1]s_labels sil
-		LEFT OUTER JOIN label_membership lm ON lm.label_id = sil.label_id
-		AND lm.host_id = h.id
+		-- include any (aliases filtered from a wrapping SELECT, since PG does not
+		-- allow SELECT aliases in HAVING)
+		SELECT * FROM (
+			SELECT
+				COUNT(*) AS count_installer_labels,
+				COUNT(lm.label_id) AS count_host_labels,
+				0 AS count_host_updated_after_labels
+			FROM
+				%[1]s_labels sil
+			LEFT OUTER JOIN label_membership lm ON lm.label_id = sil.label_id
+			AND lm.host_id = h.id
+			WHERE
+				sil.%[1]s_id = %[2]s
+				AND sil.exclude = false
+		) include_any
 		WHERE
-			sil.%[1]s_id = %[2]s
-			AND sil.exclude = false
-		HAVING
 			count_installer_labels > 0
 			AND count_host_labels > 0
 
@@ -4392,24 +4402,26 @@ FROM (
 		-- _after_ the label_updated_at timestamp of the host (because
 		-- we don't have results for that label yet, the host may or may
 		-- not be a member).
-		SELECT
-			COUNT(*) AS count_installer_labels,
-			COUNT(lm.label_id) AS count_host_labels,
-			SUM(
-				CASE
-				WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR h.label_updated_at >= lbl.created_at) THEN 1
-				ELSE 0 END) AS count_host_updated_after_labels
-		FROM
-			%[1]s_labels sil
-		LEFT OUTER JOIN labels lbl ON lbl.id = sil.label_id
-		LEFT OUTER JOIN label_membership lm ON lm.label_id = sil.label_id AND lm.host_id = h.id
-WHERE
-	sil.%[1]s_id = %[2]s
-	AND sil.exclude = true
-HAVING
-	count_installer_labels > 0
-	AND count_installer_labels = count_host_updated_after_labels
-	AND count_host_labels = 0) t`
+		SELECT * FROM (
+			SELECT
+				COUNT(*) AS count_installer_labels,
+				COUNT(lm.label_id) AS count_host_labels,
+				SUM(
+					CASE
+					WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR h.label_updated_at >= lbl.created_at) THEN 1
+					ELSE 0 END) AS count_host_updated_after_labels
+			FROM
+				%[1]s_labels sil
+			LEFT OUTER JOIN labels lbl ON lbl.id = sil.label_id
+			LEFT OUTER JOIN label_membership lm ON lm.label_id = sil.label_id AND lm.host_id = h.id
+			WHERE
+				sil.%[1]s_id = %[2]s
+				AND sil.exclude = true
+		) exclude_any
+		WHERE
+			count_installer_labels > 0
+			AND count_installer_labels = count_host_updated_after_labels
+			AND count_host_labels = 0) t`
 
 func (ds *Datastore) GetIncludedHostIDMapForSoftwareInstaller(ctx context.Context, installerID uint) (map[uint]struct{}, error) {
 	return ds.getIncludedHostIDMapForSoftware(ctx, ds.writer(ctx), installerID, softwareTypeInstaller)

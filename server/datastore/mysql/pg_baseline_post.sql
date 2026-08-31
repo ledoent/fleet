@@ -94,6 +94,12 @@ END $$;
 -- CLIENT_FOUND_ROWS-era behavior that several queries compare against).
 CREATE OR REPLACE FUNCTION public.fleet_set_updated_at() RETURNS trigger AS $fleet_set_updated_at$
 BEGIN
+    -- The rebind driver sets this GUC around statements carrying MySQL's
+    -- `updated_at = updated_at` preservation idiom, which the trigger cannot
+    -- otherwise distinguish from an untouched column.
+    IF current_setting('fleet.preserve_updated_at', true) = '1' THEN
+        RETURN NEW;
+    END IF;
     IF NEW IS DISTINCT FROM OLD
        AND NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
         NEW.updated_at = CURRENT_TIMESTAMP;

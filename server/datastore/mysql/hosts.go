@@ -4065,11 +4065,11 @@ func (ds *Datastore) ListPoliciesForHost(ctx context.Context, host *fleet.Host) 
 	FROM policies p
 	LEFT JOIN policy_membership pm ON (p.id=pm.policy_id AND host_id=?)
 	LEFT JOIN users u ON p.author_id = u.id
-	LEFT JOIN (` + policyLabelScopeSubquery + `
+	LEFT JOIN (`+policyLabelScopeSubquery+`
 	) pl_agg ON pl_agg.policy_id = p.id
 	WHERE (p.team_id IS NULL OR p.team_id = COALESCE((SELECT team_id FROM hosts WHERE id = ?), 0))
 	AND (p.platforms IS NULL OR p.platforms = '' OR %s != 0)
-	AND` + policyLabelScopeWhere + `
+	AND`+policyLabelScopeWhere+`
 	-- CASE on pm.passes, not the 'response' alias: PG permits a SELECT alias
 	-- in ORDER BY only as a bare reference, not inside an expression (42703).
 	ORDER BY CASE

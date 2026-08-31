@@ -8538,7 +8538,7 @@ func testWindowsProfileRetryOnDeviceFailure(t *testing.T, ds *Datastore) {
 		t.Helper()
 		failed := fleet.MDMDeliveryFailed
 		require.NoError(t, updateMDMWindowsHostProfileStatusFromResponseDB(ctx, ds.writer(ctx), ds.dialect,
-[]*fleet.MDMWindowsProfilePayload{{
+			[]*fleet.MDMWindowsProfilePayload{{
 				HostUUID:    host.UUID,
 				CommandUUID: commandUUID,
 				Status:      &failed,

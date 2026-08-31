@@ -14,7 +14,7 @@ func init() {
 // when the windows profile prior-content retention hit the NULL checksum):
 //
 //   - mdm_windows_configuration_profiles.checksum   = unhex(md5(syncml))
-//   - mdm_apple_declarations.token                  = unhex(md5(concat(raw_json, ifnull(secrets_updated_at,''))))
+//   - mdm_apple_declarations.token                  = unhex(md5(concat(raw_json, ifnull(secrets_updated_at,”))))
 //   - software_titles.additional_identifier         = CASE source ios/ipados/bundle
 //   - calendar_events.uuid                          = dash-formatted hex of uuid_bin
 //

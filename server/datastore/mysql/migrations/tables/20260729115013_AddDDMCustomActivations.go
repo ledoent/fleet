@@ -99,7 +99,6 @@ CREATE TABLE mdm_apple_ddm_activations (
 	return nil
 }
 
-
 // up20260729115013PG is the PG-native port: the MySQL STORED generated token
 // column has no valid PG translation (unhex/ifnull inside GENERATED), so the
 // token becomes a plain bytea maintained by a BEFORE trigger with the same

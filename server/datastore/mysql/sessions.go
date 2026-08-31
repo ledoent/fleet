@@ -194,8 +194,8 @@ func (ds *Datastore) makeSessionInTransaction(ctx context.Context, tx sqlx.ExtCo
 
 	// Record the login on the user. updated_at is explicitly preserved because
 	// it has ON UPDATE CURRENT_TIMESTAMP and a login is not a user modification.
-	// (On PG the touch trigger cannot detect the self-assignment and still
-	// bumps updated_at — accepted divergence.)
+	// (On PG the rebind driver signals this idiom to the touch trigger via
+	// the fleet.preserve_updated_at GUC.)
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET last_login_at = ?, updated_at = updated_at WHERE id = ?`,
 		ds.clock.Now(), userID,

@@ -2905,8 +2905,8 @@ FROM (
 		WHERE vatl.exclude = false AND vatl.require_all = false AND vpp_apps_teams.platform = 'android'
 		GROUP BY installable_id
 		HAVING
-			count_installer_labels > 0
-			AND count_host_labels > 0
+			(COUNT(*)) > 0
+			AND (COUNT(lm.label_id)) > 0
 
 		UNION
 
@@ -2942,9 +2942,9 @@ FROM (
 		WHERE vatl.exclude = true AND vatl.require_all = false AND vpp_apps_teams.platform = 'android'
 		GROUP BY installable_id
 		HAVING
-			count_installer_labels > 0
-			AND count_installer_labels = count_host_updated_after_labels
-			AND count_host_labels = 0
+			(COUNT(*)) > 0
+			AND (COUNT(*)) = (SUM( CASE WHEN lbl.created_at IS NOT NULL AND(lbl.label_membership_type <> 0 OR( SELECT label_updated_at FROM hosts WHERE id = ?) >= lbl.created_at) THEN 1 ELSE 0 END))
+			AND (COUNT(lm.label_id)) = 0
 
 		UNION
 
@@ -2962,8 +2962,8 @@ FROM (
 		WHERE vatl.exclude = false AND vatl.require_all = true AND vpp_apps_teams.platform = 'android'
 		GROUP BY installable_id
 		HAVING
-			count_installer_labels > 0
-			AND count_host_labels = count_installer_labels
+			(COUNT(*)) > 0
+			AND (COUNT(lm.label_id)) = (COUNT(*))
 		) t
 	`
 

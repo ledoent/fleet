@@ -677,17 +677,23 @@ func TestPostgresBelowMarkerDriftCheck(t *testing.T) {
 	require.NotEmpty(t, tables.PortedBelowMarker)
 	var wrapper int64
 	for ported, w := range tables.PortedBelowMarker {
-		wrapper = w
+		if w > wrapper {
+			wrapper = w
+		}
 		_, err = ds.primary.Exec(`DELETE FROM migration_status_tables WHERE version_id = $1`, ported)
 		require.NoError(t, err)
 	}
 	require.NoError(t, ds.checkPGBelowMarkerDrift(ctx, marker),
 		"ported back-dated versions with an applied wrapper are not drift")
 
-	// …and when the wrapper is itself pending above the DB max (the boot
-	// that is about to run it — the exact state of the first Phase-4 prod
-	// deploy, which the check aborted before this exemption existed).
-	_, err = ds.primary.Exec(`DELETE FROM migration_status_tables WHERE version_id = $1`, wrapper)
+	// …and when the newest wrapper is itself pending above the DB max (the
+	// boot that is about to run it — the exact state of the first Phase-4
+	// prod deploy, which the check aborted before this exemption existed).
+	// Records above that wrapper are removed too: goose applies in version
+	// order, so nothing above a pending wrapper can be applied on a real
+	// boot, and leaving one would (correctly) flag the wrapper as
+	// unreachable.
+	_, err = ds.primary.Exec(`DELETE FROM migration_status_tables WHERE version_id >= $1`, wrapper)
 	require.NoError(t, err)
 	require.NoError(t, ds.checkPGBelowMarkerDrift(ctx, marker),
 		"ported back-dated versions with a pending goose-reachable wrapper are not drift")

@@ -4057,26 +4057,31 @@ func (ds *Datastore) resolveFirstAddedInstallersForHost(ctx context.Context, hos
 			)
 		),
 		include_any AS (
-			SELECT
-				software_installers.id AS installer_id,
-				COUNT(*) AS count_installer_labels,
-				COUNT(label_membership.label_id) AS count_host_labels,
-				0 AS count_host_updated_after_labels
-			FROM
-				software_installers
-			INNER JOIN software_installer_labels
-				ON software_installer_labels.software_installer_id = software_installers.id
-					AND software_installer_labels.exclude = 0
-					AND software_installer_labels.require_all = 0
-			LEFT JOIN label_membership
-				ON label_membership.label_id = software_installer_labels.label_id
-				AND label_membership.host_id = :host_id
-			GROUP BY
-				software_installers.id
-			HAVING
+			-- aliases filtered from a wrapping SELECT (PG does not allow
+			-- SELECT aliases in HAVING)
+			SELECT * FROM (
+				SELECT
+					software_installers.id AS installer_id,
+					COUNT(*) AS count_installer_labels,
+					COUNT(label_membership.label_id) AS count_host_labels,
+					0 AS count_host_updated_after_labels
+				FROM
+					software_installers
+				INNER JOIN software_installer_labels
+					ON software_installer_labels.software_installer_id = software_installers.id
+						AND software_installer_labels.exclude = 0
+						AND software_installer_labels.require_all = 0
+				LEFT JOIN label_membership
+					ON label_membership.label_id = software_installer_labels.label_id
+					AND label_membership.host_id = :host_id
+				GROUP BY
+					software_installers.id
+			) include_any_agg
+			WHERE
 				count_installer_labels > 0 AND count_host_labels > 0
 		),
 		exclude_any AS (
+			SELECT * FROM (
 			SELECT
 				software_installers.id AS installer_id,
 				COUNT(software_installer_labels.label_id) AS count_installer_labels,
@@ -4106,29 +4111,32 @@ func (ds *Datastore) resolveFirstAddedInstallersForHost(ctx context.Context, hos
 				AND label_membership.host_id = :host_id
 			GROUP BY
 				software_installers.id
-			HAVING
+			) exclude_any_agg
+			WHERE
 				count_installer_labels > 0
 				AND count_installer_labels = count_host_updated_after_labels
 				AND count_host_labels = 0
 		),
 		include_all AS (
-			SELECT
-				software_installers.id AS installer_id,
-				COUNT(*) AS count_installer_labels,
-				COUNT(label_membership.label_id) AS count_host_labels,
-				0 AS count_host_updated_after_labels
-			FROM
-				software_installers
-			INNER JOIN software_installer_labels
-				ON software_installer_labels.software_installer_id = software_installers.id
-					AND software_installer_labels.exclude = 0
-					AND software_installer_labels.require_all = 1
-			LEFT JOIN label_membership
-				ON label_membership.label_id = software_installer_labels.label_id
-				AND label_membership.host_id = :host_id
-			GROUP BY
-				software_installers.id
-			HAVING
+			SELECT * FROM (
+				SELECT
+					software_installers.id AS installer_id,
+					COUNT(*) AS count_installer_labels,
+					COUNT(label_membership.label_id) AS count_host_labels,
+					0 AS count_host_updated_after_labels
+				FROM
+					software_installers
+				INNER JOIN software_installer_labels
+					ON software_installer_labels.software_installer_id = software_installers.id
+						AND software_installer_labels.exclude = 0
+						AND software_installer_labels.require_all = 1
+				LEFT JOIN label_membership
+					ON label_membership.label_id = software_installer_labels.label_id
+					AND label_membership.host_id = :host_id
+				GROUP BY
+					software_installers.id
+			) include_all_agg
+			WHERE
 				count_installer_labels > 0
 				AND count_host_labels = count_installer_labels
 		)
@@ -4344,7 +4352,7 @@ func filterVPPAppsByLabel(
 				GROUP BY
 					vpp_apps_teams.id
 				HAVING
-					count_installer_labels > 0 AND count_host_labels > 0
+					(COUNT(vpp_app_team_labels.label_id)) > 0 AND (COUNT(label_membership.label_id)) > 0
 			),
 			exclude_any AS (
 				SELECT
@@ -4370,9 +4378,9 @@ func filterVPPAppsByLabel(
 				GROUP BY
 					vpp_apps_teams.id
 				HAVING
-					count_installer_labels > 0
-					AND count_installer_labels = count_host_updated_after_labels
-					AND count_host_labels = 0
+					(COUNT(vpp_app_team_labels.label_id)) > 0
+					AND (COUNT(vpp_app_team_labels.label_id)) = (SUM( CASE WHEN labels.created_at IS NOT NULL AND (labels.label_membership_type <> 0 OR :host_label_updated_at >= labels.created_at) THEN 1 ELSE 0 END ))
+					AND (COUNT(label_membership.label_id)) = 0
 			),
 			include_all AS (
 				SELECT
@@ -4392,7 +4400,7 @@ func filterVPPAppsByLabel(
 				GROUP BY
 					vpp_apps_teams.id
 				HAVING
-					count_installer_labels > 0 AND count_host_labels = count_installer_labels
+					(COUNT(vpp_app_team_labels.label_id)) > 0 AND (COUNT(label_membership.label_id)) = (COUNT(vpp_app_team_labels.label_id))
 			)
 			SELECT
 				vpp_apps.adam_id AS adam_id,
@@ -4525,7 +4533,7 @@ func filterInHouseAppsByLabel(
 				GROUP BY
 					iha.id
 				HAVING
-					count_installer_labels > 0 AND count_host_labels > 0
+					(COUNT(ihl.label_id)) > 0 AND (COUNT(lm.label_id)) > 0
 			),
 			exclude_any AS (
 				SELECT
@@ -4551,9 +4559,9 @@ func filterInHouseAppsByLabel(
 				GROUP BY
 					iha.id
 				HAVING
-					count_installer_labels > 0 AND
-					count_installer_labels = count_host_updated_after_labels AND
-					count_host_labels = 0
+					(COUNT(ihl.label_id)) > 0 AND
+					(COUNT(ihl.label_id)) = (SUM( CASE WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR :host_label_updated_at >= lbl.created_at) THEN 1 ELSE 0 END )) AND
+					(COUNT(lm.label_id)) = 0
 			),
 			include_all AS (
 				SELECT
@@ -4572,7 +4580,7 @@ func filterInHouseAppsByLabel(
 				GROUP BY
 					iha.id
 				HAVING
-					count_installer_labels > 0 AND count_host_labels = count_installer_labels
+					(COUNT(ihl.label_id)) > 0 AND (COUNT(lm.label_id)) = (COUNT(ihl.label_id))
 			)
 			SELECT
 				iha.id AS in_house_id,
@@ -6101,7 +6109,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								AND sil.exclude = false
 								AND sil.require_all = false
 							HAVING
-								count_installer_labels > 0 AND count_host_labels > 0
+								(COUNT(*)) > 0 AND (COUNT(lm.label_id)) > 0
 
 							UNION
 
@@ -6126,7 +6134,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								AND sil.exclude = true
 								AND sil.require_all = false
 							HAVING
-								count_installer_labels > 0 AND count_installer_labels = count_host_updated_after_labels AND count_host_labels = 0
+								(COUNT(*)) > 0 AND (COUNT(*)) = (SUM( CASE WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR :host_label_updated_at >= lbl.created_at) THEN 1 ELSE 0 END)) AND (COUNT(lm.label_id)) = 0
 
 							UNION
 
@@ -6144,7 +6152,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								AND sil.exclude = false
 								AND sil.require_all = true
 							HAVING
-								count_installer_labels > 0 AND count_host_labels = count_installer_labels
+								(COUNT(*)) > 0 AND (COUNT(lm.label_id)) = (COUNT(*))
 
 							UNION
 
@@ -6162,7 +6170,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								AND vatl.exclude = false
 								AND vatl.require_all = false
 							HAVING
-								count_installer_labels > 0 AND count_host_labels > 0
+								(COUNT(*)) > 0 AND (COUNT(lm.label_id)) > 0
 
 							UNION
 
@@ -6184,7 +6192,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								AND vatl.exclude = true
 								AND vatl.require_all = false
 							HAVING
-								count_installer_labels > 0 AND count_installer_labels = count_host_updated_after_labels AND count_host_labels = 0
+								(COUNT(*)) > 0 AND (COUNT(*)) = (SUM(CASE WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR :host_label_updated_at >= lbl.created_at) THEN 1 ELSE 0 END)) AND (COUNT(lm.label_id)) = 0
 
 							UNION
 
@@ -6202,7 +6210,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								AND vatl.exclude = false
 								AND vatl.require_all = true
 							HAVING
-								count_installer_labels > 0 AND count_host_labels = count_installer_labels
+								(COUNT(*)) > 0 AND (COUNT(lm.label_id)) = (COUNT(*))
 
 							UNION
 
@@ -6219,7 +6227,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								AND ihl.exclude = false
 								AND ihl.require_all = false
 							HAVING
-								count_installer_labels > 0 AND count_host_labels > 0
+								(COUNT(*)) > 0 AND (COUNT(lm.label_id)) > 0
 
 							UNION
 
@@ -6239,7 +6247,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								AND ihl.exclude = true
 								AND ihl.require_all = false
 							HAVING
-								count_installer_labels > 0 AND count_installer_labels = count_host_updated_after_labels AND count_host_labels = 0
+								(COUNT(*)) > 0 AND (COUNT(*)) = (SUM(CASE WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR :host_label_updated_at >= lbl.created_at) THEN 1 ELSE 0 END)) AND (COUNT(lm.label_id)) = 0
 
 							UNION
 
@@ -6256,7 +6264,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								AND ihl.exclude = false
 								AND ihl.require_all = true
 							HAVING
-								count_installer_labels > 0 AND count_host_labels = count_installer_labels
+								(COUNT(*)) > 0 AND (COUNT(lm.label_id)) = (COUNT(*))
 							) t
 						)
 				)

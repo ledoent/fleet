@@ -650,14 +650,14 @@ func CreatePostgresDS(t testing.TB) *Datastore {
 
 	logger := slog.New(slog.DiscardHandler)
 	ds := &Datastore{
-		primary:                testDB,
-		replica:                testDB,
-		logger:                 logger,
-		clock:                  clock.NewMockClock(),
-		dialect:                postgresDialect{},
-		writeCh:                make(chan itemToWrite),
-		serverPrivateKey:       "test-private-key-for-pg-tests!!!", // 32 bytes for AES-256
-		stmtCache:              make(map[string]*sqlx.Stmt),
+		primary:          testDB,
+		replica:          testDB,
+		logger:           logger,
+		clock:            clock.NewMockClock(),
+		dialect:          postgresDialect{},
+		writeCh:          make(chan itemToWrite),
+		serverPrivateKey: "test-private-key-for-pg-tests!!!", // 32 bytes for AES-256
+		stmtCache:        make(map[string]*sqlx.Stmt),
 	}
 	ds.Datastore = NewAndroidDatastore(logger, testDB, testDB, postgresDialect{})
 	t.Cleanup(func() { ds.Close() })

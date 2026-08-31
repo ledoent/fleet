@@ -160,7 +160,7 @@ var (
 	reDDLTinyint1 = regexp.MustCompile(`(?i)\bTINYINT\s*\(\s*1\s*\)((?:\s+NOT\s+NULL)?\s+DEFAULT\s+)'?([01])'?`)
 	// TINYINT(1) with no DEFAULT clause.
 	reDDLTinyint1Bare = regexp.MustCompile(`(?i)\bTINYINT\s*\(\s*1\s*\)`)
-	reDDLTinyint  = regexp.MustCompile(`(?i)\bTINYINT(?:\s*\(\s*\d+\s*\))?`)
+	reDDLTinyint      = regexp.MustCompile(`(?i)\bTINYINT(?:\s*\(\s*\d+\s*\))?`)
 	// Binary types.
 	reDDLBlobTypes = regexp.MustCompile(`(?i)\b(?:MEDIUMBLOB|LONGBLOB|TINYBLOB|BLOB)\b`)
 	// VARBINARY(N) / BINARY(N) → BYTEA (PG has no fixed/var binary types).
@@ -653,6 +653,18 @@ func rebindQuery(query string) string {
 	query = strings.ReplaceAll(query, "!pm.passes", "(NOT pm.passes)::int")
 	// SUM(1 - pm.passes): PG can't subtract boolean from integer; cast to int first
 	query = strings.ReplaceAll(query, "1 - pm.passes", "1 - (pm.passes)::int")
+	// software_titles.additional_identifier is a tinyint generated column on
+	// MySQL but a trigger-maintained text column on PG (its values are the
+	// digits '0'/'1'/'2'); integer comparisons need the text literal.
+	if strings.Contains(query, "additional_identifier") {
+		query = reAdditionalIdentifierCmp.ReplaceAllString(query, "additional_identifier $1 '$2'")
+	}
+	// MySQL `ESCAPE '\\'` is a single backslash (backslash-escaped string);
+	// PG standard_conforming_strings reads it as two characters and rejects
+	// it. The E'' form is a single backslash on PG.
+	if strings.Contains(query, `ESCAPE '\\'`) {
+		query = strings.ReplaceAll(query, `ESCAPE '\\'`, `ESCAPE E'\\'`)
+	}
 	// MySQL null-safe equality `a <=> b` → PG `a IS NOT DISTINCT FROM b`.
 	if strings.Contains(query, "<=>") {
 		query = strings.ReplaceAll(query, "<=>", "IS NOT DISTINCT FROM")
@@ -851,6 +863,21 @@ func (c *rebindConn) ExecContext(ctx context.Context, query string, args []drive
 			}
 		}
 
+		// MySQL's `updated_at = updated_at` self-assignment suppresses the
+		// column's ON UPDATE CURRENT_TIMESTAMP. The PG touch trigger cannot
+		// distinguish that assignment from an untouched column (NEW equals
+		// OLD either way), so the intent is signalled through a session GUC
+		// that fleet_set_updated_at checks; reset even on error so a pooled
+		// connection can't leak the setting into later statements.
+		if reUpdatedAtSelfAssign.MatchString(query) {
+			if _, err := ec.ExecContext(ctx, "SELECT set_config('fleet.preserve_updated_at', '1', false)", nil); err != nil {
+				return nil, TranslateError(err)
+			}
+			defer func() {
+				_, _ = ec.ExecContext(ctx, "SELECT set_config('fleet.preserve_updated_at', '0', false)", nil)
+			}()
+		}
+
 		var lastResult driver.Result
 		for i, stmt := range statements {
 			stmtArgs := coerced
@@ -867,6 +894,15 @@ func (c *rebindConn) ExecContext(ctx context.Context, query string, args []drive
 	}
 	return nil, driver.ErrSkip
 }
+
+// reAdditionalIdentifierCmp matches integer comparisons against
+// software_titles.additional_identifier (text on PG, tinyint on MySQL).
+var reAdditionalIdentifierCmp = regexp.MustCompile(`\badditional_identifier\s*(=|<>|!=)\s*([0-9])\b`)
+
+// reUpdatedAtSelfAssign matches the unqualified `updated_at = updated_at`
+// preservation idiom in an UPDATE's SET list. Qualified references
+// (`a.updated_at = b.updated_at`, a join condition) don't match.
+var reUpdatedAtSelfAssign = regexp.MustCompile(`(?i)(?:^|[\s,(])updated_at\s*=\s*updated_at(?:[\s,)]|$)`)
 
 // reInsertTargetAnchored extracts the unqualified target-table name from the
 // leading `INSERT INTO …` of a rebound query. The schema prefix is optional
