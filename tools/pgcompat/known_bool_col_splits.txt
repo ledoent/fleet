@@ -4,8 +4,10 @@
 # mdm_windows_enrollments.awaiting_configuration is a tri-state enum
 # (fleet.WindowsMDMAwaitingConfiguration: None=0/Pending=1/Active=2) and MUST
 # stay smallint (a boolean would reject the value 2); pg_baseline_post.sql
-# documents the conversion. host_mdm_apple_awaiting_configuration's column is
-# a true boolean. Split names are EXCLUDED from all generic bool machinery
+# documents the conversion. host_mdm_apple_awaiting_configuration's column
+# and host_mdm_apple_device_vitals.awaiting_configuration (boolean via
+# Up_20260807120050_PG) are true booleans. Split names are EXCLUDED from all
+# generic bool machinery
 # (gen_bool_cols skips them; smallintBoolColumns must not list them): the
 # Windows side's uint values map to smallint natively, and the Apple side's
 # Go bool maps to boolean natively — any name-keyed rewrite would corrupt one

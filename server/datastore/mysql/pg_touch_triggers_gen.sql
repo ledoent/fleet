@@ -42,6 +42,7 @@ CREATE OR REPLACE TRIGGER custom_host_vitals_set_updated_at BEFORE UPDATE ON pub
 CREATE OR REPLACE TRIGGER default_team_config_json_set_updated_at BEFORE UPDATE ON public.default_team_config_json FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER distributed_query_campaigns_set_updated_at BEFORE UPDATE ON public.distributed_query_campaigns FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER fleet_maintained_apps_set_updated_at BEFORE UPDATE ON public.fleet_maintained_apps FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+CREATE OR REPLACE TRIGGER host_autopilot_devices_set_updated_at BEFORE UPDATE ON public.host_autopilot_devices FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_batteries_set_updated_at BEFORE UPDATE ON public.host_batteries FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_calendar_events_set_updated_at BEFORE UPDATE ON public.host_calendar_events FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_certificate_templates_set_updated_at BEFORE UPDATE ON public.host_certificate_templates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
@@ -59,9 +60,11 @@ CREATE OR REPLACE TRIGGER host_managed_local_account_passwords_set_updated_at BE
 CREATE OR REPLACE TRIGGER host_mdm_set_updated_at BEFORE UPDATE ON public.host_mdm FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_android_profiles_set_updated_at BEFORE UPDATE ON public.host_mdm_android_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_apple_device_names_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_device_names FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+CREATE OR REPLACE TRIGGER host_mdm_apple_device_vitals_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_device_vitals FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_apple_enrollment_permissions_set_delivered_at BEFORE UPDATE ON public.host_mdm_apple_enrollment_permissions FOR EACH ROW EXECUTE FUNCTION public.fleet_touch_column('delivered_at');
 CREATE OR REPLACE TRIGGER host_mdm_apple_os_updates_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_os_updates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_apple_profiles_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+CREATE OR REPLACE TRIGGER host_mdm_apple_service_subscriptions_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_service_subscriptions FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_commands_set_updated_at BEFORE UPDATE ON public.host_mdm_commands FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_idp_accounts_set_updated_at BEFORE UPDATE ON public.host_mdm_idp_accounts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER host_mdm_managed_certificates_set_updated_at BEFORE UPDATE ON public.host_mdm_managed_certificates FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
@@ -93,6 +96,8 @@ CREATE OR REPLACE TRIGGER mdm_apple_setup_assistant_profiles_set_updated_at BEFO
 CREATE OR REPLACE TRIGGER mdm_apple_setup_assistants_set_updated_at BEFORE UPDATE ON public.mdm_apple_setup_assistants FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER mdm_configuration_profile_labels_set_updated_at BEFORE UPDATE ON public.mdm_configuration_profile_labels FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER mdm_idp_accounts_set_updated_at BEFORE UPDATE ON public.mdm_idp_accounts FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+CREATE OR REPLACE TRIGGER mdm_microsoft_graph_credentials_set_updated_at BEFORE UPDATE ON public.mdm_microsoft_graph_credentials FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+CREATE OR REPLACE TRIGGER mdm_windows_enrollment_config_set_updated_at BEFORE UPDATE ON public.mdm_windows_enrollment_config FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER mdm_windows_enrollments_set_updated_at BEFORE UPDATE ON public.mdm_windows_enrollments FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER microsoft_compliance_partner_host_statuses_set_updated_at BEFORE UPDATE ON public.microsoft_compliance_partner_host_statuses FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 CREATE OR REPLACE TRIGGER microsoft_compliance_partner_integrations_set_updated_at BEFORE UPDATE ON public.microsoft_compliance_partner_integrations FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();

@@ -10,6 +10,12 @@ func init() {
 }
 
 func Up_20260825213833(tx *sql.Tx) error {
+	if isPostgres() {
+		// COLLATE-only MODIFYs: MySQL flips these columns to utf8mb4_bin so
+		// comparisons become case-sensitive. PG text comparison is already
+		// case-sensitive under its default collations, so this is a no-op.
+		return nil
+	}
 	// These columns hold random values over a case-sensitive alphabet (base64 /
 	// base64url or lowercase UUIDs), but their columns defaulted to (or were
 	// declared with) the case-insensitive utf8mb4_unicode_ci collation. Lookups

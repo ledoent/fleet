@@ -114,7 +114,21 @@ func Up_20260810152924(tx *sql.Tx) error {
 		{"software_title_team_pins", "title_id", true},
 		{"software_update_schedules", "title_id", false},
 	} {
-		if _, err := tx.Exec(
+		if isPostgres() {
+			// UPDATE IGNORE emulation: all four tables are unique on
+			// (team_id, <title column>), so move only rows whose target slot
+			// is free; whatever stays behind is deleted below, same as the
+			// MySQL path. The touch trigger stamps updated_at regardless of
+			// the self-assign idiom — accepted divergence.
+			if _, err := tx.Exec(
+				fmt.Sprintf(`UPDATE %[1]s SET %[2]s = ? WHERE %[2]s = ? AND NOT EXISTS (
+					SELECT 1 FROM %[1]s dup WHERE dup.team_id = %[1]s.team_id AND dup.%[2]s = ?)`,
+					t.table, t.column),
+				targetTitleID, staleTitleID, targetTitleID,
+			); err != nil {
+				return fmt.Errorf("re-pointing %s.%s: %w", t.table, t.column, err)
+			}
+		} else if _, err := tx.Exec(
 			fmt.Sprintf(`UPDATE IGNORE %s SET %s = ?%s WHERE %s = ?`,
 				t.table, t.column, t.preserveUpdatedAt(), t.column),
 			targetTitleID, staleTitleID,

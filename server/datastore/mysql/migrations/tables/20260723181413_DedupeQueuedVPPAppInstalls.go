@@ -91,6 +91,64 @@ const redundantQueuedVPPInstallGroupsStmt = `
 	GROUP BY ua.host_id, vaua.adam_id
 	HAVING queued_count > 0 AND (keep_id = 0 OR queued_count > 1)`
 
+// PG variants of the expressions above. Three constructs don't survive the
+// rebind driver's mechanical translation: SUM over a bare boolean expression
+// (PG has no sum(boolean)), SELECT aliases referenced in HAVING (42703), and
+// jsonb compared to an integer literal (42883). The jsonb equality against
+// the number 1 mirrors MySQL's JSON_EXTRACT(...) = 1 exactly: it matches only
+// the JSON number 1, failing safe for JSON true/false/null.
+const automatedVPPInstallExprPG = `(
+			ua.payload->'from_auto_update' = '1'::jsonb
+			OR vaua.policy_id IS NOT NULL
+		)`
+
+const deletableQueuedVPPInstallExprPG = `(
+			ua.activated_at IS NULL
+			AND ` + automatedVPPInstallExprPG + `
+			AND NOT EXISTS (
+				SELECT 1 FROM setup_experience_status_results sesr
+				WHERE sesr.nano_command_uuid = ua.execution_id
+			)
+		)`
+
+const deletableQueuedVPPInstallWherePG = `
+		ua.activity_type = 'vpp_app_install'
+		AND ` + deletableQueuedVPPInstallExprPG
+
+// The aggregate aliases move into an inner SELECT so the filter can reference
+// them from a plain WHERE, which PG allows where HAVING-on-alias is not.
+const redundantQueuedVPPInstallGroupsStmtPG = `
+	SELECT * FROM (
+		SELECT
+			ua.host_id,
+			vaua.adam_id,
+			SUM(CASE WHEN ` + deletableQueuedVPPInstallExprPG + ` THEN 1 ELSE 0 END) AS queued_count,
+			CASE WHEN SUM(CASE WHEN ua.activated_at IS NOT NULL THEN 1 ELSE 0 END) > 0
+				THEN 0
+				ELSE MAX(CASE WHEN ` + deletableQueuedVPPInstallExprPG + ` THEN ua.id ELSE NULL END)
+			END AS keep_id
+		FROM upcoming_activities ua
+		JOIN vpp_app_upcoming_activities vaua ON vaua.upcoming_activity_id = ua.id
+		WHERE ua.activity_type = 'vpp_app_install'
+		AND (` + automatedVPPInstallExprPG + ` OR ua.activated_at IS NOT NULL)
+		GROUP BY ua.host_id, vaua.adam_id
+	) grouped
+	WHERE queued_count > 0 AND (keep_id = 0 OR queued_count > 1)`
+
+func redundantQueuedVPPInstallGroupsStmtForDialect() string {
+	if isPostgres() {
+		return redundantQueuedVPPInstallGroupsStmtPG
+	}
+	return redundantQueuedVPPInstallGroupsStmt
+}
+
+func deletableQueuedVPPInstallWhereForDialect() string {
+	if isPostgres() {
+		return deletableQueuedVPPInstallWherePG
+	}
+	return deletableQueuedVPPInstallWhere
+}
+
 // countRedundantQueuedVPPAppInstalls counts the rows the pass below will delete, which is what stops
 // an unaffected deployment doing any work, since incrementalMigrationStep skips a zero count. It is
 // an upper bound, because the delete re-applies its predicate and so skips a row that another
@@ -99,7 +157,7 @@ func countRedundantQueuedVPPAppInstalls(tx *sql.Tx) (uint64, error) {
 	var total uint64
 	err := tx.QueryRow(`
 		SELECT COALESCE(SUM(IF(keep_id = 0, queued_count, queued_count - 1)), 0)
-		FROM (` + redundantQueuedVPPInstallGroupsStmt + `) redundant_groups`).Scan(&total)
+		FROM (` + redundantQueuedVPPInstallGroupsStmtForDialect() + `) redundant_groups`).Scan(&total)
 	return total, err
 }
 
@@ -120,10 +178,10 @@ func deleteRedundantQueuedVPPAppInstalls(tx *sql.Tx, increment incrementCountFn)
 		SELECT ua.id
 		FROM upcoming_activities ua
 		STRAIGHT_JOIN vpp_app_upcoming_activities vaua ON vaua.upcoming_activity_id = ua.id
-		JOIN (` + redundantQueuedVPPInstallGroupsStmt + `) redundant_groups
+		JOIN (` + redundantQueuedVPPInstallGroupsStmtForDialect() + `) redundant_groups
 			ON redundant_groups.host_id = ua.host_id AND redundant_groups.adam_id = vaua.adam_id
 		WHERE ua.id <> redundant_groups.keep_id
-			AND ` + deletableQueuedVPPInstallWhere + `
+			AND ` + deletableQueuedVPPInstallWhereForDialect() + `
 		ORDER BY ua.id`
 
 	var ids []uint64
@@ -134,11 +192,21 @@ func deleteRedundantQueuedVPPAppInstalls(tx *sql.Tx, increment incrementCountFn)
 	// The ids come from a snapshot read, while the delete is applied to the latest committed rows, so
 	// it repeats the predicate. Without it a row that another instance activated in between, which a
 	// rolling deploy makes possible, would be deleted along with its command already in flight.
-	const deleteStmt = `
+	deleteStmt := `
 		DELETE ua FROM upcoming_activities ua
 		STRAIGHT_JOIN vpp_app_upcoming_activities vaua ON vaua.upcoming_activity_id = ua.id
 		WHERE ua.id IN (?)
 			AND ` + deletableQueuedVPPInstallWhere
+	if isPostgres() {
+		// PG multi-table delete uses DELETE ... USING; the MySQL DELETE-JOIN
+		// form is not covered by the rebind driver.
+		deleteStmt = `
+		DELETE FROM upcoming_activities ua
+		USING vpp_app_upcoming_activities vaua
+		WHERE vaua.upcoming_activity_id = ua.id
+			AND ua.id IN (?)
+			AND ` + deletableQueuedVPPInstallWherePG
+	}
 
 	const batchSize = 1000
 	for len(ids) > 0 {

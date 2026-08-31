@@ -1,6 +1,8 @@
 package tables
 
 import (
+	"bytes"
+	"crypto/md5" //nolint:gosec // non-cryptographic row-lookup checksum
 	"database/sql"
 	"fmt"
 	"strings"
@@ -32,6 +34,9 @@ var (
 )
 
 func Up_20260810160000(tx *sql.Tx) error {
+	if isPostgres() {
+		return up20260810160000PG(tx)
+	}
 	// v4.76.0 moved `name` from the front to the back of the software checksum. Rows
 	// created before that upgrade kept their old checksum, so when a host reported the
 	// same software again it no longer matched and a second `software` row was inserted:
@@ -103,6 +108,101 @@ func Up_20260810160000(tx *sql.Tx) error {
 	}, tx)
 }
 
+// up20260810160000PG is the PostgreSQL path. The canonical checksum joins its
+// inputs with a NUL byte, which PG text expressions cannot carry (chr(0) is
+// rejected), so instead of expressing the formula in SQL the checksums are
+// computed in Go — the same conditional-append semantics as the MySQL
+// CONCAT_WS expression (skip SQL NULLs, keep empty strings, except the two
+// NULLIF-wrapped trailing columns which are skipped when NULL or empty).
+// Row volume is bounded by the software inventory, and the merge reuses the
+// batched mergeDuplicateSoftware pass.
+func up20260810160000PG(tx *sql.Tx) error {
+	type softwareRow struct {
+		id       uint64
+		checksum []byte
+		computed []byte
+	}
+	rows, err := tx.Query(`
+		SELECT id, checksum, version, source, COALESCE(bundle_identifier, ''),
+			release, arch, vendor, extension_for, extension_id, name,
+			application_id, rtrim(upgrade_code)
+		FROM software ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("selecting software rows for checksum recompute: %w", err)
+	}
+	defer rows.Close()
+
+	var all []softwareRow
+	for rows.Next() {
+		var r softwareRow
+		var version, source, bundleID, release, arch, vendor, extensionFor, extensionID, name string
+		var applicationID, upgradeCode *string
+		if err := rows.Scan(&r.id, &r.checksum, &version, &source, &bundleID, &release,
+			&arch, &vendor, &extensionFor, &extensionID, &name, &applicationID, &upgradeCode); err != nil {
+			return fmt.Errorf("scanning software row: %w", err)
+		}
+		// Mirrors fleet.Software.ComputeRawChecksum (the sole source of truth
+		// for this formula — keep in lockstep with it and with
+		// canonicalSoftwareChecksum above).
+		cols := []string{version, source, bundleID, release, arch, vendor, extensionFor, extensionID, name}
+		if applicationID != nil && *applicationID != "" {
+			cols = append(cols, *applicationID)
+		}
+		if upgradeCode != nil && *upgradeCode != "" {
+			cols = append(cols, *upgradeCode)
+		}
+		sum := md5.Sum([]byte(strings.Join(cols, "\x00"))) //nolint:gosec // non-cryptographic row-lookup checksum
+		r.computed = sum[:]
+		all = append(all, r)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating software rows: %w", err)
+	}
+
+	// Duplicates map to the lowest id sharing their canonical checksum, same
+	// as the MySQL window-function pass (rows were read in id order).
+	survivorByChecksum := make(map[string]uint64, len(all))
+	var mappings []softwareChecksumMapping
+	for _, r := range all {
+		key := string(r.computed)
+		if survivor, ok := survivorByChecksum[key]; ok {
+			mappings = append(mappings, softwareChecksumMapping{StaleID: r.id, SurvivorID: survivor})
+		} else {
+			survivorByChecksum[key] = r.id
+		}
+	}
+	logger.Info.Printf("deduplicating software: found %d duplicate software rows\n", len(mappings))
+
+	staleSet := make(map[uint64]struct{}, len(mappings))
+	for _, m := range mappings {
+		staleSet[m.StaleID] = struct{}{}
+	}
+
+	return withSteps([]migrationStep{
+		incrementalMigrationStep(
+			func(*sql.Tx) (uint64, error) { return uint64(len(mappings)), nil },
+			mergeDuplicateSoftware(mappings),
+		),
+		func(tx *sql.Tx) error {
+			var recomputed int64
+			for _, r := range all {
+				if _, stale := staleSet[r.id]; stale {
+					continue // row deleted by the merge
+				}
+				if bytes.Equal(r.checksum, r.computed) {
+					continue
+				}
+				if _, err := tx.Exec(`UPDATE software SET checksum = ? WHERE id = ?`, r.computed, r.id); err != nil {
+					return fmt.Errorf("recomputing software checksum for id %d: %w", r.id, err)
+				}
+				recomputed++
+			}
+			logger.Info.Printf("deduplicating software: recomputed %d software checksums\n", recomputed)
+			return nil
+		},
+	}, tx)
+}
+
 // mergeDuplicateSoftware repoints every host reference from each duplicate row onto its
 // survivor, then deletes the duplicates.
 func mergeDuplicateSoftware(mappings []softwareChecksumMapping) executeWithProgressFn {
@@ -147,12 +247,22 @@ func mergeDuplicateSoftware(mappings []softwareChecksumMapping) executeWithProgr
 			// happens when a host's paths were not reconciled after its software was (separate
 			// transactions). Such a row is already stale: nothing joining software can see it,
 			// and the host's next detail query deletes it.
-			stmt, args, err = sqlx.In(
-				"UPDATE host_software hs "+
-					"STRAIGHT_JOIN host_software_installed_paths hsip FORCE INDEX (host_id_software_id_idx) "+
-					"  ON hsip.host_id = hs.host_id AND hsip.software_id = hs.software_id "+
-					"SET hsip.software_id = "+mapCase("hs.software_id")+
-					" WHERE hs.software_id IN (?)",
+			installedPathsStmt := "UPDATE host_software hs " +
+				"STRAIGHT_JOIN host_software_installed_paths hsip FORCE INDEX (host_id_software_id_idx) " +
+				"  ON hsip.host_id = hs.host_id AND hsip.software_id = hs.software_id " +
+				"SET hsip.software_id = " + mapCase("hs.software_id") +
+				" WHERE hs.software_id IN (?)"
+			if isPostgres() {
+				// PG updates the target table via FROM; the join to
+				// host_software preserves the drive-off-the-link semantics
+				// (a path row without a live link is skipped, same as MySQL).
+				installedPathsStmt = "UPDATE host_software_installed_paths hsip " +
+					"SET software_id = " + mapCase("hsip.software_id") +
+					" FROM host_software hs " +
+					"WHERE hs.host_id = hsip.host_id AND hs.software_id = hsip.software_id " +
+					"AND hsip.software_id IN (?)"
+			}
+			stmt, args, err = sqlx.In(installedPathsStmt,
 				append(append([]any{}, caseArgs...), staleIDs)...)
 			if err != nil {
 				return fmt.Errorf("building host_software_installed_paths repoint: %w", err)

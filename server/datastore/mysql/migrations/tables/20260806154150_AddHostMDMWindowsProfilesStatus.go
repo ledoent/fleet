@@ -12,6 +12,12 @@ func init() {
 // Up_20260806154150 creates host_mdm_windows_profiles_status, a per-host rollup of the aggregate Windows configuration-profile
 // delivery status. It materializes exactly one bucket per host ('failed'|'pending'|'verifying'|'verified'|empty)
 func Up_20260806154150(tx *sql.Tx) error {
+	// Timestamp-bumped upstream from 20260721160351 after deployments (our PG
+	// prod included) had already applied the old ID. Guard the whole body:
+	// re-running only the backfill would duplicate PK rows.
+	if tableExists(tx, "host_mdm_windows_profiles_status") {
+		return nil
+	}
 	if _, err := tx.Exec(`
 CREATE TABLE host_mdm_windows_profiles_status (
 	host_uuid  VARCHAR(255) COLLATE utf8mb4_unicode_ci NOT NULL,

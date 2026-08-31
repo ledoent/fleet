@@ -50,7 +50,7 @@ var (
 	// SUBSTRING_INDEX(expr, 'delim', 1): expr is a simple (possibly
 	// alias-qualified) column reference; delim a quoted literal.
 	reSubstringIndexOne = regexp.MustCompile(`(?i)SUBSTRING_INDEX\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*('[^']*')\s*,\s*1\s*\)`)
-	reSeparator     = regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
+	reSeparator         = regexp.MustCompile(`(?i)\bSEPARATOR\s+'([^']*)'`)
 	// reTimestamp matches MySQL DML TIMESTAMP(<expr>) casts and rewrites them to
 	// PG's `(<expr>)::timestamp`. The first character of the argument must be
 	// non-numeric — pure-digit arguments are PG-valid column-type precisions
@@ -136,6 +136,11 @@ var (
 	// MySQL online-DDL `LOCK=NONE|SHARED|...` ALTER TABLE option — no PG
 	// equivalent; PG DDL takes its own locks.
 	reDDLLockClause = regexp.MustCompile(`(?i),\s*LOCK\s*=\s*\w+`)
+	// MySQL `ADD COLUMN ... AFTER other_col` positioning — PG appends
+	// columns; ordering is cosmetic, so the clause is dropped. Anchored to
+	// end-of-clause (comma, closing paren, or end) so column names that
+	// merely contain "after" stay intact.
+	reDDLAfterColumn = regexp.MustCompile("(?i)\\s+AFTER\\s+`?[A-Za-z_][A-Za-z0-9_]*`?\\s*(,|\\)|$)")
 	// Integer types. The auto-increment regexes are anchored by the full
 	// `NOT NULL AUTO_INCREMENT` suffix so they don't shadow the plain
 	// UNSIGNED rewrites. \b is used at the start so we don't match BIGINT
@@ -393,6 +398,10 @@ func rebindQuery(query string) string {
 	query = reDDLAlgorithmClause.ReplaceAllString(query, "")
 	// Strip `LOCK=NONE` and similar online-DDL `LOCK=...` ALTER TABLE options.
 	query = reDDLLockClause.ReplaceAllString(query, "")
+	// Strip `ADD COLUMN ... AFTER col` positioning in ALTER TABLE.
+	if strings.Contains(strings.ToUpper(query), "ALTER TABLE") {
+		query = reDDLAfterColumn.ReplaceAllString(query, "$1")
+	}
 	// Strip standalone COLLATE modifiers on column expressions in SELECT (e.g. col COLLATE utf8mb4_unicode_ci AS alias)
 	query = reCollateMod.ReplaceAllString(query, "$1")
 	// MySQL→PG DDL column-type translations. These only apply inside
@@ -981,6 +990,9 @@ var reAlterAddKey = regexp.MustCompile("(?is)\\bADD\\s+(?:UNIQUE\\s+)?(?:KEY|IND
 var reCreateInlineKey = regexp.MustCompile("(?is),\\s*KEY\\s+`?([A-Za-z_][A-Za-z0-9_]*)`?\\s*\\(([^()]+)\\)")
 var reAlterTableHeader = regexp.MustCompile(`(?is)\bALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)`)
 
+// reAlterDropIndex matches a `DROP INDEX <name>` clause inside ALTER TABLE.
+var reAlterDropIndex = regexp.MustCompile("(?is)\\bDROP\\s+INDEX\\s+`?([A-Za-z_][A-Za-z0-9_]*)`?")
+
 // reSplitTrailingComma cleans up leftover commas after ADD KEY clauses are
 // stripped from an ALTER TABLE statement. Hoisted to package level so it
 // compiles once at init rather than on every multi-statement DDL exec.
@@ -997,6 +1009,7 @@ func splitDDLStatements(query string) []string {
 	upper := strings.ToUpper(query)
 	hasAddKey := strings.Contains(upper, "ADD KEY") || strings.Contains(upper, "ADD UNIQUE KEY") ||
 		strings.Contains(upper, "ADD INDEX") || strings.Contains(upper, "ADD UNIQUE INDEX")
+	hasDropIndex := strings.Contains(upper, "DROP INDEX") && strings.Contains(upper, "ALTER TABLE")
 	hasOnUpdate := strings.Contains(upper, "ON UPDATE CURRENT_TIMESTAMP") || strings.Contains(upper, "ON UPDATE NOW(")
 	// Inline `KEY name (cols)` declarations inside CREATE TABLE — PG has no
 	// inline secondary index syntax; they become separate CREATE INDEX
@@ -1007,7 +1020,7 @@ func splitDDLStatements(query string) []string {
 		reCreateInlineKey.MatchString(query)
 
 	// Fast path: nothing to split.
-	if !hasAddKey && !hasOnUpdate && !hasInlineKey {
+	if !hasAddKey && !hasOnUpdate && !hasInlineKey && !hasDropIndex {
 		return []string{query}
 	}
 
@@ -1045,6 +1058,24 @@ func splitDDLStatements(query string) []string {
 					extra = append(extra,
 						fmt.Sprintf("CREATE INDEX %s ON %s (%s)",
 							k[1], tableName, strings.TrimSpace(k[2])))
+				}
+			}
+		}
+	}
+
+	// Handle DROP INDEX clauses inside ALTER TABLE — PG drops indexes with a
+	// standalone statement (index names are schema-scoped). Extracted before
+	// ADD KEY so a drop-then-recreate of related indexes keeps its order.
+	if hasDropIndex {
+		if reAlterTableHeader.MatchString(stmt) {
+			dropIdxs := reAlterDropIndex.FindAllStringSubmatch(stmt, -1)
+			if len(dropIdxs) > 0 {
+				stmt = reAlterDropIndex.ReplaceAllString(stmt, "")
+				stmt = reSplitCollapseCommas.ReplaceAllString(stmt, ",")
+				stmt = reSplitTrailingComma.ReplaceAllString(stmt, "$1")
+				stmt = strings.TrimSpace(stmt)
+				for _, m := range dropIdxs {
+					extra = append(extra, "DROP INDEX IF EXISTS "+m[1])
 				}
 			}
 		}
@@ -2444,6 +2475,14 @@ var knownPrimaryKeys = map[string]string{
 	"software_host_counts":                   "software_id,team_id,global_stats",
 	"nano_enrollment_queue":                  "id,command_uuid",
 	"host_mdm_windows_profiles":              "host_uuid,profile_uuid",
+	// 2026-08 upstream sync additions
+	"apple_software_update_assets":     "class,product_version,build",
+	"host_autopilot_devices":           "host_id",
+	"host_mdm_apple_os_updates":        "host_uuid",
+	"mdm_apple_configuration_profiles": "team_id,identifier",
+	"mdm_apple_ddm_activations":        "declaration_uuid",
+	"mdm_microsoft_graph_credentials":  "tenant_id",
+	"scim_group_group":                 "parent_group_id,child_group_id",
 	// NanoMDM/NanoDEP tables
 	"nano_dep_names":                     "name",
 	"nano_devices":                       "id",

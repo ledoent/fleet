@@ -18,3 +18,31 @@
 # command) or to actually fix the schema drift in production.
 
 
+
+# 2026-08 upstream sync: columns added by post-marker migrations (they apply
+# to PG via goose/the port wrapper, so the live schema has them; the embedded
+# baseline predates them). Regenerate the baseline from prod after the next
+# deploy, then remove all of these.
+mysql-only: android_devices.last_pubsub_event_time
+mysql-only: android_devices.last_pubsub_message_id
+mysql-only: host_managed_local_account_passwords.client_error
+mysql-only: host_managed_local_account_passwords.deleted
+mysql-only: host_mdm_apple_declarations.activation_updated_at
+mysql-only: in_house_apps.install_during_setup
+mysql-only: mdm_android_commands.raw_command
+mysql-only: mdm_android_commands.raw_result
+mysql-only: mdm_configuration_profile_variables.apple_ddm_activation_uuid
+mysql-only: mdm_windows_enrollments.hardware_serial
+mysql-only: mdm_windows_enrollments.last_login_status
+mysql-only: mdm_windows_enrollments.last_login_status_at
+mysql-only: mdm_windows_enrollments.managed_local_account_escrowed
+mysql-only: mdm_windows_enrollments.ztd_registration_id
+mysql-only: policies.patch_when_closed
+mysql-only: policies.resend_apple_profile_uuid
+mysql-only: policies.resend_windows_profile_uuid
+mysql-only: scim_users.user_id
+mysql-only: setup_experience_status_results.in_house_app_id
+mysql-only: software_installers.app_open_query
+mysql-only: software_installers.install_script_edited
+mysql-only: software_installers.uninstall_script_edited
+mysql-only: users.last_login_at

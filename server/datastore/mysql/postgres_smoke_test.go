@@ -842,7 +842,7 @@ func TestPostgresPortBackdatedWrapper(t *testing.T) {
 	mustExec(`DROP TABLE IF EXISTS apple_software_update_assets CASCADE`)
 	mustExec(`DROP TABLE IF EXISTS host_mdm_apple_os_updates CASCADE`)
 	mustExec(`DELETE FROM fleet_variables WHERE name LIKE 'FLEET_VAR_HOST_TARGET%'`)
-	for ported := range tables.PortedBelowMarker {
+	for _, ported := range []int64{20260727083533, 20260727084359} {
 		mustExec(`DELETE FROM migration_status_tables WHERE version_id = $1`, ported)
 	}
 
@@ -868,6 +868,60 @@ func TestPostgresPortBackdatedWrapper(t *testing.T) {
 	require.Equal(t, 2, n)
 	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM migration_status_tables WHERE version_id IN (20260727083533, 20260727084359)`))
 	require.Equal(t, 2, n)
+}
+
+// TestPostgresPortBackdatedWrapper2 exercises the second porting wrapper
+// (upcoming_activities indexes + Apple builtin-label backfill + queued VPP
+// install dedupe) directly against PG for the same reason as the test above:
+// fresh test DBs will seed it as applied once the baseline covers it.
+func TestPostgresPortBackdatedWrapper2(t *testing.T) {
+	ds := CreatePostgresDS(t)
+
+	mustExec := func(q string, args ...interface{}) { pgMustExec(t, ds, q, args...) }
+	mustExec(`DROP INDEX IF EXISTS idx_upcoming_activities_host_id_activated_at`)
+	mustExec(`DROP INDEX IF EXISTS idx_upcoming_activities_activated_at_fleet_initiated`)
+	for _, ported := range []int64{20260723181412, 20260723181413, 20260724010000, 20260729110229, 20260729115013} {
+		mustExec(`DELETE FROM migration_status_tables WHERE version_id = $1`, ported)
+	}
+
+	// Seed a darwin host missing its builtin label memberships so the 181412
+	// backfill has real work, and two redundant automated queued VPP installs
+	// (same host+app, neither activated) so the 181413 dedupe deletes one.
+	mustExec(`INSERT INTO hosts (id, platform, osquery_host_id, node_key, hostname, uuid) VALUES (9001, 'darwin', 'pg-wrap2-osq', 'pg-wrap2-key', 'pg-wrap2', 'pg-wrap2-uuid')`)
+	mustExec(`INSERT INTO labels (id, name, description, query, label_type) VALUES (9001, 'All Hosts', '', '', 1), (9002, 'macOS', '', '', 1) ON CONFLICT DO NOTHING`)
+	mustExec(`INSERT INTO upcoming_activities (id, host_id, activity_type, execution_id, payload) VALUES
+		(9001, 9001, 'vpp_app_install', 'pg-wrap2-exec-1', '{"from_auto_update": 1}'::jsonb),
+		(9002, 9001, 'vpp_app_install', 'pg-wrap2-exec-2', '{"from_auto_update": 1}'::jsonb)`)
+	mustExec(`INSERT INTO vpp_apps (adam_id, platform, title_id) SELECT 'pgw2adam', 'darwin', NULL`)
+	mustExec(`INSERT INTO vpp_app_upcoming_activities (upcoming_activity_id, adam_id, platform) VALUES (9001, 'pgw2adam', 'darwin'), (9002, 'pgw2adam', 'darwin')`)
+
+	runWrapper := func() {
+		tx, err := ds.primary.DB.Begin()
+		require.NoError(t, err)
+		require.NoError(t, tables.Up_20260831120000(tx))
+		require.NoError(t, tx.Commit())
+	}
+	runWrapper()
+
+	var n int
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'upcoming_activities' AND indexname IN ('idx_upcoming_activities_host_id_activated_at', 'idx_upcoming_activities_activated_at_fleet_initiated')`))
+	require.Equal(t, 2, n, "both upcoming_activities indexes created")
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM label_membership WHERE host_id = 9001`))
+	require.Equal(t, 2, n, "builtin label memberships backfilled (All Hosts + macOS)")
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM upcoming_activities WHERE host_id = 9001`))
+	require.Equal(t, 1, n, "redundant queued VPP install deleted, newest kept")
+	var keptID int
+	require.NoError(t, ds.primary.Get(&keptID, `SELECT id FROM upcoming_activities WHERE host_id = 9001`))
+	require.Equal(t, 9002, keptID, "the most recently queued install survives")
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM migration_status_tables WHERE version_id IN (20260723181412, 20260723181413, 20260724010000) AND is_applied`))
+	require.Equal(t, 3, n, "ported versions recorded in goose history")
+
+	// Idempotent: a re-run must not delete the kept row or duplicate history.
+	runWrapper()
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM upcoming_activities WHERE host_id = 9001`))
+	require.Equal(t, 1, n)
+	require.NoError(t, ds.primary.Get(&n, `SELECT COUNT(*) FROM migration_status_tables WHERE version_id IN (20260723181412, 20260723181413, 20260724010000)`))
+	require.Equal(t, 3, n)
 }
 
 // TestPostgresDBDiagnostics regression-covers DBLocks and InnoDBStatus on PG:

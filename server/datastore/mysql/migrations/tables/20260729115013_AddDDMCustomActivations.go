@@ -10,6 +10,9 @@ func init() {
 }
 
 func Up_20260729115013(tx *sql.Tx) error {
+	if isPostgres() {
+		return up20260729115013PG(tx)
+	}
 	// This table was created alongside the original DDM tables to model
 	// many-to-many activation references, but was never written to by any code
 	// path. Custom activations are 1:1 with their configuration declaration, so
@@ -93,6 +96,69 @@ CREATE TABLE mdm_apple_ddm_activations (
 		return fmt.Errorf("adding activation_updated_at to host_mdm_apple_declarations: %w", err)
 	}
 
+	return nil
+}
+
+
+// up20260729115013PG is the PG-native port: the MySQL STORED generated token
+// column has no valid PG translation (unhex/ifnull inside GENERATED), so the
+// token becomes a plain bytea maintained by a BEFORE trigger with the same
+// formula shape as mdm_apple_declarations_set_token (epoch-text timestamp
+// coercion — tokens are only ever compared within one database). The CHECK
+// constraint swap uses CASE for MySQL's IF and DROP CONSTRAINT for DROP
+// CHECK.
+func up20260729115013PG(tx *sql.Tx) error {
+	stmts := []string{
+		`DROP TABLE IF EXISTS mdm_apple_declaration_activation_references`,
+		`CREATE TABLE mdm_apple_ddm_activations (
+			activation_uuid          varchar(37) NOT NULL DEFAULT '',
+			team_id                  integer NOT NULL DEFAULT 0,
+			identifier               varchar(255) NOT NULL,
+			raw_json                 text NOT NULL,
+			declaration_uuid         varchar(37) NOT NULL,
+			configuration_identifier varchar(255) NOT NULL,
+			secrets_updated_at       timestamp(6) DEFAULT NULL,
+			created_at               timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			uploaded_at              timestamp(6) DEFAULT NULL,
+			token                    bytea,
+			PRIMARY KEY (activation_uuid),
+			CONSTRAINT idx_mdm_apple_ddm_activation_team_identifier UNIQUE (team_id, identifier),
+			CONSTRAINT idx_mdm_apple_ddm_activation_team_config UNIQUE (team_id, configuration_identifier),
+			CONSTRAINT idx_mdm_apple_ddm_activation_declaration UNIQUE (declaration_uuid),
+			CONSTRAINT fk_mdm_apple_ddm_activations_declaration_uuid
+				FOREIGN KEY (declaration_uuid) REFERENCES mdm_apple_declarations (declaration_uuid) ON DELETE CASCADE
+		)`,
+		`CREATE OR REPLACE FUNCTION mdm_apple_ddm_activations_set_token() RETURNS trigger AS $$
+		BEGIN
+			NEW.token := decode(md5(NEW.raw_json || COALESCE(extract(epoch from NEW.secrets_updated_at)::text, '')), 'hex');
+			RETURN NEW;
+		END $$ LANGUAGE plpgsql`,
+		`CREATE OR REPLACE TRIGGER mdm_apple_ddm_activations_token
+			BEFORE INSERT OR UPDATE ON mdm_apple_ddm_activations
+			FOR EACH ROW EXECUTE FUNCTION mdm_apple_ddm_activations_set_token()`,
+		`ALTER TABLE mdm_configuration_profile_variables
+			ADD COLUMN apple_ddm_activation_uuid varchar(37) DEFAULT NULL,
+			ADD CONSTRAINT idx_mdm_config_profile_vars_ddm_activation_variable UNIQUE (apple_ddm_activation_uuid, fleet_variable_id),
+			ADD CONSTRAINT mdm_config_profile_variables_ddm_activation_fk
+				FOREIGN KEY (apple_ddm_activation_uuid) REFERENCES mdm_apple_ddm_activations (activation_uuid) ON DELETE CASCADE,
+			DROP CONSTRAINT ck_mdm_configuration_profile_variables_exactly_one,
+			ADD CONSTRAINT ck_mdm_configuration_profile_variables_exactly_one
+				CHECK ((
+					(CASE WHEN apple_profile_uuid IS NULL THEN 0 ELSE 1 END +
+					 CASE WHEN windows_profile_uuid IS NULL THEN 0 ELSE 1 END +
+					 CASE WHEN apple_declaration_uuid IS NULL THEN 0 ELSE 1 END +
+					 CASE WHEN android_profile_uuid IS NULL THEN 0 ELSE 1 END +
+					 CASE WHEN certificate_template_id IS NULL THEN 0 ELSE 1 END +
+					 CASE WHEN android_app_configuration_id IS NULL THEN 0 ELSE 1 END +
+					 CASE WHEN apple_ddm_activation_uuid IS NULL THEN 0 ELSE 1 END) = 1
+				))`,
+		`ALTER TABLE host_mdm_apple_declarations ADD COLUMN activation_updated_at timestamp(6) DEFAULT NULL`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("ddm custom activations (pg): %w", err)
+		}
+	}
 	return nil
 }
 

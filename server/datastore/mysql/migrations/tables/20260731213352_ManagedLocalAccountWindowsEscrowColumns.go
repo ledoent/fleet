@@ -20,6 +20,26 @@ func init() {
 // It also adds mdm_windows_enrollments.managed_local_account_escrowed, which records that the device
 // has escrowed a password for its current enrollment.
 func Up_20260731213352(tx *sql.Tx) error {
+	if isPostgres() {
+		// MODIFY has no PG translation; the columns become nullable via
+		// DROP NOT NULL, and the flag is a native boolean (written and
+		// scanned as a Go bool in microsoft_mdm.go).
+		if _, err := tx.Exec(
+			`ALTER TABLE host_managed_local_account_passwords
+				ALTER COLUMN command_uuid DROP NOT NULL,
+				ALTER COLUMN encrypted_password DROP NOT NULL,
+				ADD COLUMN client_error varchar(255) NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("adapting host_managed_local_account_passwords for device-created accounts: %w", err)
+		}
+		if _, err := tx.Exec(
+			`ALTER TABLE mdm_windows_enrollments
+				ADD COLUMN managed_local_account_escrowed boolean NOT NULL DEFAULT false`,
+		); err != nil {
+			return fmt.Errorf("adding mdm_windows_enrollments.managed_local_account_escrowed: %w", err)
+		}
+		return nil
+	}
 	if _, err := tx.Exec(
 		"ALTER TABLE host_managed_local_account_passwords " +
 			"MODIFY `command_uuid` varchar(127) COLLATE utf8mb4_unicode_ci NULL, " +

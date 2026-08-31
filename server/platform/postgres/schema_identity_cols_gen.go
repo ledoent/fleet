@@ -80,6 +80,7 @@ var schemaIdentityCols = map[string]string{
 	"mdm_configuration_profile_update_settings": "id",
 	"mdm_configuration_profile_variables":       "id",
 	"mdm_declaration_labels":                    "id",
+	"mdm_microsoft_graph_credentials":           "id",
 	"mdm_windows_configuration_profiles":        "auto_increment",
 	"mdm_windows_enrollments":                   "id",
 	"microsoft_compliance_partner_integrations": "id",
