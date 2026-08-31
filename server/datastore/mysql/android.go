@@ -1062,29 +1062,35 @@ func (ds *Datastore) DeleteMDMAndroidConfigProfile(ctx context.Context, profileU
 }
 
 func (ds *Datastore) GetMDMAndroidProfilesSummary(ctx context.Context, teamID *uint) (*fleet.MDMProfilesSummary, error) {
+	// See GetMDMAppleProfilesSummary for the HAVING form rationale.
+	statusCase := sqlCaseMDMAndroidStatus()
+	havingOperand := "status"
+	if ds.dialect.IsPostgres() {
+		havingOperand = statusCase
+	}
 	stmt := `
-SELECT count, status FROM (
 SELECT
 	COUNT(id) AS count,
-	%s AS status
+	%[1]s AS status
 FROM
 	hosts h
 	INNER JOIN host_mdm hmdm ON h.id=hmdm.host_id
-	%s
+	%[2]s
 WHERE
 	platform = 'android' AND
 	hmdm.enrolled = true AND
-	 %s
+	 %[3]s
 GROUP BY
 	status
-) sq WHERE status IS NOT NULL`
+HAVING
+	%[4]s IS NOT NULL`
 
 	teamFilter := "team_id IS NULL"
 	if teamID != nil && *teamID > 0 {
 		teamFilter = fmt.Sprintf("team_id = %d", *teamID)
 	}
 
-	stmt = fmt.Sprintf(stmt, sqlCaseMDMAndroidStatus(), sqlJoinMDMAndroidProfilesStatus(), teamFilter)
+	stmt = fmt.Sprintf(stmt, statusCase, sqlJoinMDMAndroidProfilesStatus(), teamFilter, havingOperand)
 
 	var dest []struct {
 		Count  uint   `db:"count"`
@@ -1478,6 +1484,8 @@ func (ds *Datastore) ListPendingMDMAndroidCommands(ctx context.Context, createdB
 // profiles from hosts that haven't reported yet. Manual (membership_type=1) and host-vitals (2) labels are server-populated, so
 // their membership is always considered known.
 const androidApplicableProfilesQuery = `
+-- NOTE: every HAVING below repeats its leg's aggregate expressions instead of
+-- referencing the SELECT-list aliases, which PostgreSQL does not allow in HAVING.
 	-- non label-based profiles
 	SELECT
 		macp.profile_uuid,
@@ -1529,7 +1537,7 @@ const androidApplicableProfilesQuery = `
 			JOIN android_devices ad
 				ON ad.host_id = h.id
 			JOIN mdm_configuration_profile_labels mcpl
-				ON mcpl.android_profile_uuid = macp.profile_uuid AND mcpl.exclude = false AND mcpl.require_all = true
+				ON mcpl.android_profile_uuid = macp.profile_uuid AND mcpl.exclude = 0 AND mcpl.require_all = 1
 			LEFT OUTER JOIN labels lbl
 				ON lbl.id = mcpl.label_id
 			LEFT OUTER JOIN label_membership lm
@@ -1540,13 +1548,13 @@ const androidApplicableProfilesQuery = `
 		h.platform = 'android' AND
 		NOT EXISTS (
 			SELECT 1 FROM mdm_configuration_profile_labels
-			WHERE android_profile_uuid = macp.profile_uuid AND exclude = true
+			WHERE android_profile_uuid = macp.profile_uuid AND exclude = 1
 		) AND
 		( %s )
 	GROUP BY
 		macp.profile_uuid, macp.name, h.uuid, h.id
 	HAVING
-		COUNT(*) > 0 AND COUNT(lm.label_id) = COUNT(*)
+		(COUNT(*)) > 0 AND (SUM( CASE WHEN lm.label_id IS NOT NULL THEN 1 WHEN lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at AND COALESCE(hmap.operation_type, '') = 'install' THEN 1 ELSE 0 END)) = (COUNT(*))
 
 	UNION
 
@@ -1574,7 +1582,7 @@ const androidApplicableProfilesQuery = `
 			JOIN android_devices ad
 				ON ad.host_id = h.id
 			JOIN mdm_configuration_profile_labels mcpl
-				ON mcpl.android_profile_uuid = macp.profile_uuid AND mcpl.exclude = true AND mcpl.require_all = false
+				ON mcpl.android_profile_uuid = macp.profile_uuid AND mcpl.exclude = 1 AND mcpl.require_all = 0
 			LEFT OUTER JOIN labels lbl
 				ON lbl.id = mcpl.label_id
 			LEFT OUTER JOIN label_membership lm
@@ -1585,20 +1593,14 @@ const androidApplicableProfilesQuery = `
 		h.platform = 'android' AND
 		NOT EXISTS (
 			SELECT 1 FROM mdm_configuration_profile_labels
-			WHERE android_profile_uuid = macp.profile_uuid AND exclude = false
+			WHERE android_profile_uuid = macp.profile_uuid AND exclude = 0
 		) AND
 		( %s )
 	GROUP BY
 		macp.profile_uuid, macp.name, h.uuid, h.id
 	HAVING
-		-- considers only the profiles with labels, without any broken label, with results reported after all labels were
-		-- created and with the host not in any label.
-		-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
-		COUNT(*) > 0 AND COUNT(*) = COUNT(mcpl.label_id) AND
-		COUNT(*) = SUM(
-			CASE WHEN lbl.label_membership_type <> 1 AND lbl.created_at IS NOT NULL AND h.label_updated_at >= lbl.created_at THEN 1
-			WHEN lbl.label_membership_type = 1 AND lbl.created_at IS NOT NULL THEN 1
-		ELSE 0 END) AND COUNT(lm.label_id) = 0
+		(COUNT(*)) > 0 AND (COUNT(*)) = (COUNT(mcpl.label_id)) AND
+		(COUNT(*)) = (SUM( CASE WHEN lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND (h.label_updated_at >= lbl.created_at OR COALESCE(hmap.operation_type, '') = 'install') THEN 1 WHEN lbl.label_membership_type <> 0 AND lbl.created_at IS NOT NULL THEN 1 ELSE 0 END)) AND (COUNT(lm.label_id)) = 0
 
 	UNION
 
@@ -1621,20 +1623,20 @@ const androidApplicableProfilesQuery = `
 			JOIN android_devices ad
 				ON ad.host_id = h.id
 			JOIN mdm_configuration_profile_labels mcpl
-				ON mcpl.android_profile_uuid = macp.profile_uuid AND mcpl.exclude = false AND mcpl.require_all = false
+				ON mcpl.android_profile_uuid = macp.profile_uuid AND mcpl.exclude = 0 AND mcpl.require_all = 0
 			LEFT OUTER JOIN label_membership lm
 				ON lm.label_id = mcpl.label_id AND lm.host_id = h.id
 	WHERE
 		h.platform = 'android' AND
 		NOT EXISTS (
 			SELECT 1 FROM mdm_configuration_profile_labels
-			WHERE android_profile_uuid = macp.profile_uuid AND exclude = true
+			WHERE android_profile_uuid = macp.profile_uuid AND exclude = 1
 		) AND
 		( %s )
 	GROUP BY
 		macp.profile_uuid, macp.name, h.uuid, h.id
 	HAVING
-		COUNT(*) > 0 AND COUNT(lm.label_id) >= 1
+		(COUNT(*)) > 0 AND (COUNT(lm.label_id)) >= 1
 
 	UNION
 
@@ -1648,14 +1650,14 @@ const androidApplicableProfilesQuery = `
 		macp.checksum,
 		h.uuid as host_uuid,
 		h.id as host_id,
-		SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) as count_profile_labels,
-		SUM(CASE WHEN mcpl.exclude = false AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_non_broken_labels,
-		SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1
-			WHEN mcpl.exclude = false AND lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at AND COALESCE(hmap.operation_type, '') = 'install' THEN 1
+		SUM(CASE WHEN mcpl.exclude = 0 THEN 1 ELSE 0 END) as count_profile_labels,
+		SUM(CASE WHEN mcpl.exclude = 0 AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_non_broken_labels,
+		SUM(CASE WHEN mcpl.exclude = 0 AND lm_inc.label_id IS NOT NULL THEN 1
+			WHEN mcpl.exclude = 0 AND lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at AND COALESCE(hmap.operation_type, '') = 'install' THEN 1
 			ELSE 0 END) as count_host_labels,
-		SUM(CASE WHEN mcpl.exclude = true AND lm_exc.label_id IS NOT NULL THEN 1
-			WHEN mcpl.exclude = true AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) AND COALESCE(hmap.operation_type, '') <> 'install' THEN 1
-			WHEN mcpl.exclude = true AND mcpl.label_id IS NULL THEN 1
+		SUM(CASE WHEN mcpl.exclude = 1 AND lm_exc.label_id IS NOT NULL THEN 1
+			WHEN mcpl.exclude = 1 AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) AND COALESCE(hmap.operation_type, '') <> 'install' THEN 1
+			WHEN mcpl.exclude = 1 AND mcpl.label_id IS NULL THEN 1
 			ELSE 0 END) as count_host_updated_after_labels
 	FROM
 		mdm_android_configuration_profiles macp
@@ -1668,35 +1670,29 @@ const androidApplicableProfilesQuery = `
 			LEFT OUTER JOIN labels lbl
 				ON lbl.id = mcpl.label_id
 			LEFT OUTER JOIN label_membership lm_inc
-				ON lm_inc.label_id = mcpl.label_id AND lm_inc.host_id = h.id AND mcpl.exclude = false
+				ON lm_inc.label_id = mcpl.label_id AND lm_inc.host_id = h.id AND mcpl.exclude = 0
 			LEFT OUTER JOIN label_membership lm_exc
-				ON lm_exc.label_id = mcpl.label_id AND lm_exc.host_id = h.id AND mcpl.exclude = true
+				ON lm_exc.label_id = mcpl.label_id AND lm_exc.host_id = h.id AND mcpl.exclude = 1
 			LEFT OUTER JOIN host_mdm_android_profiles hmap
 				ON hmap.host_uuid = h.uuid AND hmap.profile_uuid = macp.profile_uuid
 	WHERE
 		h.platform = 'android' AND
 		EXISTS (
 			SELECT 1 FROM mdm_configuration_profile_labels
-			WHERE android_profile_uuid = macp.profile_uuid AND exclude = false AND require_all = true
+			WHERE android_profile_uuid = macp.profile_uuid AND exclude = 0 AND require_all = 1
 		) AND
 		EXISTS (
 			SELECT 1 FROM mdm_configuration_profile_labels
-			WHERE android_profile_uuid = macp.profile_uuid AND exclude = true
+			WHERE android_profile_uuid = macp.profile_uuid AND exclude = 1
 		) AND
 		( %s )
 	GROUP BY
 		macp.profile_uuid, macp.name, h.uuid, h.id
 	HAVING
 		-- include gate: host in all include labels (no broken include labels)
-		-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
-		SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) > 0 AND
-		SUM(CASE WHEN mcpl.exclude = false AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) = SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) AND
-		SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) = SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) AND
+		(SUM(CASE WHEN mcpl.exclude = 0 THEN 1 ELSE 0 END)) > 0 AND (SUM(CASE WHEN mcpl.exclude = 0 AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END)) = (SUM(CASE WHEN mcpl.exclude = 0 THEN 1 ELSE 0 END)) AND (SUM(CASE WHEN mcpl.exclude = 0 AND lm_inc.label_id IS NOT NULL THEN 1 WHEN mcpl.exclude = 0 AND lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at AND COALESCE(hmap.operation_type, '') = 'install' THEN 1 ELSE 0 END)) = (SUM(CASE WHEN mcpl.exclude = 0 THEN 1 ELSE 0 END)) AND
 		-- exclude gate: host not in any exclude label, no broken/unscanned exclude labels
-		SUM(CASE WHEN mcpl.exclude = true AND lm_exc.label_id IS NOT NULL THEN 1
-			WHEN mcpl.exclude = true AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) THEN 1
-			WHEN mcpl.exclude = true AND mcpl.label_id IS NULL THEN 1
-			ELSE 0 END) = 0
+		(SUM(CASE WHEN mcpl.exclude = 1 AND lm_exc.label_id IS NOT NULL THEN 1 WHEN mcpl.exclude = 1 AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) AND COALESCE(hmap.operation_type, '') <> 'install' THEN 1 WHEN mcpl.exclude = 1 AND mcpl.label_id IS NULL THEN 1 ELSE 0 END)) = 0
 
 	UNION
 
@@ -1709,12 +1705,12 @@ const androidApplicableProfilesQuery = `
 		macp.checksum,
 		h.uuid as host_uuid,
 		h.id as host_id,
-		SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) as count_profile_labels,
-		SUM(CASE WHEN mcpl.exclude = false AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_non_broken_labels,
-		SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_host_labels,
-		SUM(CASE WHEN mcpl.exclude = true AND lm_exc.label_id IS NOT NULL THEN 1
-			WHEN mcpl.exclude = true AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) AND COALESCE(hmap.operation_type, '') <> 'install' THEN 1
-			WHEN mcpl.exclude = true AND mcpl.label_id IS NULL THEN 1
+		SUM(CASE WHEN mcpl.exclude = 0 THEN 1 ELSE 0 END) as count_profile_labels,
+		SUM(CASE WHEN mcpl.exclude = 0 AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_non_broken_labels,
+		SUM(CASE WHEN mcpl.exclude = 0 AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_host_labels,
+		SUM(CASE WHEN mcpl.exclude = 1 AND lm_exc.label_id IS NOT NULL THEN 1
+			WHEN mcpl.exclude = 1 AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) AND COALESCE(hmap.operation_type, '') <> 'install' THEN 1
+			WHEN mcpl.exclude = 1 AND mcpl.label_id IS NULL THEN 1
 			ELSE 0 END) as count_host_updated_after_labels
 	FROM
 		mdm_android_configuration_profiles macp
@@ -1727,32 +1723,29 @@ const androidApplicableProfilesQuery = `
 			LEFT OUTER JOIN labels lbl
 				ON lbl.id = mcpl.label_id
 			LEFT OUTER JOIN label_membership lm_inc
-				ON lm_inc.label_id = mcpl.label_id AND lm_inc.host_id = h.id AND mcpl.exclude = false
+				ON lm_inc.label_id = mcpl.label_id AND lm_inc.host_id = h.id AND mcpl.exclude = 0
 			LEFT OUTER JOIN label_membership lm_exc
-				ON lm_exc.label_id = mcpl.label_id AND lm_exc.host_id = h.id AND mcpl.exclude = true
+				ON lm_exc.label_id = mcpl.label_id AND lm_exc.host_id = h.id AND mcpl.exclude = 1
 			LEFT OUTER JOIN host_mdm_android_profiles hmap
 				ON hmap.host_uuid = h.uuid AND hmap.profile_uuid = macp.profile_uuid
 	WHERE
 		h.platform = 'android' AND
 		EXISTS (
 			SELECT 1 FROM mdm_configuration_profile_labels
-			WHERE android_profile_uuid = macp.profile_uuid AND exclude = false AND require_all = false
+			WHERE android_profile_uuid = macp.profile_uuid AND exclude = 0 AND require_all = 0
 		) AND
 		EXISTS (
 			SELECT 1 FROM mdm_configuration_profile_labels
-			WHERE android_profile_uuid = macp.profile_uuid AND exclude = true
+			WHERE android_profile_uuid = macp.profile_uuid AND exclude = 1
 		) AND
 		( %s )
 	GROUP BY
 		macp.profile_uuid, macp.name, h.uuid, h.id
 	HAVING
 		-- include gate: host in at least one include label
-		SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) >= 1 AND
+		(SUM(CASE WHEN mcpl.exclude = 0 AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END)) >= 1 AND
 		-- exclude gate: host not in any exclude label, no broken/unscanned exclude labels
-		SUM(CASE WHEN mcpl.exclude = true AND lm_exc.label_id IS NOT NULL THEN 1
-			WHEN mcpl.exclude = true AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) THEN 1
-			WHEN mcpl.exclude = true AND mcpl.label_id IS NULL THEN 1
-			ELSE 0 END) = 0
+		(SUM(CASE WHEN mcpl.exclude = 1 AND lm_exc.label_id IS NOT NULL THEN 1 WHEN mcpl.exclude = 1 AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) AND COALESCE(hmap.operation_type, '') <> 'install' THEN 1 WHEN mcpl.exclude = 1 AND mcpl.label_id IS NULL THEN 1 ELSE 0 END)) = 0
 `
 
 // GetMDMAndroidReconcileCursor is a no-op on the bare mysql.Datastore;

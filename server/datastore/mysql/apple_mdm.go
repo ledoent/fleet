@@ -3556,31 +3556,42 @@ func (ds *Datastore) GetMDMAppleProfilesSummary(ctx context.Context, teamID *uin
 		return nil, ctxerr.Wrap(ctx, err, "get disk encryption settings for profiles summary")
 	}
 
+	// GROUP BY the status alias (both dialects allow output names in GROUP
+	// BY) and filter the NULL group in HAVING. The operand is dialect-forked:
+	// MySQL only_full_group_by permits the alias but not the raw CASE, PG the
+	// reverse; the subselect-with-outer-WHERE form is not an option because it
+	// hits a MySQL 8.0.44 derived-condition-pushdown bug that leaks the NULL
+	// group.
+	statusCase := sqlCaseMDMAppleStatus(diskEncryptionConfig.MacOSEnforceOnly())
+	havingOperand := "status"
+	if ds.dialect.IsPostgres() {
+		havingOperand = statusCase
+	}
 	stmt := `
-SELECT count, status FROM (
 SELECT
 	COUNT(id) AS count,
-	%s AS status
+	%[1]s AS status
 FROM
 	hosts h
-	%s
-	%s
-	%s
-	%s
+	%[2]s
+	%[3]s
+	%[4]s
+	%[5]s
 	LEFT JOIN host_disk_encryption_keys hdek ON h.id = hdek.host_id
 	LEFT JOIN host_disks hd ON h.id = hd.host_id
 WHERE
-	platform IN('darwin', 'ios', 'ipados') AND %s
+	platform IN('darwin', 'ios', 'ipados') AND %[6]s
 GROUP BY
 	status
-) sq WHERE status IS NOT NULL`
+HAVING
+	%[7]s IS NOT NULL`
 
 	teamFilter := "team_id IS NULL"
 	if teamID != nil && *teamID > 0 {
 		teamFilter = fmt.Sprintf("team_id = %d", *teamID)
 	}
 
-	stmt = fmt.Sprintf(stmt, sqlCaseMDMAppleStatus(diskEncryptionConfig.MacOSEnforceOnly()), sqlJoinMDMAppleProfilesStatus(), sqlJoinMDMAppleDeclarationsStatus(), sqlJoinRecoveryLockStatus(), sqlJoinDeviceNameStatus(), teamFilter)
+	stmt = fmt.Sprintf(stmt, statusCase, sqlJoinMDMAppleProfilesStatus(), sqlJoinMDMAppleDeclarationsStatus(), sqlJoinRecoveryLockStatus(), sqlJoinDeviceNameStatus(), teamFilter, havingOperand)
 
 	var dest []struct {
 		Count  uint   `db:"count"`
