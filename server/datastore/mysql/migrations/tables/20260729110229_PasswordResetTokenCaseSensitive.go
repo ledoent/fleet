@@ -10,6 +10,12 @@ func init() {
 }
 
 func Up_20260729110229(tx *sql.Tx) error {
+	if isPostgres() {
+		// COLLATE-only MODIFYs: MySQL flips these columns to utf8mb4_bin so
+		// comparisons become case-sensitive. PG text comparison is already
+		// case-sensitive under its default collations, so this is a no-op.
+		return nil
+	}
 	// Password reset tokens are base64url-encoded, so their alphabet is
 	// case-sensitive. The column defaulted to the case-insensitive
 	// utf8mb4_unicode_ci collation, which made lookups match case-mutated

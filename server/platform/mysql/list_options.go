@@ -4,11 +4,29 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 // columnCharsRegexp matches characters that are not allowed in column names.
 var columnCharsRegexp = regexp.MustCompile(`[^\w-.]`)
+
+// reSelectAggregateOnly matches a SQL string whose outermost SELECT projects
+// exactly one aggregate item and nothing else (e.g. `SELECT count(*) FROM …`,
+// `SELECT MIN(t.x) AS earliest FROM …`). When the input matches, the
+// cursor-pagination helpers below skip the ORDER BY emission because:
+//   - PG rejects "SELECT count(*) FROM … ORDER BY x" — x isn't in a GROUP BY
+//     and a one-row aggregate result can't have one.
+//   - MySQL silently ignores ORDER BY on a one-row result anyway.
+//
+// The pattern intentionally requires the aggregate to be followed by FROM (or
+// optional `AS alias FROM`), so multi-projection queries like
+// `SELECT count(*) AS cnt, h.team_id FROM … GROUP BY h.team_id` still get
+// ORDER BY emitted (those have real GROUP BY and the ORDER BY is valid).
+// LIMIT/OFFSET remain — harmless on one-row counts; safe on both dialects.
+var reSelectAggregateOnly = regexp.MustCompile(
+	`(?is)^\s*SELECT\s+(COUNT|SUM|MIN|MAX|AVG)\s*\([^()]*(?:\([^()]*\)[^()]*)*\)(\s+AS\s+\w+)?\s+FROM\b`,
+)
 
 // OrderKeyAllowlist maps user-facing order key names to actual SQL column expressions.
 // For example: {"hostname": "h.hostname", "created_at": "h.created_at"}
@@ -93,7 +111,13 @@ func SanitizeColumn(col string) string {
 // If the order key is empty, no ORDER BY clause is added (no error).
 // If allowlist is nil, the function will panic (programming error).
 // If allowlist is empty, any non-empty order key will return an error.
-func AppendListOptionsWithParamsSecure(sql string, params []any, opts ListOptions, allowlist OrderKeyAllowlist) (string, []any, error) {
+//
+// textOrderKeys (optional) names the keys in the allowlist whose underlying
+// columns hold text/varchar values. For these, a numeric-looking cursor
+// (e.g. `after=0`) is bound as a string instead of int64 so pgx doesn't try
+// to encode int8 against a text column (which fails with
+// "cannot find encode plan"). MySQL is unaffected — it coerces either way.
+func AppendListOptionsWithParamsSecure(sql string, params []any, opts ListOptions, allowlist OrderKeyAllowlist, textOrderKeys ...string) (string, []any, error) {
 	if allowlist == nil {
 		panic("AppendListOptionsWithParamsSecure: allowlist cannot be nil; use empty map to disallow all sorting")
 	}
@@ -116,7 +140,16 @@ func AppendListOptionsWithParamsSecure(sql string, params []any, opts ListOption
 
 	page := opts.GetPage()
 
-	if cursor := opts.GetCursorValue(); cursor != "" && orderKey != "" {
+	// Trim whitespace: a pure-whitespace cursor is effectively "no cursor".
+	// MySQL silently coerces such values to 0/empty when compared against
+	// typed columns; PG rejects with "invalid input syntax for type
+	// integer/boolean". Treat as absent on both sides.
+	textKeys := make(map[string]struct{}, len(textOrderKeys))
+	for _, k := range textOrderKeys {
+		textKeys[k] = struct{}{}
+	}
+
+	if cursor := strings.TrimSpace(opts.GetCursorValue()); cursor != "" && orderKey != "" {
 		cursorSQL := " WHERE "
 		if strings.Contains(strings.ToLower(sql), "where") {
 			cursorSQL = " AND "
@@ -124,7 +157,16 @@ func AppendListOptionsWithParamsSecure(sql string, params []any, opts ListOption
 		// Cursor value is always passed as string. MySQL automatically converts
 		// string to integer when comparing against integer columns.
 		// See: https://dev.mysql.com/doc/refman/8.0/en/type-conversion.html
-		params = append(params, cursor)
+		// PG does NOT auto-convert, so pass numeric cursors as int64 — but only
+		// when the column itself is numeric. For text columns (display_name,
+		// hostname, etc.), binding int64 fails pgx with "cannot find encode plan".
+		var cursorParam any = cursor
+		if _, isText := textKeys[userOrderKey]; !isText {
+			if v, err := strconv.ParseInt(cursor, 10, 64); err == nil {
+				cursorParam = v
+			}
+		}
+		params = append(params, cursorParam)
 		direction := ">" // ASC
 		if opts.IsDescending() {
 			direction = "<" // DESC
@@ -135,7 +177,11 @@ func AppendListOptionsWithParamsSecure(sql string, params []any, opts ListOption
 		page = 0
 	}
 
-	if orderKey != "" {
+	// Single-aggregate SELECTs (count/sum/min/max/avg) can't have ORDER BY on
+	// non-GROUP'd columns under PG strict GROUP BY rules; skip the ORDER BY
+	// emission entirely. MySQL also treats ORDER BY on a one-row aggregate
+	// as a no-op so this is purely informational stripping on that side.
+	if orderKey != "" && !reSelectAggregateOnly.MatchString(sql) {
 		direction := "ASC"
 		if opts.IsDescending() {
 			direction = "DESC"

@@ -19,7 +19,7 @@ import (
 )
 
 func TestUsers(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
@@ -75,6 +75,14 @@ func testUsersCreate(t *testing.T, ds *Datastore) {
 		beforeUserCreate := time.Now().Truncate(time.Second)
 		user, err := ds.NewUser(context.Background(), u)
 		afterUserCreate := time.Now().Truncate(time.Second)
+		if isPG(ds) {
+			// MySQL TIMESTAMP is whole-second, so flooring `after` still
+			// bounds the row's created_at; PG keeps microseconds (and a
+			// containerized DB clock can run slightly ahead), so ceiling the
+			// bound restores the same one-second slack the MySQL comparison
+			// always had implicitly.
+			afterUserCreate = afterUserCreate.Add(time.Second)
+		}
 		if tt.errorMsg != nil {
 			assert.ErrorContains(t, err, *tt.errorMsg)
 			continue

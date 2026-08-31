@@ -395,7 +395,7 @@ FROM
 	LEFT JOIN nano_command_results ncr ON nq.id = ncr.id
 		AND nc.command_uuid = ncr.command_uuid
 WHERE
-	nq.id IN(?) AND nq.active = 1`
+	nq.id IN(?) AND nq.active = true`
 
 		appleStmt, appleParams = addRequestTypeFilter(appleStmt, &listOpts.Filters, appleParams)
 		appleStmt, appleParams = addAppleCommandStatusFilter(appleStmt, &listOpts.Filters, appleParams)
@@ -674,7 +674,7 @@ func (ds *Datastore) BatchSetMDMProfiles(ctx context.Context, tmID *uint, macPro
 		// this transaction so the tracking row commits atomically with the batch.
 		// Batch replaces profiles, so a removed OS-update profile clears its
 		// tracking row via ON DELETE CASCADE.
-		if err := batchTrackUpdateConfigProfilesDB(ctx, tx, tmID, winProfiles, macDeclarations); err != nil {
+		if err := batchTrackUpdateConfigProfilesDB(ctx, tx, ds.dialect, tmID, winProfiles, macDeclarations); err != nil {
 			return ctxerr.Wrap(ctx, err, "tracking software update profiles")
 		}
 
@@ -692,7 +692,7 @@ func (ds *Datastore) BatchSetMDMProfiles(ctx context.Context, tmID *uint, macPro
 // profile or Apple declaration in the batch as the team's OS-update profile. The
 // caller (BatchSetMDMProfiles) enforces at most one of each per team, and the
 // inserts are idempotent, so this safely re-applies an unchanged profile.
-func batchTrackUpdateConfigProfilesDB(ctx context.Context, tx sqlx.ExtContext, tmID *uint, winProfiles []*fleet.MDMWindowsConfigProfile, macDeclarations []*fleet.MDMAppleDeclaration) error {
+func batchTrackUpdateConfigProfilesDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, tmID *uint, winProfiles []*fleet.MDMWindowsConfigProfile, macDeclarations []*fleet.MDMAppleDeclaration) error {
 	var teamID uint
 	if tmID != nil {
 		teamID = *tmID
@@ -707,8 +707,8 @@ func batchTrackUpdateConfigProfilesDB(ctx context.Context, tx sqlx.ExtContext, t
 			`SELECT profile_uuid FROM mdm_windows_configuration_profiles WHERE team_id = ? AND name = ?`, teamID, p.Name); err != nil {
 			return ctxerr.Wrap(ctx, err, "getting windows profile uuid")
 		}
-		const stmt = `INSERT INTO mdm_configuration_profile_update_settings (windows_profile_uuid) VALUES (?)
-			ON DUPLICATE KEY UPDATE windows_profile_uuid = windows_profile_uuid`
+		stmt := dialect.InsertIgnoreInto() + ` mdm_configuration_profile_update_settings (windows_profile_uuid) VALUES (?)` +
+			dialect.OnConflictDoNothing("windows_profile_uuid")
 		if _, err := tx.ExecContext(ctx, stmt, profileUUID); err != nil {
 			return ctxerr.Wrap(ctx, err, "insert windows update config profile")
 		}
@@ -724,8 +724,8 @@ func batchTrackUpdateConfigProfilesDB(ctx context.Context, tx sqlx.ExtContext, t
 			`SELECT declaration_uuid FROM mdm_apple_declarations WHERE team_id = ? AND identifier = ?`, teamID, d.Identifier); err != nil {
 			return ctxerr.Wrap(ctx, err, "getting apple declaration uuid")
 		}
-		const stmt = `INSERT INTO mdm_configuration_profile_update_settings (apple_declaration_uuid) VALUES (?)
-			ON DUPLICATE KEY UPDATE apple_declaration_uuid = apple_declaration_uuid`
+		stmt := dialect.InsertIgnoreInto() + ` mdm_configuration_profile_update_settings (apple_declaration_uuid) VALUES (?)` +
+			dialect.OnConflictDoNothing("apple_declaration_uuid")
 		if _, err := tx.ExecContext(ctx, stmt, declUUID); err != nil {
 			return ctxerr.Wrap(ctx, err, "insert apple update config profile")
 		}
@@ -955,7 +955,7 @@ SELECT
 	COALESCE(apple_profile_uuid, windows_profile_uuid, android_profile_uuid) as profile_uuid,
 	label_name,
 	COALESCE(label_id, 0) as label_id,
-	IF(label_id IS NULL, 1, 0) as broken,
+	CASE WHEN label_id IS NULL THEN 1 ELSE 0 END as broken,
 	exclude,
 	require_all
 FROM
@@ -969,7 +969,7 @@ SELECT
 	apple_declaration_uuid as profile_uuid,
 	label_name,
 	COALESCE(label_id, 0) as label_id,
-	IF(label_id IS NULL, 1, 0) as broken,
+	CASE WHEN label_id IS NULL THEN 1 ELSE 0 END as broken,
 	exclude,
 	require_all
 FROM
@@ -1451,20 +1451,20 @@ FROM
 		GROUP BY checksum
 	) cs ON macp.checksum = cs.checksum
 	JOIN mdm_configuration_profile_labels mcpl
-		ON mcpl.apple_profile_uuid = macp.profile_uuid AND mcpl.exclude = 0 AND mcpl.require_all = 1
+		ON mcpl.apple_profile_uuid = macp.profile_uuid AND mcpl.exclude = false AND mcpl.require_all = true
 	LEFT OUTER JOIN label_membership lm
 		ON lm.label_id = mcpl.label_id AND lm.host_id = ?
 WHERE
 	macp.team_id = ? AND
 	NOT EXISTS (
 		SELECT 1 FROM mdm_configuration_profile_labels
-		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = 1
+		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = true
 	)
 GROUP BY
 	profile_uuid, identifier
 HAVING
-	count_profile_labels > 0 AND
-	count_host_labels = count_profile_labels
+	COUNT(*) > 0 AND
+	COUNT(lm.label_id) = COUNT(*)
 
 UNION
 
@@ -1488,22 +1488,22 @@ FROM
 		GROUP BY checksum
 	) cs ON macp.checksum = cs.checksum
 	JOIN mdm_configuration_profile_labels mcpl
-		ON mcpl.apple_profile_uuid = macp.profile_uuid AND mcpl.exclude = 1
+		ON mcpl.apple_profile_uuid = macp.profile_uuid AND mcpl.exclude = true
 	LEFT OUTER JOIN label_membership lm
 		ON lm.label_id = mcpl.label_id AND lm.host_id = ?
 WHERE
 	macp.team_id = ? AND
 	NOT EXISTS (
 		SELECT 1 FROM mdm_configuration_profile_labels
-		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = 0
+		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = false
 	)
 GROUP BY
 	profile_uuid, identifier
 HAVING
 	-- considers only the profiles with labels, without any broken label, and with the host not in any label
-	count_profile_labels > 0 AND
-	count_profile_labels = count_non_broken_labels AND
-	count_host_labels = 0
+	COUNT(*) > 0 AND
+	COUNT(*) = COUNT(mcpl.label_id) AND
+	COUNT(lm.label_id) = 0
 
 UNION
 
@@ -1527,20 +1527,21 @@ FROM
 		GROUP BY checksum
 	) cs ON macp.checksum = cs.checksum
 	JOIN mdm_configuration_profile_labels mcpl
-		ON mcpl.apple_profile_uuid = macp.profile_uuid AND mcpl.exclude = 0 AND mcpl.require_all = 0
+		ON mcpl.apple_profile_uuid = macp.profile_uuid AND mcpl.exclude = false AND mcpl.require_all = false
 	LEFT OUTER JOIN label_membership lm
 		ON lm.label_id = mcpl.label_id AND lm.host_id = ?
 WHERE
 	macp.team_id = ? AND
 	NOT EXISTS (
 		SELECT 1 FROM mdm_configuration_profile_labels
-		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = 1
+		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = true
 	)
 GROUP BY
 	profile_uuid, identifier
 HAVING
-	count_profile_labels > 0 AND
-	count_host_labels > 0
+	-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
+	COUNT(*) > 0 AND
+	COUNT(lm.label_id) > 0
 
 UNION
 
@@ -1549,9 +1550,9 @@ UNION
 SELECT
 	macp.profile_uuid AS profile_uuid,
 	macp.identifier AS identifier,
-	SUM(CASE WHEN mcpl.exclude = 0 THEN 1 ELSE 0 END) as count_profile_labels,
-	SUM(CASE WHEN mcpl.exclude = 0 AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_non_broken_labels,
-	SUM(CASE WHEN mcpl.exclude = 0 AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_host_labels,
+	SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) as count_profile_labels,
+	SUM(CASE WHEN mcpl.exclude = false AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_non_broken_labels,
+	SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_host_labels,
 	min(earliest_install_date) AS earliest_install_date
 FROM
 	mdm_apple_configuration_profiles macp
@@ -1570,28 +1571,31 @@ FROM
 	LEFT OUTER JOIN labels lbl
 		ON lbl.id = mcpl.label_id
 	LEFT OUTER JOIN label_membership lm_inc
-		ON lm_inc.label_id = mcpl.label_id AND lm_inc.host_id = ? AND mcpl.exclude = 0
+		ON lm_inc.label_id = mcpl.label_id AND lm_inc.host_id = ? AND mcpl.exclude = false
 	LEFT OUTER JOIN label_membership lm_exc
-		ON lm_exc.label_id = mcpl.label_id AND lm_exc.host_id = ? AND mcpl.exclude = 1
+		ON lm_exc.label_id = mcpl.label_id AND lm_exc.host_id = ? AND mcpl.exclude = true
 WHERE
 	macp.team_id = ? AND
 	EXISTS (
 		SELECT 1 FROM mdm_configuration_profile_labels
-		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = 0 AND require_all = 1
+		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = false AND require_all = true
 	) AND
 	EXISTS (
 		SELECT 1 FROM mdm_configuration_profile_labels
-		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = 1
+		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = true
 	)
 GROUP BY
 	profile_uuid, identifier
 HAVING
 	-- include gate: host in all include labels (no broken include labels)
-	count_profile_labels > 0 AND count_non_broken_labels = count_profile_labels AND count_host_labels = count_profile_labels AND
-	-- exclude gate: host not in any exclude label, no broken/unscanned exclude labels (reusing count_host_updated_after_labels)
-	SUM(CASE WHEN mcpl.exclude = 1 AND lm_exc.label_id IS NOT NULL THEN 1
-		WHEN mcpl.exclude = 1 AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) THEN 1
-		WHEN mcpl.exclude = 1 AND mcpl.label_id IS NULL THEN 1
+	-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
+	SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) > 0 AND
+	SUM(CASE WHEN mcpl.exclude = false AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) = SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) AND
+	SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) = SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) AND
+	-- exclude gate: host not in any exclude label, no broken/unscanned exclude labels
+	SUM(CASE WHEN mcpl.exclude = true AND lm_exc.label_id IS NOT NULL THEN 1
+		WHEN mcpl.exclude = true AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) THEN 1
+		WHEN mcpl.exclude = true AND mcpl.label_id IS NULL THEN 1
 		ELSE 0 END) = 0
 
 UNION
@@ -1601,9 +1605,9 @@ UNION
 SELECT
 	macp.profile_uuid AS profile_uuid,
 	macp.identifier AS identifier,
-	SUM(CASE WHEN mcpl.exclude = 0 THEN 1 ELSE 0 END) as count_profile_labels,
-	SUM(CASE WHEN mcpl.exclude = 0 AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_non_broken_labels,
-	SUM(CASE WHEN mcpl.exclude = 0 AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_host_labels,
+	SUM(CASE WHEN mcpl.exclude = false THEN 1 ELSE 0 END) as count_profile_labels,
+	SUM(CASE WHEN mcpl.exclude = false AND mcpl.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_non_broken_labels,
+	SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) as count_host_labels,
 	min(earliest_install_date) AS earliest_install_date
 FROM
 	mdm_apple_configuration_profiles macp
@@ -1622,28 +1626,29 @@ FROM
 	LEFT OUTER JOIN labels lbl
 		ON lbl.id = mcpl.label_id
 	LEFT OUTER JOIN label_membership lm_inc
-		ON lm_inc.label_id = mcpl.label_id AND lm_inc.host_id = ? AND mcpl.exclude = 0
+		ON lm_inc.label_id = mcpl.label_id AND lm_inc.host_id = ? AND mcpl.exclude = false
 	LEFT OUTER JOIN label_membership lm_exc
-		ON lm_exc.label_id = mcpl.label_id AND lm_exc.host_id = ? AND mcpl.exclude = 1
+		ON lm_exc.label_id = mcpl.label_id AND lm_exc.host_id = ? AND mcpl.exclude = true
 WHERE
 	macp.team_id = ? AND
 	EXISTS (
 		SELECT 1 FROM mdm_configuration_profile_labels
-		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = 0 AND require_all = 0
+		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = false AND require_all = false
 	) AND
 	EXISTS (
 		SELECT 1 FROM mdm_configuration_profile_labels
-		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = 1
+		WHERE apple_profile_uuid = macp.profile_uuid AND exclude = true
 	)
 GROUP BY
 	profile_uuid, identifier
 HAVING
 	-- include gate: host in at least one include label
-	count_host_labels >= 1 AND
+	-- PostgreSQL does not allow SELECT-list aliases in HAVING; repeat the aggregates.
+	SUM(CASE WHEN mcpl.exclude = false AND lm_inc.label_id IS NOT NULL THEN 1 ELSE 0 END) >= 1 AND
 	-- exclude gate: host not in any exclude label, no broken/unscanned exclude labels
-	SUM(CASE WHEN mcpl.exclude = 1 AND lm_exc.label_id IS NOT NULL THEN 1
-		WHEN mcpl.exclude = 1 AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) THEN 1
-		WHEN mcpl.exclude = 1 AND mcpl.label_id IS NULL THEN 1
+	SUM(CASE WHEN mcpl.exclude = true AND lm_exc.label_id IS NOT NULL THEN 1
+		WHEN mcpl.exclude = true AND (lbl.label_membership_type = 0 AND lbl.created_at IS NOT NULL AND h.label_updated_at < lbl.created_at) THEN 1
+		WHEN mcpl.exclude = true AND mcpl.label_id IS NULL THEN 1
 		ELSE 0 END) = 0
 `
 
@@ -1835,6 +1840,7 @@ WHERE hmap.command_uuid = ?
 func batchSetProfileLabelAssociationsDB(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	profileLabels []fleet.ConfigurationProfileLabel,
 	profileUUIDsWithoutLabels []string,
 	platform string,
@@ -1884,10 +1890,10 @@ func batchSetProfileLabelAssociationsDB(
               (%s_profile_uuid, label_id, label_name, exclude, require_all)
           VALUES
               %s
-          ON DUPLICATE KEY UPDATE
+          ` + dialect.OnDuplicateKey("%[1]s_profile_uuid, label_name", `
               label_id = VALUES(label_id),
               exclude = VALUES(exclude),
-			  require_all = VALUES(require_all)
+			  require_all = VALUES(require_all)`) + `
 	`
 
 	selectStmt := `
@@ -2036,7 +2042,7 @@ func (ds *Datastore) MDMInsertEULA(ctx context.Context, eula *fleet.MDMEULA) err
 
 	_, err := ds.writer(ctx).ExecContext(ctx, stmt, eula.Name, eula.Bytes, eula.Token, eula.Sha256)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return ctxerr.Wrap(ctx, alreadyExists("MDMEULA", eula.Token))
 		}
 		return ctxerr.Wrap(ctx, err, "create EULA")
@@ -2066,6 +2072,11 @@ func (ds *Datastore) GetHostCertAssociationsToExpire(ctx context.Context, expiry
 	//
 	// Note that we use GROUP BY because we can't guarantee unique entries
 	// based on uuid in the hosts table.
+	// PG does not support MySQL's '0000-00-00' zero-date literal; use IS NOT NULL instead.
+	certExpiryFilter := "ncaa.cert_not_valid_after BETWEEN '0000-00-00' AND DATE_ADD(CURDATE(), INTERVAL ? DAY)"
+	if ds.dialect.IsPostgres() {
+		certExpiryFilter = "ncaa.cert_not_valid_after IS NOT NULL AND ncaa.cert_not_valid_after <= CURRENT_DATE + (? * INTERVAL '1 day')"
+	}
 	stmt, args, err := sqlx.In(`
 SELECT
     h.uuid AS host_uuid,
@@ -2103,11 +2114,11 @@ LEFT JOIN
 LEFT JOIN
     nano_enrollments ne ON ne.id = ncaa.id
 WHERE
-    ncaa.cert_not_valid_after BETWEEN '0000-00-00' AND DATE_ADD(CURDATE(), INTERVAL ? DAY)
+    `+certExpiryFilter+`
     AND ncaa.renew_command_uuid IS NULL
-    AND ne.enabled = 1
+    AND ne.enabled = true
 GROUP BY
-    host_uuid, ncaa.sha256, ncaa.cert_not_valid_after
+    host_uuid, ncaa.sha256, ncaa.cert_not_valid_after, ne.enrolled_from_migration, ne.type
 ORDER BY
     cert_not_valid_after ASC
 LIMIT ?`, expiryDays, limit)
@@ -2166,6 +2177,40 @@ func (ds *Datastore) SetCommandForPendingSCEPRenewal(ctx context.Context, assocs
 		return nil
 	}
 
+	if ds.dialect.IsPostgres() {
+		// This function must only ever update existing associations. The MySQL
+		// path detects an accidental insert via ON DUPLICATE KEY affected-rows
+		// arithmetic (1 = insert, 2 = update), which PG cannot reproduce — ON
+		// CONFLICT reports 1 for both. Use a plain UPDATE ... FROM (VALUES ...)
+		// instead and require every association to have matched.
+		var sb strings.Builder
+		args := make([]any, 0, len(assocs)*3)
+		for i, assoc := range assocs {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("(?, ?, ?)")
+			args = append(args, assoc.HostUUID, assoc.SHA256, cmdUUID)
+		}
+		stmt := `
+		UPDATE nano_cert_auth_associations AS a
+		SET renew_command_uuid = v.renew_command_uuid
+		FROM (VALUES ` + sb.String() + `) AS v(id, sha256, renew_command_uuid)
+		WHERE a.id = v.id AND a.sha256 = v.sha256`
+
+		return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
+			res, err := tx.ExecContext(ctx, stmt, args...)
+			if err != nil {
+				return fmt.Errorf("failed to update cert associations: %w", err)
+			}
+			affected, _ := res.RowsAffected()
+			if affected != int64(len(assocs)) {
+				return errors.New("this function can only be used to update existing associations")
+			}
+			return nil
+		})
+	}
+
 	var sb strings.Builder
 	args := make([]any, len(assocs)*3)
 	for i, assoc := range assocs {
@@ -2177,9 +2222,9 @@ func (ds *Datastore) SetCommandForPendingSCEPRenewal(ctx context.Context, assocs
 
 	stmt := fmt.Sprintf(`
 		INSERT INTO nano_cert_auth_associations (id, sha256, renew_command_uuid) VALUES %s
-		ON DUPLICATE KEY UPDATE
+		`+ds.dialect.OnDuplicateKey("id,sha256", `
 			renew_command_uuid = VALUES(renew_command_uuid)
-	`, strings.TrimSuffix(sb.String(), ","))
+	`), strings.TrimSuffix(sb.String(), ","))
 
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 		res, err := tx.ExecContext(ctx, stmt, args...)
@@ -2343,9 +2388,9 @@ func (ds *Datastore) AreHostsConnectedToFleetMDM(ctx context.Context, hosts []*f
 	    JOIN hosts h ON h.uuid = ne.id
 	    JOIN host_mdm hm ON hm.host_id = h.id
 	  WHERE ne.id IN (?)
-	    AND ne.enabled = 1
+	    AND ne.enabled = true
 	    AND ne.type IN ('Device', 'User Enrollment (Device)')
-	    AND hm.enrolled = 1
+	    AND hm.enrolled = true
 	`
 	if err := setConnectedUUIDs(appleStmt, appleUUIDs, res); err != nil {
 		return nil, err
@@ -2362,7 +2407,7 @@ func (ds *Datastore) AreHostsConnectedToFleetMDM(ctx context.Context, hosts []*f
 	    JOIN host_mdm hm ON hm.host_id = h.id
 	  WHERE mwe.host_uuid IN (?)
 	    AND mwe.device_state = '` + microsoft_mdm.MDMDeviceStateEnrolled + `'
-	    AND hm.enrolled = 1
+	    AND hm.enrolled = true
 	`
 	if err := setConnectedUUIDs(winStmt, winUUIDs, res); err != nil {
 		return nil, err
@@ -2399,6 +2444,7 @@ func (ds *Datastore) IsHostConnectedToFleetMDM(ctx context.Context, host *fleet.
 func batchSetProfileVariableAssociationsDB(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	profileVariablesByUUID []fleet.MDMProfileUUIDFleetVariables,
 	platform string,
 	forAppleDeclarations bool,
@@ -2421,7 +2467,7 @@ func batchSetProfileVariableAssociationsDB(
 		return false, fmt.Errorf("unsupported platform %s", platform)
 	}
 
-	return setVariableAssociationsForColumnDB(ctx, tx, profileVariablesByUUID, columnName)
+	return setVariableAssociationsForColumnDB(ctx, tx, dialect, profileVariablesByUUID, columnName)
 }
 
 // Profiles, declarations and activations all key into the same table, so the
@@ -2429,6 +2475,7 @@ func batchSetProfileVariableAssociationsDB(
 func setVariableAssociationsForColumnDB(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	profileVariablesByUUID []fleet.MDMProfileUUIDFleetVariables,
 	columnName string,
 ) (didUpdate bool, err error) {
@@ -2523,9 +2570,8 @@ func setVariableAssociationsForColumnDB(
 				fleet_variable_id
 			)
 			VALUES %s
-			ON DUPLICATE KEY UPDATE
-				fleet_variable_id = VALUES(fleet_variable_id)
-		`, columnName, strings.TrimSuffix(valuePart, ","))
+		`, columnName, strings.TrimSuffix(valuePart, ",")) +
+			dialect.OnDuplicateKey(columnName+",fleet_variable_id", "fleet_variable_id = VALUES(fleet_variable_id)")
 
 		_, err := tx.ExecContext(ctx, stmt, args...)
 		return err
@@ -2615,7 +2661,7 @@ FROM
 	JOIN host_mdm_android_profiles hmap ON hmap.host_uuid = h.uuid
 WHERE
 	h.platform = 'android' AND
-	hmdm.enrolled = 1 AND
+	hmdm.enrolled = true AND
 	hmap.profile_uuid = :profile_uuid
 GROUP BY
 	final_status`
@@ -2682,8 +2728,8 @@ FROM
 WHERE
 	mwe.device_state = :device_state_enrolled AND
 	h.platform = 'windows' AND
-	hmdm.is_server = 0 AND
-	hmdm.enrolled = 1 AND
+	hmdm.is_server = false AND
+	hmdm.enrolled = true AND
 	hmwp.profile_uuid = :profile_uuid
 GROUP BY
 	final_status`
@@ -2987,7 +3033,7 @@ func (ds *Datastore) batchSetLabelAndVariableAssociations(ctx context.Context, t
 	}
 
 	var didUpdateLabels bool
-	if didUpdateLabels, err = batchSetProfileLabelAssociationsDB(ctx, tx, incomingLabels, profsWithoutLabels,
+	if didUpdateLabels, err = batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, incomingLabels, profsWithoutLabels,
 		platform); err != nil {
 		return false, ctxerr.Wrap(ctx, err, fmt.Sprintf("inserting %s profile label associations", platform))
 	}
@@ -3024,7 +3070,7 @@ func (ds *Datastore) batchSetLabelAndVariableAssociations(ctx context.Context, t
 
 	if len(profilesVarsToUpsert) > 0 {
 		var didUpdateVariableAssociations bool
-		if didUpdateVariableAssociations, err = batchSetProfileVariableAssociationsDB(ctx, tx, profilesVarsToUpsert, platform, false); err != nil {
+		if didUpdateVariableAssociations, err = batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, profilesVarsToUpsert, platform, false); err != nil {
 			return false, ctxerr.Wrap(ctx, err, fmt.Sprintf("inserting %s profile variable associations", platform))
 		}
 
@@ -3197,14 +3243,17 @@ func getMDMIdPAccountByHostID(ctx context.Context, q sqlx.QueryerContext, logger
 
 func (ds *Datastore) CleanUpMDMManagedCertificates(ctx context.Context) error {
 	_, err := ds.writer(ctx).ExecContext(ctx, `
-	DELETE hmmc FROM host_mdm_managed_certificates hmmc
-LEFT JOIN host_mdm_apple_profiles hmap ON hmmc.host_uuid = hmap.host_uuid
-    AND hmmc.profile_uuid = hmap.profile_uuid
-LEFT JOIN host_mdm_windows_profiles hwmp ON hmmc.host_uuid = hwmp.host_uuid
-    AND hmmc.profile_uuid = hwmp.profile_uuid
-WHERE
-    hmap.host_uuid IS NULL
-    AND hwmp.host_uuid IS NULL`)
+	DELETE FROM host_mdm_managed_certificates
+WHERE NOT EXISTS (
+    SELECT 1 FROM host_mdm_apple_profiles hmap
+    WHERE hmap.host_uuid = host_mdm_managed_certificates.host_uuid
+    AND hmap.profile_uuid = host_mdm_managed_certificates.profile_uuid
+)
+AND NOT EXISTS (
+    SELECT 1 FROM host_mdm_windows_profiles hwmp
+    WHERE hwmp.host_uuid = host_mdm_managed_certificates.host_uuid
+    AND hwmp.profile_uuid = host_mdm_managed_certificates.profile_uuid
+)`)
 	if err != nil {
 		return ctxerr.Wrap(ctx, err, "clean up mdm certificate profiles")
 	}
@@ -3229,13 +3278,13 @@ func (ds *Datastore) BulkUpsertMDMManagedCertificates(ctx context.Context, paylo
 			  serial
             )
             VALUES %s
-            ON DUPLICATE KEY UPDATE
+            `+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid,ca_name", `
               challenge_retrieved_at = VALUES(challenge_retrieved_at),
 			  not_valid_before = VALUES(not_valid_before),
 			  not_valid_after = VALUES(not_valid_after),
 			  type = VALUES(type),
 			  ca_name = VALUES(ca_name),
-			  serial = VALUES(serial)`,
+			  serial = VALUES(serial)`),
 			strings.TrimSuffix(valuePart, ","),
 		)
 
@@ -3337,10 +3386,14 @@ func (ds *Datastore) RenewMDMManagedCertificates(ctx context.Context) error {
 		ON hmmc.host_uuid = hp.host_uuid AND hmmc.profile_uuid = hp.profile_uuid
 	WHERE
 		hmmc.type <=> ? AND hp.status IS NOT NULL AND hp.operation_type = ?
-	HAVING
-		validity_period IS NOT NULL AND
-		((validity_period > 30 AND not_valid_after < DATE_ADD(NOW(), INTERVAL 30 DAY)) OR
-		(validity_period <= 30 AND not_valid_after < DATE_ADD(NOW(), INTERVAL validity_period/2 DAY)))
+		AND DATEDIFF(hmmc.not_valid_after, hmmc.not_valid_before) IS NOT NULL
+		AND (
+			(DATEDIFF(hmmc.not_valid_after, hmmc.not_valid_before) > 30
+				AND hmmc.not_valid_after < DATE_ADD(NOW(), INTERVAL 30 DAY))
+			OR
+			(DATEDIFF(hmmc.not_valid_after, hmmc.not_valid_before) <= 30
+				AND hmmc.not_valid_after < DATE_ADD(NOW(), INTERVAL DATEDIFF(hmmc.not_valid_after, hmmc.not_valid_before)/2 DAY))
+		)
 	LIMIT ?`, typeMatcher, fleet.MDMOperationTypeInstall, limit)
 			if err != nil {
 				return ctxerr.Wrap(ctx, err, "retrieving mdm managed certificates to renew")

@@ -11,7 +11,7 @@ import (
 )
 
 func TestJobs(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 	// call TruncateTables before the first test, because a DB migation may have
 	// created job entries.
 	TruncateTables(t, ds)

@@ -1947,10 +1947,10 @@ func testListSoftwareTitlesSortByDisplayName(t *testing.T, ds *Datastore) {
 	//   bravo              -> no display name         (falls back to "bravo")
 	//   zzz-script-only.pkg -> display "AAA Script"   (should sort first despite filename)
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		if err := updateSoftwareTitleDisplayName(ctx, q, &team.ID, alphaID, "Zulu"); err != nil {
+		if err := updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, alphaID, "Zulu"); err != nil {
 			return err
 		}
-		return updateSoftwareTitleDisplayName(ctx, q, &team.ID, scriptID, "AAA Script")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, scriptID, "AAA Script")
 	})
 
 	// Sort by name ASC — expected: AAA Script (zzz-script-only.pkg), bravo, Zulu (alpha).
@@ -2015,7 +2015,7 @@ func testListSoftwareTitlesSearchByBundleAndDisplayName(t *testing.T, ds *Datast
 
 	// Set a custom team-scoped display name that shares no substring with name or bundle_identifier.
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		return updateSoftwareTitleDisplayName(ctx, q, &team.ID, targetID, "Cisco Secure Client")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team.ID, targetID, "Cisco Secure Client")
 	})
 
 	search := func(q string) []fleet.SoftwareTitleListResult {
@@ -2458,7 +2458,7 @@ func testSoftwareTitleNameForHostFilter(t *testing.T, ds *Datastore) {
 
 	// A team's display_name override takes precedence over the title name.
 	ExecAdhocSQL(t, ds, func(q sqlx.ExtContext) error {
-		return updateSoftwareTitleDisplayName(ctx, q, &team1.ID, titleID, "Team1 Custom Name")
+		return updateSoftwareTitleDisplayName(ctx, q, ds.dialect, &team1.ID, titleID, "Team1 Custom Name")
 	})
 	name, displayName, err = ds.SoftwareTitleNameForHostFilter(ctx, titleID, &team1.ID, team1Filter)
 	require.NoError(t, err)

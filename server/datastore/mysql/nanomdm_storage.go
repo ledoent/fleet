@@ -55,9 +55,10 @@ func isConflict(err error) bool {
 type NanoMDMStorage struct {
 	*nanomdm_mysql.MySQLStorage
 
-	db     *sqlx.DB
-	logger *slog.Logger
-	ds     fleet.Datastore
+	db      *sqlx.DB
+	logger  *slog.Logger
+	ds      fleet.Datastore
+	dialect DialectHelper
 }
 
 // NewMDMAppleMDMStorage returns a MySQL nanomdm storage that uses the Datastore
@@ -76,6 +77,7 @@ func (ds *Datastore) NewMDMAppleMDMStorage() (*NanoMDMStorage, error) {
 		db:           ds.primary,
 		logger:       ds.logger,
 		ds:           ds,
+		dialect:      ds.dialect,
 	}, nil
 }
 
@@ -97,6 +99,7 @@ func (ds *Datastore) NewTestMDMAppleMDMStorage(asyncCap int, asyncInterval time.
 		db:           ds.primary,
 		logger:       ds.logger,
 		ds:           ds,
+		dialect:      ds.dialect,
 	}, nil
 }
 
@@ -239,6 +242,18 @@ func (s *NanoMDMStorage) EnqueueDeviceLockCommand(
 	pin string,
 ) error {
 	return common_mysql.WithRetryTxx(ctx, s.db, func(tx sqlx.ExtContext) error {
+		// On PG, serialize concurrent lock attempts for the same host with a
+		// transaction-scoped advisory lock: when no host_mdm_actions row
+		// exists yet, FOR UPDATE locks nothing — MySQL's InnoDB gap lock
+		// papers over that (concurrent inserters block on the index range),
+		// but PG has no gap locks, so every concurrent request would pass the
+		// existence check and enqueue its own command.
+		if s.dialect.IsPostgres() {
+			if _, err := tx.ExecContext(ctx,
+				`SELECT pg_advisory_xact_lock(hashtext('host_mdm_actions'), ?)`, host.ID); err != nil {
+				return ctxerr.Wrap(ctx, err, "acquiring advisory lock for DeviceLock")
+			}
+		}
 		// check if a lock already exists using SELECT FOR UPDATE to prevent a race
 		var existingLockRef *string
 		err := sqlx.GetContext(ctx, tx, &existingLockRef,
@@ -281,11 +296,11 @@ func (s *NanoMDMStorage) EnqueueDeviceLockCommand(
 				fleet_platform
 			)
 			VALUES (?, ?, ?, ?)
-			ON DUPLICATE KEY UPDATE
+			` + s.dialect.OnDuplicateKey("host_id", `
 				wipe_ref   = NULL,
 				unlock_ref = NULL,
 				unlock_pin = VALUES(unlock_pin),
-				lock_ref   = VALUES(lock_ref)`
+				lock_ref   = VALUES(lock_ref)`)
 
 		if _, err := tx.ExecContext(ctx, stmt, host.ID, cmd.CommandUUID, pin, host.FleetPlatform()); err != nil {
 			return ctxerr.Wrap(ctx, err, "modifying host_mdm_actions for DeviceLock")
@@ -308,9 +323,9 @@ func (s *NanoMDMStorage) EnqueueDeviceUnlockCommand(ctx context.Context, host *f
 				fleet_platform
 			)
 			VALUES (?, ?, ?)
-			ON DUPLICATE KEY UPDATE
+			` + s.dialect.OnDuplicateKey("host_id", `
 				unlock_ref = VALUES(unlock_ref),
-				unlock_pin = NULL`
+				unlock_pin = NULL`)
 
 		if _, err := tx.ExecContext(ctx, stmt, host.ID, cmd.CommandUUID, host.FleetPlatform()); err != nil {
 			return ctxerr.Wrap(ctx, err, "modifying host_mdm_actions for DeviceUnlock")
@@ -334,8 +349,7 @@ func (s *NanoMDMStorage) EnqueueDeviceWipeCommand(ctx context.Context, host *fle
 				fleet_platform
 			)
 			VALUES (?, ?, ?)
-			ON DUPLICATE KEY UPDATE
-				wipe_ref   = VALUES(wipe_ref)`
+			` + s.dialect.OnDuplicateKey("host_id", "wipe_ref = VALUES(wipe_ref)")
 
 		if _, err := tx.ExecContext(ctx, stmt, host.ID, cmd.CommandUUID, host.FleetPlatform()); err != nil {
 			return ctxerr.Wrap(ctx, err, "modifying host_mdm_actions for DeviceWipe")

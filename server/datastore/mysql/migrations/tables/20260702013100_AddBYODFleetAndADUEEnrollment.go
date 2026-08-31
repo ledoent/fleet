@@ -12,6 +12,11 @@ func init() {
 }
 
 func Up_20260702013100(tx *sql.Tx) error {
+	// Idempotent: the fork's PG baseline already carries the full BYOD/ADUE
+	// schema (the feature pre-dates its upstreaming).
+	if columnExists(tx, "abm_tokens", "byod_default_team_id") && tableExists(tx, "mdm_adue_enrollment_challenges") {
+		return nil
+	}
 	// First we modify the abm_tokens table to add the column for BYOD default team id, and a unique token for ADUE enrollments
 	_, err := tx.Exec(`ALTER TABLE abm_tokens
     ADD COLUMN byod_default_team_id INT UNSIGNED NULL,

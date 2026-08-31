@@ -187,13 +187,15 @@ func (ds *Datastore) makeSessionInTransaction(ctx context.Context, tx sqlx.ExtCo
 		)
 		VALUES(?,?)
 	`
-	result, err := tx.ExecContext(ctx, sqlStatement, userID, sessionKey)
+	id, err := insertAndGetIDTx(ctx, tx, ds.dialect, sqlStatement, userID, sessionKey)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "saving session")
 	}
 
 	// Record the login on the user. updated_at is explicitly preserved because
 	// it has ON UPDATE CURRENT_TIMESTAMP and a login is not a user modification.
+	// (On PG the rebind driver signals this idiom to the touch trigger via
+	// the fleet.preserve_updated_at GUC.)
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET last_login_at = ?, updated_at = updated_at WHERE id = ?`,
 		ds.clock.Now(), userID,
@@ -201,7 +203,6 @@ func (ds *Datastore) makeSessionInTransaction(ctx context.Context, tx sqlx.ExtCo
 		return nil, ctxerr.Wrap(ctx, err, "updating user last login")
 	}
 
-	id, _ := result.LastInsertId()           // cannot fail with the mysql driver
 	return ds.sessionByID(ctx, tx, uint(id)) //nolint:gosec // dismiss G115
 }
 

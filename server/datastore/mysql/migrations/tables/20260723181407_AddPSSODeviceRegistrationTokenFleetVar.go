@@ -17,7 +17,7 @@ func Up_20260723181407(tx *sql.Tx) error {
 	INSERT INTO fleet_variables (
 		name, is_prefix, created_at
 	) VALUES
-		('FLEET_VAR_PSSO_DEVICE_REGISTRATION_TOKEN', 0, :created_at)
+		('FLEET_VAR_PSSO_DEVICE_REGISTRATION_TOKEN', false, :created_at)
 	`
 	// use a constant time so that the generated schema is deterministic
 	createdAt := time.Date(2026, 6, 19, 0, 0, 0, 0, time.UTC)

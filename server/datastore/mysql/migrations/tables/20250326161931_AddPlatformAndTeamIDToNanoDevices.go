@@ -38,7 +38,7 @@ FROM
 	LEFT OUTER JOIN hosts h ON h.uuid = d.id
 WHERE
 	e.type = 'Device' AND
-	e.enabled = 1 AND
+	e.enabled = true AND
 	h.id IS NULL
 `
 

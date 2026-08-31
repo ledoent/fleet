@@ -22,6 +22,42 @@ func Up_20260723181401(tx *sql.Tx) error {
 	// only one that piles up. Its ON DELETE CASCADE never actually fires right now (nothing deletes windows_mdm_commands), so
 	// removing it changes no cleanup behavior and creates no orphaned rows. The insert path already verifies the command
 	// exists (MDMWindowsSaveResponse SELECTs matching commands before inserting), so the constraint is redundant there.
+	if isPostgres() {
+		// constraintsForTable's information_schema query is MySQL-shaped; look
+		// up the FK names via pg_constraint and drop with DROP CONSTRAINT.
+		rows, err := tx.Query(`
+SELECT con.conname
+FROM pg_constraint con
+JOIN pg_class rel ON rel.oid = con.conrelid
+JOIN pg_class fref ON fref.oid = con.confrelid
+WHERE con.contype = 'f'
+	AND rel.relname = 'windows_mdm_command_results'
+	AND fref.relname = 'windows_mdm_commands'`)
+		if err != nil {
+			return fmt.Errorf("getting fk for windows_mdm_command_results: %w", err)
+		}
+		var pgConstraints []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
+				return fmt.Errorf("scanning fk name: %w", err)
+			}
+			pgConstraints = append(pgConstraints, name)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterating fk names: %w", err)
+		}
+		for _, constraint := range pgConstraints {
+			quoted := `"` + strings.ReplaceAll(constraint, `"`, `""`) + `"`
+			if _, err := tx.Exec(`ALTER TABLE windows_mdm_command_results DROP CONSTRAINT ` + quoted); err != nil {
+				return fmt.Errorf("dropping fk %s: %w", constraint, err)
+			}
+		}
+		return nil
+	}
+
 	referencedTables := map[string]struct{}{"windows_mdm_commands": {}}
 	table := "windows_mdm_command_results"
 

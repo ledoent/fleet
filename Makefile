@@ -304,6 +304,26 @@ test-schema:
 	go run ./tools/dbutils ./server/datastore/mysql/schema.sql
 dump-test-schema: test-schema
 
+# check-pg-compat validates PostgreSQL-compat invariants:
+#   1. Every raw `ON DUPLICATE KEY UPDATE` site has an entry in the
+#      knownPrimaryKeys map in server/platform/postgres/rebind_driver.go.
+#   2. The MySQL canonical schema and PG baseline schema have no unexpected
+#      table-level drift (intentional drift is recorded in
+#      tools/pgcompat/known_schema_diff.txt).
+#   3. Tables that exist in both schemas have no column-level drift
+#      (intentional drift is recorded in tools/pgcompat/known_column_drift.txt).
+check-pg-compat:
+	go run ./tools/pgcompat/check_primary_keys
+	go run ./tools/pgcompat/check_primary_keys --include-migrations
+	go run ./tools/pgcompat/check_schema_drift
+	go run ./tools/pgcompat/check_column_drift
+	go run ./tools/pgcompat/check_constraint_drift
+	go run ./tools/pgcompat/check_bool_col_split
+	go run ./tools/pgcompat/gen_updated_at_triggers
+	git diff --exit-code server/datastore/mysql/pg_touch_triggers_gen.sql
+	go test -count=1 -timeout 120s ./tools/pgcompat/
+.PHONY: check-pg-compat
+
 # This is the base command to run Go tests.
 # Wrap this to run tests with presets (see `run-go-tests` and `test-go` targets).
 # PKG_TO_TEST: Go packages to test, e.g. "server/datastore/mysql".  Separate multiple packages with spaces.

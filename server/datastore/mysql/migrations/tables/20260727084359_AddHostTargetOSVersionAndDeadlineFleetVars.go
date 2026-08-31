@@ -13,12 +13,17 @@ func init() {
 }
 
 func Up_20260727084359(tx *sql.Tx) error {
+	// PG-compat: `false` instead of upstream's `0` — is_prefix is boolean on
+	// PG (integer literal is SQLSTATE 42804) and false is valid on MySQL too.
+	// Without this, a PG database whose history is still below this version
+	// (older baseline markers) runs this original and wedges the deploy; the
+	// 20260729190000 wrapper only covers databases already past it.
 	insStmt := `
 	INSERT INTO fleet_variables (
 		name, is_prefix, created_at
 	) VALUES
-		('FLEET_VAR_HOST_TARGET_OS_VERSION', 0, :created_at),
-		('FLEET_VAR_HOST_TARGET_OS_DEADLINE', 0, :created_at)
+		('FLEET_VAR_HOST_TARGET_OS_VERSION', false, :created_at),
+		('FLEET_VAR_HOST_TARGET_OS_DEADLINE', false, :created_at)
 	`
 	// use a constant time so that the generated schema is deterministic
 	createdAt := time.Date(2026, 7, 27, 0, 0, 0, 0, time.UTC)

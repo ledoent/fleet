@@ -20,7 +20,7 @@ import (
 )
 
 func TestQueries(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string
@@ -1752,7 +1752,7 @@ func testHasLabelScopedScheduledQueries(t *testing.T, ds *Datastore) {
 
 	// Add a label to the query.
 	_, err = ds.writer(ctx).ExecContext(ctx,
-		"INSERT INTO query_labels (query_id, label_id, require_all) VALUES (?, ?, 0)", q1.ID, label.ID)
+		"INSERT INTO query_labels (query_id, label_id, require_all) VALUES (?, ?, false)", q1.ID, label.ID)
 	require.NoError(t, err)
 
 	has, err = ds.HasLabelScopedScheduledQueries(ctx, nil, false)
@@ -1775,7 +1775,7 @@ func testHasLabelScopedScheduledQueries(t *testing.T, ds *Datastore) {
 	})
 	require.NoError(t, err)
 	_, err = ds.writer(ctx).ExecContext(ctx,
-		"INSERT INTO query_labels (query_id, label_id, require_all) VALUES (?, ?, 0)", q2.ID, label.ID)
+		"INSERT INTO query_labels (query_id, label_id, require_all) VALUES (?, ?, false)", q2.ID, label.ID)
 	require.NoError(t, err)
 
 	// Remove label from the global query to isolate team test.
@@ -1809,7 +1809,7 @@ func testHasLabelScopedScheduledQueries(t *testing.T, ds *Datastore) {
 	})
 	require.NoError(t, err)
 	_, err = ds.writer(ctx).ExecContext(ctx,
-		"INSERT INTO query_labels (query_id, label_id, require_all) VALUES (?, ?, 0)", q3.ID, label.ID)
+		"INSERT INTO query_labels (query_id, label_id, require_all) VALUES (?, ?, false)", q3.ID, label.ID)
 	require.NoError(t, err)
 
 	has, err = ds.HasLabelScopedScheduledQueries(ctx, &team.ID, false)
@@ -1831,7 +1831,7 @@ func testHasLabelScopedScheduledQueries(t *testing.T, ds *Datastore) {
 	})
 	require.NoError(t, err)
 	_, err = ds.writer(ctx).ExecContext(ctx,
-		"INSERT INTO query_labels (query_id, label_id, require_all) VALUES (?, ?, 0)", q4.ID, label.ID)
+		"INSERT INTO query_labels (query_id, label_id, require_all) VALUES (?, ?, false)", q4.ID, label.ID)
 	require.NoError(t, err)
 
 	has, err = ds.HasLabelScopedScheduledQueries(ctx, &team.ID, false)

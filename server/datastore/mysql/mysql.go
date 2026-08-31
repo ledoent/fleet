@@ -4,12 +4,15 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +35,7 @@ import (
 	nano_push "github.com/fleetdm/fleet/v4/server/mdm/nanomdm/push"
 	scep_depot "github.com/fleetdm/fleet/v4/server/mdm/scep/depot"
 	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
+	pg "github.com/fleetdm/fleet/v4/server/platform/postgres" // register pgx-rebind driver for PostgreSQL
 	"github.com/go-sql-driver/mysql"
 	"github.com/hashicorp/go-multierror"
 	"github.com/jmoiron/sqlx"
@@ -60,10 +64,11 @@ type Datastore struct {
 	replica fleet.DBReader // so it cannot be used to perform writes
 	primary *sqlx.DB
 
-	logger *slog.Logger
-	clock  clock.Clock
-	config config.MysqlConfig
-	pusher nano_push.Pusher
+	logger  *slog.Logger
+	clock   clock.Clock
+	config  config.MysqlConfig
+	dialect DialectHelper
+	pusher  nano_push.Pusher
 	android.Datastore
 
 	// nil if no read replica
@@ -142,11 +147,76 @@ func (ds *Datastore) reader(ctx context.Context) fleet.DBReader {
 	return ds.replica
 }
 
+// currentDatabaseFn returns the SQL function to get the current database name.
+// MySQL: DATABASE(), PostgreSQL: current_database()
+func (ds *Datastore) currentDatabaseFn() string {
+	if ds.dialect.IsPostgres() {
+		return "current_database()"
+	}
+	return "(SELECT DATABASE())"
+}
+
 // writer returns the DB instance to use for write statements, which is always
 // the primary.
 func (ds *Datastore) writer(ctx context.Context) *sqlx.DB {
 	return ds.primary
 }
+
+// Querier is any type that can execute SQL (sqlx.DB, sqlx.Tx, sqlx.ExtContext).
+type Querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// insertAndGetID executes an INSERT and returns the auto-generated ID.
+// For MySQL, uses LastInsertId(). For PostgreSQL, appends RETURNING <col>
+// where <col> is looked up per-table from the PG identity-column map (most
+// tables use "id", a handful use "serial", "profile_id", or "auto_increment").
+func (ds *Datastore) insertAndGetID(ctx context.Context, q Querier, query string, args ...any) (int64, error) {
+	if ds.dialect.IsPostgres() {
+		var id int64
+		err := q.QueryRowContext(ctx, pgReturningQuery(query), args...).Scan(&id)
+		return id, err
+	}
+	res, err := q.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// insertAndGetIDTx is like insertAndGetID but for sqlx.ExtContext (transactions).
+func insertAndGetIDTx(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, query string, args ...any) (int64, error) {
+	if dialect.IsPostgres() {
+		var id int64
+		err := tx.QueryRowxContext(ctx, pgReturningQuery(query), args...).Scan(&id)
+		return id, err
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// pgReturningQuery rewrites an INSERT statement to append RETURNING <col>,
+// stripping any trailing semicolon first. The column is determined per-table
+// via the embedded PG identity-column map (postgres.IdentityColumnFor):
+// "id" for most tables, "serial" for nano-style counter tables, etc. Falls
+// back to "id" when the table is unknown so callers that target a table not
+// in the map keep working.
+func pgReturningQuery(query string) string {
+	trimmed := strings.TrimRight(query, " \t\r\n;")
+	col := "id"
+	if m := pgInsertTablePattern.FindStringSubmatch(trimmed); m != nil {
+		if c, ok := pg.IdentityColumnFor(m[1]); ok {
+			col = c
+		}
+	}
+	return trimmed + " RETURNING " + col
+}
+
+var pgInsertTablePattern = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+(?:public\.)?["` + "`" + `]?([a-zA-Z_][a-zA-Z0-9_]*)`)
 
 // loadOrPrepareStmt will load a statement from the statement cache.
 // If not available, it will attempt to prepare (create) it.
@@ -270,6 +340,13 @@ func NewDBConnections(cfg config.MysqlConfig, opts ...DBOption) (*common_mysql.D
 	if err := checkAndModifyConfig(&cfg); err != nil {
 		return nil, err
 	}
+
+	// Set migration client dialects to match the configured driver.
+	if cfg.Driver == "postgres" {
+		tables.SetDialect("postgres")
+		data.SetDialect("postgres")
+	}
+
 	// Convert replica config once so that checkAndModifyConfig mutations are preserved for the later NewDB call.
 	var replicaConf *config.MysqlConfig
 	if options.ReplicaConfig != nil {
@@ -315,12 +392,13 @@ func NewDatastore(conns *common_mysql.DBConnections, cfg config.MysqlConfig, c c
 		logger:              conns.Options.Logger,
 		clock:               c,
 		config:              cfg,
+		dialect:             dialectForDriver(cfg.Driver),
 		readReplicaConfig:   conns.Options.ReplicaConfig,
 		writeCh:             make(chan itemToWrite),
 		stmtCache:           make(map[string]*sqlx.Stmt),
 		minLastOpenedAtDiff: conns.Options.MinLastOpenedAtDiff,
 		serverPrivateKey:    conns.Options.PrivateKey,
-		Datastore:           NewAndroidDatastore(conns.Options.Logger, conns.Primary, conns.Replica),
+		Datastore:           NewAndroidDatastore(conns.Options.Logger, conns.Primary, conns.Replica, dialectForDriver(cfg.Driver)),
 	}
 
 	go ds.writeChanLoop()
@@ -407,7 +485,47 @@ func init() {
 }
 
 func NewDB(conf *config.MysqlConfig, opts *common_mysql.DBOptions) (*sqlx.DB, error) {
+	if conf.Driver == "postgres" {
+		return newPostgresDB(conf)
+	}
 	return common_mysql.NewDB(toCommonMysqlConfig(conf), opts, otelTracedDriverName)
+}
+
+// newPostgresDB opens a PostgreSQL connection using pgx/stdlib.
+func newPostgresDB(conf *config.MysqlConfig) (*sqlx.DB, error) {
+	// Build PostgreSQL DSN from the MySQL-style config fields.
+	// Address is expected as "host:port".
+	host, port, err := net.SplitHostPort(conf.Address)
+	if err != nil {
+		host = conf.Address
+		port = "5432"
+	}
+	// default_query_exec_mode=describe_exec: pgx's default statement cache
+	// breaks with "cached plan must not change result type" (SQLSTATE 0A000)
+	// when DDL lands under a live connection — exactly our deploy flow, where
+	// `prepare db` migrations run while previous-version pods still serve.
+	// cache_describe caches parameter/field descriptions (cheap) without
+	// binding a server-side plan to the result shape.
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable default_query_exec_mode=describe_exec",
+		host, port, conf.Username, conf.Password, conf.Database,
+	)
+	if conf.TLSCA != "" {
+		dsn = fmt.Sprintf(
+			"host=%s port=%s user=%s password=%s dbname=%s sslmode=verify-ca sslrootcert=%s default_query_exec_mode=describe_exec",
+			host, port, conf.Username, conf.Password, conf.Database, conf.TLSCA,
+		)
+	}
+
+	// Use "pgx-rebind" driver which wraps pgx/stdlib and auto-converts
+	// MySQL-style ? placeholders to PostgreSQL $N placeholders.
+	db, err := sqlx.Open("pgx-rebind", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	db.SetMaxOpenConns(conf.MaxOpenConns)
+	db.SetMaxIdleConns(conf.MaxIdleConns)
+	return db, nil
 }
 
 // toCommonMysqlConfig converts a config.MysqlConfig to common_mysql.MysqlConfig.
@@ -468,7 +586,26 @@ func fromCommonMysqlConfig(conf *common_mysql.MysqlConfig) *config.MysqlConfig {
 	}
 }
 
+// dialectForDriver returns the DialectHelper for the given driver name.
+// Empty string defaults to "mysql".
+func dialectForDriver(driver string) DialectHelper {
+	switch driver {
+	case "postgres":
+		return postgresDialect{}
+	case "", "mysql":
+		return mysqlDialect{}
+	default:
+		// checkAndModifyConfig validates the driver before this is called,
+		// so reaching here means a programming error.
+		panic(fmt.Sprintf("unsupported database driver: %q", driver))
+	}
+}
+
 func checkAndModifyConfig(conf *config.MysqlConfig) error {
+	if conf.Driver != "" && conf.Driver != "mysql" && conf.Driver != "postgres" {
+		return fmt.Errorf("unsupported database driver %q: valid values are \"mysql\" and \"postgres\"", conf.Driver)
+	}
+
 	if conf.PasswordPath != "" && conf.Password != "" {
 		return errors.New("A MySQL password and a MySQL password file were provided - please specify only one")
 	}
@@ -517,11 +654,311 @@ func setupIAMAuthIfNeeded(conf *config.MysqlConfig, opts *common_mysql.DBOptions
 }
 
 func (ds *Datastore) MigrateTables(ctx context.Context) error {
+	if ds.dialect.IsPostgres() {
+		// First apply the baseline (no-op if schema already exists) and seed
+		// migration history for migrations <= marker. Then run goose Up so
+		// any newer migrations (added upstream after the baseline marker) get
+		// applied.
+		if err := ds.migratePGBaseline(ctx); err != nil {
+			return err
+		}
+		if err := tables.MigrationClient.Up(ds.writer(ctx).DB, ""); err != nil {
+			return err
+		}
+		// The generated updated_at trigger set references every table with a
+		// MySQL ON UPDATE CURRENT_TIMESTAMP column — including tables created
+		// by post-marker migrations — so it must run AFTER goose Up.
+		// CREATE OR REPLACE keeps it idempotent across prepare runs.
+		if _, err := ds.writer(ctx).ExecContext(ctx, pgTouchTriggersSQL); err != nil {
+			return ctxerr.Wrap(ctx, err, "applying PG updated_at trigger set")
+		}
+		return nil
+	}
 	return tables.MigrationClient.Up(ds.writer(ctx).DB, "")
 }
 
 func (ds *Datastore) MigrateData(ctx context.Context) error {
+	// On PG this runs through the rebind driver like table migrations. The
+	// baseline seeding marks every data migration <= the baseline marker as
+	// applied (their effects are embedded in the baseline), so goose only
+	// executes newer ones. An unconditional no-op here would leave
+	// MigrationStatus (which still checks data migrations) reporting pending
+	// forever, wedging `fleet serve` on the first post-marker data migration.
 	return data.MigrationClient.Up(ds.writer(ctx).DB, "")
+}
+
+//go:embed pg_baseline_schema.sql
+var pgBaselineSchemaSQL string
+
+//go:embed pg_baseline_post.sql
+var pgBaselinePostSQL string
+
+//go:embed pg_touch_triggers_gen.sql
+var pgTouchTriggersSQL string
+
+// pgBaselineMarkerRe matches the `pg-baseline-up-to-migration: <ts>` header
+// comment in pg_baseline_schema.sql. The timestamp records the highest
+// migration version embedded in the baseline.
+var pgBaselineMarkerRe = regexp.MustCompile(`(?m)^--\s*pg-baseline-up-to-migration:\s*(\d+)\s*$`)
+
+// parsePGBaselineMarker returns the highest migration version embedded in the
+// baseline. Returns 0 when no marker is present (older baselines), in which
+// case drift detection is skipped and a warning is logged elsewhere.
+func parsePGBaselineMarker(sql string) int64 {
+	m := pgBaselineMarkerRe.FindStringSubmatch(sql)
+	if m == nil {
+		return 0
+	}
+	v, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// migratePGBaseline applies the PG baseline schema for fresh PostgreSQL databases
+// and always runs idempotent post-baseline fixups (e.g., asserting object ownership).
+//
+// On a fresh apply it also seeds migration_status_tables with all migration
+// versions <= the baseline marker, so MigrationStatus reports correctly and
+// downstream code that queries the table sees the right history. On every
+// startup it logs a warning if the running code carries migrations newer
+// than the embedded baseline (silent drift would otherwise accumulate until
+// a feature broke at runtime).
+func (ds *Datastore) migratePGBaseline(ctx context.Context) error {
+	marker := parsePGBaselineMarker(pgBaselineSchemaSQL)
+
+	var exists bool
+	err := ds.writer(ctx).GetContext(ctx, &exists,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hosts')`)
+	if err != nil {
+		return ctxerr.Wrap(ctx, err, "checking PG schema")
+	}
+	freshApply := false
+	if exists {
+		ds.logger.InfoContext(ctx, "PostgreSQL schema already exists, skipping baseline")
+	} else {
+		ds.logger.InfoContext(ctx, "Applying PostgreSQL baseline schema", "marker_version", marker)
+		if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselineSchemaSQL); err != nil {
+			return ctxerr.Wrap(ctx, err, "applying PG baseline schema")
+		}
+		ds.logger.InfoContext(ctx, "PostgreSQL baseline schema applied successfully")
+		freshApply = true
+	}
+	if _, err := ds.writer(ctx).ExecContext(ctx, pgBaselinePostSQL); err != nil {
+		return ctxerr.Wrap(ctx, err, "applying PG post-baseline fixups")
+	}
+	// Seed unconditionally, not only on freshApply: an operator who loaded
+	// the baseline via psql has `hosts` present but an empty tracking table,
+	// and skipping the seed would make goose replay every migration against a
+	// fully-populated schema. seedPGMigrationTable's own empty-table guard
+	// makes this a no-op everywhere else.
+	if err := ds.seedPGMigrationHistory(ctx, marker); err != nil {
+		return ctxerr.Wrap(ctx, err, "seeding PG migration history")
+	}
+	if !freshApply {
+		// Rebase backstop: upstream assigns migration timestamps at authoring
+		// time and merges later, so a rebase can introduce a migration
+		// numbered BELOW the marker. On a fresh apply the seed covers it (its
+		// DDL is in the regenerated baseline), but on an existing database it
+		// would otherwise be recorded as applied without ever running.
+		if err := ds.checkPGBelowMarkerDrift(ctx, marker); err != nil {
+			return err
+		}
+	}
+	ds.warnPGMigrationDrift(ctx, marker)
+	return nil
+}
+
+// checkPGBelowMarkerDrift errors when the running code carries a table
+// migration that goose Up can never reach: one that is not applied AND is
+// numbered below the database's highest applied version (goose only runs
+// versions above the current max). This happens when a rebase pulls in an
+// upstream migration that was authored (timestamped) before migrations this
+// database has already applied — its DDL would otherwise be skipped silently,
+// forever. Migrations above the DB's max version are fine: the goose Up that
+// follows this check applies them normally (the baseline marker itself is
+// typically in that set right after a regen, which must NOT trip this check).
+func (ds *Datastore) checkPGBelowMarkerDrift(ctx context.Context, marker int64) error {
+	if marker == 0 {
+		return nil
+	}
+	var applied []int64
+	if err := ds.writer(ctx).SelectContext(ctx, &applied,
+		`SELECT DISTINCT version_id FROM migration_status_tables WHERE is_applied`); err != nil {
+		return ctxerr.Wrap(ctx, err, "loading applied PG migration history")
+	}
+	appliedSet := make(map[int64]struct{}, len(applied))
+	var dbMax int64
+	for _, v := range applied {
+		appliedSet[v] = struct{}{}
+		if v > dbMax {
+			dbMax = v
+		}
+	}
+	var missing []int64
+	for _, m := range tables.MigrationClient.Migrations {
+		if _, ok := appliedSet[m.Version]; ok || m.Version >= dbMax {
+			continue
+		}
+		// A back-dated migration with a declared porting wrapper is not
+		// drift when that wrapper already ran, or sits above the DB's max
+		// version so the goose Up following this check runs it. (The wrapper
+		// is registered by construction: PortedBelowMarker is declared in
+		// the same file as the wrapper's AddMigration init.)
+		if wrapper, ok := tables.PortedBelowMarker[m.Version]; ok {
+			if _, done := appliedSet[wrapper]; done || wrapper > dbMax {
+				continue
+			}
+		}
+		missing = append(missing, m.Version)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	slices.Sort(missing)
+	return ctxerr.Errorf(ctx,
+		"PG migration drift: %d migration(s) below this database's max applied version %d were never applied and goose cannot reach them (oldest %d, newest %d); "+
+			"a rebase likely introduced back-dated upstream migrations. Port their DDL in a new post-marker migration (or regenerate the baseline) before deploying",
+		len(missing), dbMax, missing[0], missing[len(missing)-1])
+}
+
+// seedPGMigrationHistory populates migration_status_tables and migration_status_data
+// with all known migration versions <= marker, so MigrationStatus does not falsely
+// report the DB as empty after a fresh baseline apply. No-op when marker is 0
+// (baseline has no marker — operator must regen) or when the target table already
+// has rows (guards against double-seed and never touches existing DBs).
+//
+// The embedded PG baseline is generated from a production DB via `pg_dump
+// --schema-only` then patched with the data-migration effects (builtin labels,
+// etc.). All data migrations with version <= marker have therefore already
+// produced their effects in the baseline data; we just need to record them as
+// applied so future `fleet prepare db` runs don't try to re-run them.
+func (ds *Datastore) seedPGMigrationHistory(ctx context.Context, marker int64) error {
+	if marker == 0 {
+		return nil
+	}
+	if err := ds.seedPGMigrationTable(ctx, marker, "migration_status_tables", tables.MigrationClient.Migrations); err != nil {
+		return err
+	}
+	return ds.seedPGMigrationTable(ctx, marker, "migration_status_data", data.MigrationClient.Migrations)
+}
+
+// seedPGMigrationTableAllowed is the set of tracking tables this helper is
+// allowed to write to. We string-concat tableName into a literal SQL
+// statement, so this allowlist gates gosec's G202 concern and also prevents
+// a future caller from accidentally writing to an arbitrary table.
+var seedPGMigrationTableAllowed = map[string]struct{}{
+	"migration_status_tables": {},
+	"migration_status_data":   {},
+}
+
+func (ds *Datastore) seedPGMigrationTable(ctx context.Context, marker int64, tableName string, knownMigrations goose.Migrations) error {
+	if _, ok := seedPGMigrationTableAllowed[tableName]; !ok {
+		return ctxerr.New(ctx, "seedPGMigrationTable: refusing to write to disallowed table "+tableName)
+	}
+	var existing int
+	if err := ds.writer(ctx).GetContext(ctx, &existing,
+		`SELECT COUNT(*) FROM `+tableName+` WHERE is_applied`); err != nil {
+		// Note: a partially-applied baseline can leave the tracking table
+		// missing while `hosts` is also missing — caller sees this as an error
+		// here rather than the more obvious "schema apply failed". Diagnose by
+		// running the embedded baseline against an empty PG and checking which
+		// statement errors first.
+		return ctxerr.Wrap(ctx, err, "counting existing PG migration history in "+tableName)
+	}
+	if existing > 0 {
+		return nil
+	}
+	versions := versionsAtOrBelow(knownMigrations, marker)
+	if len(versions) == 0 {
+		return nil
+	}
+	// Bulk insert with PG positional placeholders. The tracking tables have no
+	// unique constraint on version_id (goose appends a row per up/down event),
+	// so a plain INSERT is correct.
+	//
+	// versions is sorted ascending by versionsAtOrBelow → partitionMigrationVersions,
+	// so PG assigns auto-increment ids in ascending version_id order. This
+	// preserves id↔version_id alignment for any downstream consumer that
+	// (incorrectly) infers "current version" from MAX(id). The dialect's
+	// dbVersionQuery uses ORDER BY version_id DESC, id DESC for that reason
+	// — even so, a defensive sort keeps the table tidy for human inspection
+	// and protects against future query regressions.
+	var b strings.Builder
+	b.WriteString("INSERT INTO " + tableName + " (version_id, is_applied) VALUES ")
+	args := make([]any, 0, len(versions))
+	for i, v := range versions {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "($%d, true)", i+1)
+		args = append(args, v)
+	}
+	if _, err := ds.writer(ctx).ExecContext(ctx, b.String(), args...); err != nil {
+		return ctxerr.Wrap(ctx, err, "seeding "+tableName)
+	}
+	ds.logger.InfoContext(ctx, "Seeded PG migration history",
+		"table", tableName, "rows", len(versions), "marker_version", marker)
+	return nil
+}
+
+// warnPGMigrationDrift logs a loud warning when the running code has
+// migrations newer than the embedded PG baseline. The PG path has no
+// per-migration runner (migrations are MySQL DDL), so any drift means new
+// code is running against an old schema until pg_baseline_schema.sql is
+// regenerated.
+func (ds *Datastore) warnPGMigrationDrift(ctx context.Context, marker int64) {
+	if marker == 0 {
+		ds.logger.WarnContext(ctx,
+			"PostgreSQL baseline has no pg-baseline-up-to-migration marker; cannot detect migration drift",
+			"remediation", "add the marker to server/datastore/mysql/pg_baseline_schema.sql header")
+		return
+	}
+	pending := versionsAbove(tables.MigrationClient.Migrations, marker)
+	if len(pending) == 0 {
+		return
+	}
+	ds.logger.WarnContext(ctx,
+		"PostgreSQL baseline is stale: code has migrations not present in the embedded baseline",
+		"baseline_version", marker,
+		"pending_count", len(pending),
+		"oldest_pending", pending[0],
+		"newest_pending", pending[len(pending)-1],
+		"remediation", "regenerate pg_baseline_schema.sql (see file header) and bump the pg-baseline-up-to-migration marker",
+	)
+}
+
+// partitionMigrationVersions splits the migration list at marker (inclusive
+// of atOrBelow). Both returned slices are sorted ascending. One pass over the
+// input, one sort of each side — used together in migratePGBaseline so the
+// shared structure is intentional.
+func partitionMigrationVersions(ms goose.Migrations, marker int64) (atOrBelow, above []int64) {
+	atOrBelow = make([]int64, 0, len(ms))
+	above = make([]int64, 0)
+	for _, m := range ms {
+		if m.Version <= marker {
+			atOrBelow = append(atOrBelow, m.Version)
+		} else {
+			above = append(above, m.Version)
+		}
+	}
+	slices.Sort(atOrBelow)
+	slices.Sort(above)
+	return atOrBelow, above
+}
+
+// versionsAtOrBelow / versionsAbove are thin wrappers around
+// partitionMigrationVersions kept for readability at call sites — each caller
+// only needs one half of the partition. The unit tests cover both halves.
+func versionsAtOrBelow(ms goose.Migrations, marker int64) []int64 {
+	atOrBelow, _ := partitionMigrationVersions(ms, marker)
+	return atOrBelow
+}
+
+func versionsAbove(ms goose.Migrations, marker int64) []int64 {
+	_, above := partitionMigrationVersions(ms, marker)
+	return above
 }
 
 // loadMigrations manually loads the applied migrations in ascending
@@ -564,9 +1001,27 @@ func (ds *Datastore) MigrationStatus(ctx context.Context) (*fleet.MigrationStatu
 	if tables.MigrationClient.Migrations == nil || data.MigrationClient.Migrations == nil {
 		return nil, errors.New("unexpected nil migrations list")
 	}
+	// On a fresh PG install we must NOT call loadMigrations: it would invoke
+	// goose's createVersionTable to bootstrap migration_status_tables, which
+	// then collides with the CREATE TABLE for the same table in our embedded
+	// pg_baseline_schema.sql when MigrateTables runs next. Detect "fresh DB"
+	// by checking for the presence of the `hosts` table (always created by
+	// the baseline) and short-circuit to NoMigrationsCompleted in that case
+	// so prepare.go falls through to MigrateTables which applies the
+	// baseline first.
+	if ds.dialect.IsPostgres() {
+		var hostsExists bool
+		if err := ds.primary.GetContext(ctx, &hostsExists,
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hosts')`); err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "checking PG schema")
+		}
+		if !hostsExists {
+			return &fleet.MigrationStatus{StatusCode: fleet.NoMigrationsCompleted}, nil
+		}
+	}
 	appliedTable, appliedData, err := ds.loadMigrations(ctx, ds.primary.DB, ds.replica)
 	if err != nil {
-		return nil, fmt.Errorf("cannot load migrations: %w", err)
+		return nil, ctxerr.Wrap(ctx, err, "load migrations")
 	}
 	// This will only return a non-nil status if we detect the specific broken state from v4.73.2
 	status := ds.CheckFleetv4732BadMigrations(appliedTable)
@@ -761,14 +1216,23 @@ func (ds *Datastore) HealthCheck() error {
 	// Check that the primary is reachable and not in read-only mode.
 	// After an AWS Aurora failover the old writer is demoted to a reader;
 	// detecting this lets the health check fail so the orchestrator can restart Fleet.
-	var readOnly int
-	if err := ds.primary.QueryRowContext(context.Background(), "SELECT @@read_only").Scan(&readOnly); err != nil {
-		return err
-	}
-	if readOnly == 1 {
-		// Intentionally return an error so that the health check endpoint returns a 500,
-		// signaling the orchestrator (ECS, Kubernetes) to restart Fleet with fresh DB connections.
-		return errors.New("primary database is read-only, possible failover detected")
+	if ds.dialect.IsPostgres() {
+		// PG: check if the server is in recovery (read-only replica)
+		var inRecovery bool
+		if err := ds.primary.QueryRowContext(context.Background(), "SELECT pg_is_in_recovery()").Scan(&inRecovery); err != nil {
+			return err
+		}
+		if inRecovery {
+			return errors.New("primary database is in recovery (read-only), possible failover detected")
+		}
+	} else {
+		var readOnly int
+		if err := ds.primary.QueryRowContext(context.Background(), "SELECT @@read_only").Scan(&readOnly); err != nil {
+			return err
+		}
+		if readOnly == 1 {
+			return errors.New("primary database is read-only, possible failover detected")
+		}
 	}
 
 	if ds.readReplicaConfig != nil {
@@ -904,11 +1368,11 @@ func appendListOptionsToSQLSecure(sql string, opts *fleet.ListOptions, allowlist
 // The allowlist parameter maps user-facing order key names to actual SQL column expressions.
 // This prevents SQL injection and information disclosure via arbitrary column sorting.
 // See common_mysql.OrderKeyAllowlist for details.
-func appendListOptionsWithCursorToSQLSecure(sql string, params []any, opts *fleet.ListOptions, allowlist common_mysql.OrderKeyAllowlist) (string, []any, error) {
+func appendListOptionsWithCursorToSQLSecure(sql string, params []any, opts *fleet.ListOptions, allowlist common_mysql.OrderKeyAllowlist, textOrderKeys ...string) (string, []any, error) {
 	if opts.PerPage == 0 {
 		opts.PerPage = fleet.DefaultPerPage
 	}
-	return common_mysql.AppendListOptionsWithParamsSecure(sql, params, opts, allowlist)
+	return common_mysql.AppendListOptionsWithParamsSecure(sql, params, opts, allowlist, textOrderKeys...)
 }
 
 // whereFilterHostsByTeams returns the appropriate condition to use in the WHERE
@@ -998,7 +1462,7 @@ func (ds *Datastore) whereFilterHostsByTeams(filter fleet.TeamFilter, hostKey st
 // filterTableAlias is the name/alias of the table to use in generating the
 // SQL.
 func (ds *Datastore) whereFilterTeamWithGlobalStats(filter fleet.TeamFilter, filterTableAlias string) string {
-	globalFilter := fmt.Sprintf("%s.team_id = 0 AND %[1]s.global_stats = 1", filterTableAlias)
+	globalFilter := fmt.Sprintf("%s.team_id = 0 AND %[1]s.global_stats = true", filterTableAlias)
 	teamIDFilter := fmt.Sprintf("%s.team_id", filterTableAlias)
 	return ds.whereFilterGlobalOrTeamIDByTeamsWithSqlFilter(filter, globalFilter, teamIDFilter)
 }
@@ -1147,18 +1611,18 @@ func registerTLS(conf config.MysqlConfig) error {
 	return nil
 }
 
-// isForeignKeyError checks if the provided error is a MySQL child foreign key
-// error (Error #1452)
+// isForeignKeyError checks if the provided error is a child foreign-key
+// violation on either dialect: MySQL ER_NO_REFERENCED_ROW_2 (1452) or PG
+// SQLSTATE 23503 (foreign_key_violation).
 func isChildForeignKeyError(err error) bool {
 	err = ctxerr.Cause(err)
-	mysqlErr, ok := err.(*mysql.MySQLError)
-	if !ok {
-		return false
+	if mysqlErr, ok := err.(*mysql.MySQLError); ok {
+		// https://dev.mysql.com/doc/refman/5.7/en/error-messages-server.html#error_er_no_referenced_row_2
+		const ER_NO_REFERENCED_ROW_2 = 1452
+		return mysqlErr.Number == ER_NO_REFERENCED_ROW_2
 	}
-
-	// https://dev.mysql.com/doc/refman/5.7/en/error-messages-server.html#error_er_no_referenced_row_2
-	const ER_NO_REFERENCED_ROW_2 = 1452
-	return mysqlErr.Number == ER_NO_REFERENCED_ROW_2
+	// PG: pgconn.PgError with SQLSTATE 23503.
+	return pg.IsForeignKey(err)
 }
 
 type patternReplacer func(string) string
@@ -1242,6 +1706,11 @@ func replaceMatchAny(s string) string {
 }
 
 func (ds *Datastore) InnoDBStatus(ctx context.Context) (string, error) {
+	// No InnoDB on PostgreSQL; report a placeholder rather than relying on
+	// the driver to no-op the SHOW ENGINE statement (which broke scanning).
+	if ds.dialect.IsPostgres() {
+		return "n/a (PostgreSQL backend — no InnoDB engine status)", nil
+	}
 	status := struct {
 		Type   string `db:"Type"`
 		Name   string `db:"Name"`
@@ -1273,6 +1742,10 @@ func (ds *Datastore) ProcessList(ctx context.Context) ([]fleet.MySQLProcess, err
 	return processList, nil
 }
 
+// insertOnDuplicateDidInsertOrUpdate returns true if an INSERT ON DUPLICATE KEY
+// UPDATE actually inserted or updated a row (vs no-op).
+// MySQL: checks LastInsertId (non-zero on insert) AND RowsAffected (> 0).
+// PostgreSQL: LastInsertId is not available, so just checks RowsAffected > 0.
 func insertOnDuplicateDidInsertOrUpdate(res sql.Result) bool {
 	// From mysql's documentation:
 	//
@@ -1299,9 +1772,24 @@ func insertOnDuplicateDidInsertOrUpdate(res sql.Result) bool {
 	// already holds:
 	// https://github.com/go-sql-driver/mysql/blob/bcc459a906419e2890a50fc2c99ea6dd927a88f2/result.go
 
-	lastID, _ := res.LastInsertId()
+	// PostgreSQL contract: the statement MUST be built with
+	// dialect.OnDuplicateKeyGuarded so an identical re-upsert affects zero
+	// rows. ON CONFLICT DO UPDATE otherwise rewrites the row unconditionally,
+	// and for identity tables the rebind driver's RETURNING support makes
+	// LastInsertId succeed with the row's ID — both branches below would then
+	// report an unconditional true. With the guard: insert → aff=1 with a
+	// non-zero returned ID; changed update → aff=1; identical re-upsert →
+	// aff=0 and no returned row → false, matching MySQL.
 	aff, _ := res.RowsAffected()
-	// something was updated (lastID != 0) AND row was found (aff == 1 or higher if more rows were found)
+	lastID, err := res.LastInsertId()
+	if err != nil {
+		// PostgreSQL, non-identity table (no RETURNING) — RowsAffected alone
+		// distinguishes the cases when the statement is guarded.
+		return aff > 0
+	}
+	// MySQL: something was inserted (lastID != 0) AND row was found (aff > 0).
+	// PG identity tables: the guard makes a no-op return zero rows, so
+	// lastID == 0 and aff == 0.
 	return lastID != 0 && aff > 0
 }
 
@@ -1339,9 +1827,9 @@ func (ds *Datastore) optimisticGetOrInsertWithWriter(ctx context.Context, writer
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// this does not exist yet, try to insert it
-			res, err := writer.ExecContext(ctx, insertStmt.Statement, insertStmt.Args...)
+			insertedID, err := insertAndGetIDTx(ctx, writer, ds.dialect, insertStmt.Statement, insertStmt.Args...)
 			if err != nil {
-				if IsDuplicate(err) {
+				if ds.dialect.IsDuplicate(err) {
 					// it might've been created between the select and the insert, read
 					// again this time from the primary database connection.
 					id, err := readID(writer)
@@ -1352,8 +1840,7 @@ func (ds *Datastore) optimisticGetOrInsertWithWriter(ctx context.Context, writer
 				}
 				return 0, ctxerr.Wrap(ctx, err, "insert")
 			}
-			id, _ := res.LastInsertId()
-			return uint(id), nil //nolint:gosec // dismiss G115
+			return uint(insertedID), nil //nolint:gosec // dismiss G115
 		}
 		return 0, ctxerr.Wrap(ctx, err, "get id from reader")
 	}

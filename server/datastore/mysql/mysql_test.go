@@ -249,6 +249,7 @@ func mockDatastore(t *testing.T) (sqlmock.Sqlmock, *Datastore) {
 		primary: dbmock,
 		replica: dbmock,
 		logger:  slog.New(slog.DiscardHandler),
+		dialect: mysqlDialect{},
 	}
 
 	return mock, ds
@@ -812,6 +813,9 @@ func TestNewReadsPasswordFromDisk(t *testing.T) {
 }
 
 func newDSWithConfig(t *testing.T, dbName string, config config.MysqlConfig) (*Datastore, error) {
+	// MySQL-only helper: gate like CreateDS so a POSTGRES_TEST-only run (the
+	// PG CI job has no MySQL service) skips instead of failing on dial.
+	skipUnlessMySQLTest(t)
 	db, err := sql.Open(
 		"mysql",
 		fmt.Sprintf("%s:%s@tcp(%s)/?multiStatements=true", testing_utils.TestUsername, testing_utils.TestPassword,
@@ -1147,14 +1151,14 @@ func TestWhereFilterTeamWithGlobalStats(t *testing.T) {
 			filter: fleet.TeamFilter{
 				User: &fleet.User{GlobalRole: ptr.String(fleet.RoleAdmin)},
 			},
-			expected: "hosts.team_id = 0 AND hosts.global_stats = 1",
+			expected: "hosts.team_id = 0 AND hosts.global_stats = true",
 		},
 		{
 			name: "global maintainer",
 			filter: fleet.TeamFilter{
 				User: &fleet.User{GlobalRole: ptr.String(fleet.RoleMaintainer)},
 			},
-			expected: "hosts.team_id = 0 AND hosts.global_stats = 1",
+			expected: "hosts.team_id = 0 AND hosts.global_stats = true",
 		},
 		{
 			name: "global observer",
@@ -1169,7 +1173,7 @@ func TestWhereFilterTeamWithGlobalStats(t *testing.T) {
 				User:            &fleet.User{GlobalRole: ptr.String(fleet.RoleObserver)},
 				IncludeObserver: true,
 			},
-			expected: "hosts.team_id = 0 AND hosts.global_stats = 1",
+			expected: "hosts.team_id = 0 AND hosts.global_stats = true",
 		},
 
 		// Team roles
@@ -1472,6 +1476,8 @@ func TestGetContextTryStmt(t *testing.T) {
 // completes.
 func createTestDatabase(t *testing.T, dbName string) {
 	t.Helper()
+	// MySQL-only helper: see newDSWithConfig.
+	skipUnlessMySQLTest(t)
 	db, err := sql.Open(
 		"mysql",
 		fmt.Sprintf("%s:%s@tcp(%s)/?multiStatements=true", testing_utils.TestUsername, testing_utils.TestPassword,

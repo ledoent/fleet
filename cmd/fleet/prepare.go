@@ -88,8 +88,24 @@ To setup Fleet infrastructure, use one of the available commands.
 			case fleet.NoMigrationsCompleted:
 				// OK
 			case fleet.AllMigrationsCompleted:
-				fmt.Println("Migrations already completed. Nothing to do.")
-				return
+				// On MySQL, "all migrations completed" is a true no-op: we
+				// can return early. On PG, fall through to MigrateTables so
+				// pg_baseline_post.sql re-applies (idempotent fixups +
+				// trigger function installation that the baseline doesn't
+				// own). The MigrateTables PG path short-circuits the
+				// baseline-apply when the schema exists, so the cost is
+				// just running pg_baseline_post.sql.
+				//
+				// NOTE: the exact strings "Migrations already completed"
+				// and "Migrations completed." are matched by the
+				// fresh-PG-install smoke test in .github/workflows/
+				// validate-pg-compat.yml. Changing them needs a matching
+				// CI update.
+				if config.Mysql.Driver != "postgres" {
+					fmt.Println("Migrations already completed. Nothing to do.")
+					return
+				}
+				fmt.Println("Migrations already completed. Running idempotent post-baseline fixups.")
 			case fleet.SomeMigrationsCompleted:
 				if !noPrompt {
 					printMissingMigrationsPrompt(status.MissingTable, status.MissingData)

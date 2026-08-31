@@ -29,7 +29,7 @@ func flipASCIICase(s string) string {
 }
 
 func TestSessions(t *testing.T) {
-	ds := CreateMySQLDS(t)
+	ds := CreateDS(t)
 
 	cases := []struct {
 		name string

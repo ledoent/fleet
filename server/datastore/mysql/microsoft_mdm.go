@@ -43,7 +43,7 @@ func isWindowsHostConnectedToFleetMDM(ctx context.Context, q sqlx.QueryerContext
 	    JOIN host_mdm hm ON hm.host_id = h.id
 	  WHERE h.id = %d
 	    AND mwe.device_state = '`+microsoft_mdm.MDMDeviceStateEnrolled+`'
-	    AND hm.enrolled = 1 LIMIT 1
+	    AND hm.enrolled = true LIMIT 1
 	`, h.ID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -180,8 +180,13 @@ func (ds *Datastore) MDMWindowsEnqueuePollScheduleCommand(
 // enrollment. The orbit-config endpoint calls it on-change (the live capability header is only present on that request), so the OMA-DM
 // management session, which has no such header, can gate poll relaxation on the stored value.
 func (ds *Datastore) SetMDMWindowsEnrollmentFleetdSyncCapable(ctx context.Context, hostUUID string, capable bool) error {
-	if _, err := ds.writer(ctx).ExecContext(ctx,
-		`UPDATE mdm_windows_enrollments SET fleetd_sync_capable = ? WHERE host_uuid = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
+	// PG has no UPDATE … ORDER BY … LIMIT; select the newest enrollment id in a subquery.
+	stmt := `UPDATE mdm_windows_enrollments SET fleetd_sync_capable = ? WHERE host_uuid = ? ORDER BY created_at DESC, id DESC LIMIT 1`
+	if ds.dialect.IsPostgres() {
+		stmt = `UPDATE mdm_windows_enrollments SET fleetd_sync_capable = ? WHERE id = (
+			SELECT id FROM mdm_windows_enrollments WHERE host_uuid = ? ORDER BY created_at DESC, id DESC LIMIT 1)`
+	}
+	if _, err := ds.writer(ctx).ExecContext(ctx, stmt,
 		capable, hostUUID); err != nil {
 		return ctxerr.Wrap(ctx, err, "set mdm windows enrollment fleetd sync capable")
 	}
@@ -492,11 +497,15 @@ func (ds *Datastore) recomputeMDMWindowsHasPendingCommandsByEnrollmentIDs(ctx co
 		// so this clause only matters for callers that do not pre-gate, or when the loaded flag was stale. It is safe
 		// because the refresh only exists for the 1 -> 0 transition - the enqueue paths own 0 -> 1 by setting the flag
 		// directly.
-		stmt, args, err := sqlx.In(
-			`UPDATE mdm_windows_enrollments e SET e.has_pending_commands = `+windowsMDMHasPendingCommandsExpr+
-				` WHERE e.id IN (?) AND e.has_pending_commands = 1`,
-			syncml.DMClientPollIntervalLocURI, batch,
-		)
+		// PG: SET columns must be unqualified, and the boolean EXISTS needs an
+		// explicit cast to land in the smallint flag column.
+		updateStmt := `UPDATE mdm_windows_enrollments e SET e.has_pending_commands = ` + windowsMDMHasPendingCommandsExpr +
+			` WHERE e.id IN (?) AND e.has_pending_commands = 1`
+		if ds.dialect.IsPostgres() {
+			updateStmt = `UPDATE mdm_windows_enrollments e SET has_pending_commands = (` + windowsMDMHasPendingCommandsExpr + `)::int
+				WHERE e.id IN (?) AND e.has_pending_commands = 1`
+		}
+		stmt, args, err := sqlx.In(updateStmt, syncml.DMClientPollIntervalLocURI, batch)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "build recompute has_pending_commands by enrollment ids")
 		}
@@ -560,7 +569,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 			ztd_registration_id)
 		VALUES
 			(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
+		` + ds.dialect.OnDuplicateKey("mdm_hardware_id", `
 			mdm_device_id         = VALUES(mdm_device_id),
 			device_state          = VALUES(device_state),
 			device_type           = VALUES(device_type),
@@ -576,7 +585,7 @@ func (ds *Datastore) MDMWindowsInsertEnrolledDevice(ctx context.Context, device 
 			credentials_hash      = VALUES(credentials_hash),
 			credentials_acknowledged = VALUES(credentials_acknowledged),
 			-- A re-enrollment may not have ztd id, so don't overwrite.
-			ztd_registration_id   = IF(VALUES(ztd_registration_id) = '', ztd_registration_id, VALUES(ztd_registration_id))
+			ztd_registration_id   = IF(VALUES(ztd_registration_id) = '', ztd_registration_id, VALUES(ztd_registration_id))`) + `
 	`
 	_, err := ds.writer(ctx).ExecContext(
 		ctx,
@@ -618,12 +627,17 @@ func (ds *Datastore) MDMWindowsDeleteEnrolledDeviceOnReenrollment(ctx context.Co
 		delActionsStmt  = "DELETE FROM host_mdm_actions WHERE host_id = (SELECT id FROM hosts WHERE uuid = ? LIMIT 1)"
 		delProfilesStmt = "DELETE FROM host_mdm_windows_profiles WHERE host_uuid = ?"
 		// setup_experience_status_results.host_uuid is keyed by fleet.HostUUIDForSetupExperience; for Windows that's the
-		// host's OsqueryHostID, NOT the Fleet host UUID stored on the MDM enrollment. Resolve via JOIN so we delete by
-		// whichever identifier matches (works for both shapes).
-		delSetupExpStmt = `DELETE ser FROM setup_experience_status_results ser
-			JOIN hosts h ON ser.host_uuid = h.osquery_host_id OR ser.host_uuid = h.uuid
-			WHERE h.uuid = ?`
-		delUpcomingStmt = `DELETE ua FROM upcoming_activities ua JOIN hosts h ON h.id = ua.host_id WHERE h.uuid = ?`
+		// host's OsqueryHostID, NOT the Fleet host UUID stored on the MDM enrollment. Resolve via the hosts table so we
+		// delete by whichever identifier matches (works for both shapes).
+		// Cross-dialect: avoid MySQL-only "DELETE alias FROM ... JOIN" syntax.
+		delSetupExpStmt = `DELETE FROM setup_experience_status_results
+			WHERE EXISTS (
+				SELECT 1 FROM hosts h
+				WHERE (setup_experience_status_results.host_uuid = h.osquery_host_id
+					OR setup_experience_status_results.host_uuid = h.uuid)
+				AND h.uuid = ?
+			)`
+		delUpcomingStmt = `DELETE FROM upcoming_activities WHERE host_id IN (SELECT id FROM hosts WHERE uuid = ?)`
 	)
 
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
@@ -868,13 +882,13 @@ func (ds *Datastore) MDMWindowsEnqueueCommandAndUpsertHostProfiles(ctx context.C
 					detail, command_uuid, profile_name, checksum
 				)
 				VALUES %s
-				ON DUPLICATE KEY UPDATE
+				`+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 					status = VALUES(status),
 					operation_type = VALUES(operation_type),
 					detail = VALUES(detail),
 					profile_name = VALUES(profile_name),
 					checksum = VALUES(checksum),
-					command_uuid = VALUES(command_uuid)`,
+					command_uuid = VALUES(command_uuid)`),
 				strings.TrimSuffix(profileSB.String(), ","),
 			)
 			if _, err := tx.ExecContext(ctx, profileStmt, profileArgs...); err != nil {
@@ -1336,20 +1350,20 @@ func (ds *Datastore) MDMWindowsSaveResponse(ctx context.Context, enrolledDevice 
 			}
 		}
 
-		if err := updateMDMWindowsHostProfileStatusFromResponseDB(ctx, tx, potentialProfilePayloads,
+		if err := updateMDMWindowsHostProfileStatusFromResponseDB(ctx, tx, ds.dialect, potentialProfilePayloads,
 			microsoft_mdm.WindowsUserContextStateFromDevice(enrolledDevice),
 			enrolledDevice != nil && microsoft_mdm.IsValidUPN(enrolledDevice.MDMEnrollUserID)); err != nil {
 			return ctxerr.Wrap(ctx, err, "updating host profile status")
 		}
 
 		// store the command results
-		const insertResultsStmt = `
+		insertResultsStmt := `
 INSERT INTO windows_mdm_command_results
     (enrollment_id, command_uuid, raw_result, response_id, status_code)
 VALUES %s
-ON DUPLICATE KEY UPDATE
-    raw_result = COALESCE(VALUES(raw_result), raw_result),
-    status_code = COALESCE(VALUES(status_code), status_code)
+` + ds.dialect.OnDuplicateKey("enrollment_id,command_uuid", `
+    raw_result = COALESCE(VALUES(raw_result), windows_mdm_command_results.raw_result),
+    status_code = COALESCE(VALUES(status_code), windows_mdm_command_results.status_code)`) + `
 `
 		stmt = fmt.Sprintf(insertResultsStmt, strings.TrimSuffix(sb.String(), ","))
 		if _, err = tx.ExecContext(ctx, stmt, args...); err != nil {
@@ -1359,7 +1373,7 @@ ON DUPLICATE KEY UPDATE
 		// if we received a Wipe command result, update the host's status
 		if wipeCmdUUID != "" {
 			wipeSucceeded := strings.HasPrefix(wipeCmdStatus, "2")
-			rowsAffected, err := updateHostLockWipeStatusFromResultAndHostUUID(ctx, tx, enrolledDevice.HostUUID,
+			rowsAffected, err := updateHostLockWipeStatusFromResultAndHostUUID(ctx, tx, ds.dialect, enrolledDevice.HostUUID,
 				"wipe_ref", wipeCmdUUID, wipeSucceeded, false,
 			)
 			if err != nil {
@@ -1449,6 +1463,7 @@ func renewalIDManagedCertProfileUUIDsDB(ctx context.Context, tx sqlx.ExtContext,
 func updateMDMWindowsHostProfileStatusFromResponseDB(
 	ctx context.Context,
 	tx sqlx.ExtContext,
+	dialect DialectHelper,
 	payloads []*fleet.MDMWindowsProfilePayload,
 	userContextState fleet.WindowsUserContextState,
 	// userBoundEnrollment selects the hold detail wording: user-bound (Entra) enrollments wait for their enrolled user,
@@ -1463,15 +1478,15 @@ func updateMDMWindowsHostProfileStatusFromResponseDB(
 	// should be inserted from a device MDM response, so we first check for
 	// matching entries and then perform the INSERT ... ON DUPLICATE KEY to
 	// update their detail and status.
-	const updateHostProfilesStmt = `
+	updateHostProfilesStmt := `
 		INSERT INTO host_mdm_windows_profiles
 			(host_uuid, profile_uuid, detail, status, retries, command_uuid, checksum)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE
+		` + dialect.OnDuplicateKey("host_uuid,profile_uuid", `
 			checksum = VALUES(checksum),
 			detail = VALUES(detail),
 			status = VALUES(status),
-			retries = VALUES(retries)`
+			retries = VALUES(retries)`)
 
 	// MySQL will use the `host_uuid` part of the primary key as a first
 	// pass, and then filter that subset by `command_uuid`.
@@ -1580,8 +1595,11 @@ func updateMDMWindowsHostProfileStatusFromResponseDB(
 			continue
 		}
 
-		args = append(args, hp.HostUUID, hp.ProfileUUID, truncateMDMWindowsProfileDetail(payload.Detail), payload.Status, hp.Retries, hp.Checksum)
-		sb.WriteString("(?, ?, ?, ?, ?, command_uuid, ?),")
+		// command_uuid is bound to its current value rather than the MySQL-only
+		// bare-column-reference trick (invalid on PG): the ON DUPLICATE clause
+		// doesn't touch it, so the existing value is preserved either way.
+		args = append(args, hp.HostUUID, hp.ProfileUUID, truncateMDMWindowsProfileDetail(payload.Detail), payload.Status, hp.Retries, hp.CommandUUID, hp.Checksum)
+		sb.WriteString("(?, ?, ?, ?, ?, ?, ?),")
 	}
 
 	// Execute batched UPSERT for the upsert bucket.
@@ -1812,9 +1830,9 @@ func (ds *Datastore) SetMDMWindowsAwaitingConfiguration(ctx context.Context, mdm
 // - host_disks: hd
 func (ds *Datastore) whereBitLockerStatus(ctx context.Context, status fleet.DiskEncryptionStatus, bitLockerPINRequired bool) string {
 	const (
-		whereNotServer        = `(hmdm.is_server IS NOT NULL AND hmdm.is_server = 0)`
-		whereKeyAvailable     = `(hdek.base64_encrypted IS NOT NULL AND hdek.base64_encrypted != '' AND hdek.decryptable IS NOT NULL AND hdek.decryptable = 1)`
-		whereEncrypted        = `(hd.encrypted IS NOT NULL AND hd.encrypted = 1)`
+		whereNotServer        = `(hmdm.is_server IS NOT NULL AND hmdm.is_server = false)`
+		whereKeyAvailable     = `(hdek.base64_encrypted IS NOT NULL AND hdek.base64_encrypted != '' AND hdek.decryptable IS NOT NULL AND hdek.decryptable = true)`
+		whereEncrypted        = `(hd.encrypted IS NOT NULL AND hd.encrypted = true)`
 		whereHostDisksUpdated = `(hd.updated_at IS NOT NULL AND hdek.updated_at IS NOT NULL AND hd.updated_at >= hdek.updated_at)`
 		whereClientError      = `(hdek.client_error IS NOT NULL AND hdek.client_error != '')`
 		withinGracePeriod     = `(hdek.updated_at IS NOT NULL AND hdek.updated_at >= DATE_SUB(NOW(6), INTERVAL 1 HOUR))`
@@ -1920,8 +1938,8 @@ FROM
 WHERE
     mwe.device_state = '%s' AND
     h.platform = 'windows' AND
-    hmdm.is_server = 0 AND
-    hmdm.enrolled = 1 AND
+    hmdm.is_server = false AND
+    hmdm.enrolled = true AND
     %s`
 
 	var args []interface{}
@@ -2606,8 +2624,8 @@ FROM
 WHERE
     mwe.device_state = '%s' AND
     h.platform = 'windows' AND
-    hmdm.is_server = 0 AND
-    hmdm.enrolled = 1 AND
+    hmdm.is_server = false AND
+    hmdm.enrolled = true AND
     %s
 GROUP BY
     final_status`,
@@ -2703,8 +2721,8 @@ FROM
 WHERE
     mwe.device_state = '%s' AND
     h.platform = 'windows' AND
-    hmdm.is_server = 0 AND
-    hmdm.enrolled = 1 AND
+    hmdm.is_server = false AND
+    hmdm.enrolled = true AND
     %s
 GROUP BY
     final_status`,
@@ -2760,13 +2778,13 @@ func (ds *Datastore) BulkUpsertMDMWindowsHostProfiles(ctx context.Context, paylo
 	      checksum
             )
             VALUES %s
-	    ON DUPLICATE KEY UPDATE
+	    `+ds.dialect.OnDuplicateKey("host_uuid,profile_uuid", `
               status = VALUES(status),
               operation_type = VALUES(operation_type),
               detail = VALUES(detail),
               profile_name = VALUES(profile_name),
               checksum = VALUES(checksum),
-              command_uuid = VALUES(command_uuid)`,
+              command_uuid = VALUES(command_uuid)`),
 			strings.TrimSuffix(valuePart, ","),
 		)
 
@@ -2999,7 +3017,7 @@ func (ds *Datastore) NewMDMWindowsConfigProfile(ctx context.Context, cp fleet.MD
 	insertProfileStmt := `
 INSERT INTO
     mdm_windows_configuration_profiles (profile_uuid, team_id, name, syncml, uploaded_at)
-(SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP() FROM DUAL WHERE
+(SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP` + ds.dialect.FromDual() + ` WHERE
 	NOT EXISTS (
 		SELECT 1 FROM mdm_apple_configuration_profiles WHERE name = ? AND team_id = ?
 	) AND NOT EXISTS (
@@ -3061,7 +3079,7 @@ INSERT INTO
 		if len(labels) == 0 {
 			profsWithoutLabel = append(profsWithoutLabel, profileUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profsWithoutLabel, "windows"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profsWithoutLabel, "windows"); err != nil {
 			return ctxerr.Wrap(ctx, err, "inserting windows profile label associations")
 		}
 
@@ -3073,7 +3091,7 @@ INSERT INTO
 					FleetVariables: usesFleetVars,
 				},
 			}
-			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, profilesVarsToUpsert, "windows", false); err != nil {
+			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, profilesVarsToUpsert, "windows", false); err != nil {
 				return ctxerr.Wrap(ctx, err, "inserting windows profile variable associations")
 			}
 		}
@@ -3081,7 +3099,7 @@ INSERT INTO
 		// An OS-update profile is tracked as the team's OS-update profile within
 		// this transaction so it rolls back together on failure.
 		if fleet.ProfileTargetsReservedLocURI(cp.SyncML, syncml.FleetOSUpdateTargetLocURI) {
-			if err := trackWindowsUpdateConfigProfileDB(ctx, tx, teamID, profileUUID); err != nil {
+			if err := trackWindowsUpdateConfigProfileDB(ctx, tx, ds.dialect, teamID, profileUUID); err != nil {
 				return err
 			}
 		}
@@ -3159,7 +3177,7 @@ func (ds *Datastore) UpdateMDMWindowsConfigProfile(ctx context.Context, cp fleet
 			// edited away from OS-update content must stop blocking the team's
 			// OS updates setting.
 			if bytes.Contains(cp.SyncML, []byte(syncml.FleetOSUpdateTargetLocURI)) {
-				if err := trackWindowsUpdateConfigProfileDB(ctx, tx, teamID, cp.ProfileUUID); err != nil {
+				if err := trackWindowsUpdateConfigProfileDB(ctx, tx, ds.dialect, teamID, cp.ProfileUUID); err != nil {
 					return err
 				}
 			} else if err := untrackWindowsUpdateConfigProfileDB(ctx, tx, cp.ProfileUUID); err != nil {
@@ -3170,7 +3188,7 @@ func (ds *Datastore) UpdateMDMWindowsConfigProfile(ctx context.Context, cp fleet
 			// unconditionally, so an edit that removes the profile's last Fleet
 			// variable still clears the stale association. A labels-only update
 			// must leave them alone or variable-driven resends would break.
-			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, []fleet.MDMProfileUUIDFleetVariables{
+			if _, err := batchSetProfileVariableAssociationsDB(ctx, tx, ds.dialect, []fleet.MDMProfileUUIDFleetVariables{
 				{ProfileUUID: cp.ProfileUUID, FleetVariables: usesFleetVars},
 			}, "windows", false); err != nil {
 				return ctxerr.Wrap(ctx, err, "updating windows profile variable associations")
@@ -3200,7 +3218,7 @@ func (ds *Datastore) UpdateMDMWindowsConfigProfile(ctx context.Context, cp fleet
 		if len(labels) == 0 {
 			profsWithoutLabel = append(profsWithoutLabel, cp.ProfileUUID)
 		}
-		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, labels, profsWithoutLabel, "windows"); err != nil {
+		if _, err := batchSetProfileLabelAssociationsDB(ctx, tx, ds.dialect, labels, profsWithoutLabel, "windows"); err != nil {
 			return ctxerr.Wrap(ctx, err, "updating windows profile label associations")
 		}
 
@@ -3222,7 +3240,7 @@ func (ds *Datastore) SetOrUpdateMDMWindowsConfigProfile(ctx context.Context, cp 
 	stmt := `
 INSERT INTO
 	mdm_windows_configuration_profiles (profile_uuid, team_id, name, syncml, uploaded_at)
-(SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP() FROM DUAL WHERE
+(SELECT ?, ?, ?, ?, CURRENT_TIMESTAMP` + ds.dialect.FromDual() + ` WHERE
 	NOT EXISTS (
 		SELECT 1 FROM mdm_apple_configuration_profiles WHERE name = ? AND team_id = ?
 	) AND NOT EXISTS (
@@ -3231,9 +3249,11 @@ INSERT INTO
 		SELECT 1 FROM mdm_android_configuration_profiles WHERE name = ? AND team_id = ?
 	)
 )
-ON DUPLICATE KEY UPDATE
-	uploaded_at = IF(syncml = VALUES(syncml), uploaded_at, CURRENT_TIMESTAMP()),
-	syncml = VALUES(syncml)
+` + ds.dialect.OnDuplicateKey("team_id,name", `
+	uploaded_at = CASE WHEN mdm_windows_configuration_profiles.syncml = VALUES(syncml)
+	                   THEN mdm_windows_configuration_profiles.uploaded_at
+	                   ELSE CURRENT_TIMESTAMP END,
+	syncml = VALUES(syncml)`) + `
 `
 
 	var teamID uint
@@ -3347,19 +3367,18 @@ WHERE
 `
 
 	// For Windows profiles, if team_id and name are the same, we do an update. Otherwise, we do an insert.
-	const insertNewOrEditedProfile = `
+	// UUID is generated in Go so both MySQL and PostgreSQL receive it as a parameter.
+	insertNewOrEditedProfile := `
 INSERT INTO
   mdm_windows_configuration_profiles (
     profile_uuid, team_id, name, syncml, uploaded_at
   )
 VALUES
-  -- see https://stackoverflow.com/a/51393124/1094941
-  ( CONCAT('` + fleet.MDMWindowsProfileUUIDPrefix + `', CONVERT(UUID() USING utf8mb4)), ?, ?, ?, CURRENT_TIMESTAMP() )
-ON DUPLICATE KEY UPDATE
-  uploaded_at = IF(syncml = VALUES(syncml) AND name = VALUES(name), uploaded_at, CURRENT_TIMESTAMP()),
+  (?, ?, ?, ?, CURRENT_TIMESTAMP)
+` + ds.dialect.OnDuplicateKeyGuarded("mdm_windows_configuration_profiles", "team_id,name", `
+  uploaded_at = CASE WHEN mdm_windows_configuration_profiles.syncml = VALUES(syncml) AND mdm_windows_configuration_profiles.name = VALUES(name) THEN mdm_windows_configuration_profiles.uploaded_at ELSE CURRENT_TIMESTAMP END,
   name = VALUES(name),
-  syncml = VALUES(syncml)
-`
+  syncml = VALUES(syncml)`, "syncml")
 
 	// use a profile team id of 0 if no-team
 	var profTeamID uint
@@ -3486,7 +3505,8 @@ ON DUPLICATE KEY UPDATE
 
 	// insert the new profiles and the ones that have changed
 	for _, p := range incomingProfs {
-		if result, err = tx.ExecContext(ctx, insertNewOrEditedProfile, profTeamID, p.Name,
+		profileUUID := fleet.MDMWindowsProfileUUIDPrefix + uuid.New().String()
+		if result, err = tx.ExecContext(ctx, insertNewOrEditedProfile, profileUUID, profTeamID, p.Name,
 			p.SyncML); err != nil {
 			return false, nil, ctxerr.Wrapf(ctx, err, "insert new/edited profile with name %q", p.Name)
 		}
@@ -3561,8 +3581,7 @@ func (ds *Datastore) WipeHostViaWindowsMDM(ctx context.Context, host *fleet.Host
 				fleet_platform
 			)
 			VALUES (?, ?, ?)
-			ON DUPLICATE KEY UPDATE
-				wipe_ref   = VALUES(wipe_ref)`
+			` + ds.dialect.OnDuplicateKey("host_id", `wipe_ref = VALUES(wipe_ref)`)
 
 		if _, err := tx.ExecContext(ctx, stmt, host.ID, cmd.CommandUUID, host.FleetPlatform()); err != nil {
 			return ctxerr.Wrap(ctx, err, "modifying host_mdm_actions for wipe_ref")
@@ -3731,11 +3750,25 @@ func (ds *Datastore) CleanupWindowsMDMCommandQueue(ctx context.Context) error {
 	// (enrollment_id, acked_at)'s acked_at part. The 1-hour age floor preserves the resend/debugging window the join-based predicate
 	// had via r.created_at. ORDER BY makes the LIMIT deterministic (oldest acknowledged rows first) and keeps the optimizer on the
 	// acked_at index for a bounded range delete.
-	const stmt = `
+	// PostgreSQL does not support DELETE … ORDER BY … LIMIT, so it batches via a tuple-IN subquery.
+	var stmt string
+	if ds.dialect.IsPostgres() {
+		stmt = `
+DELETE FROM windows_mdm_command_queue
+WHERE (enrollment_id, command_uuid) IN (
+    SELECT enrollment_id, command_uuid
+    FROM windows_mdm_command_queue
+    WHERE acked_at IS NOT NULL AND acked_at < NOW() - INTERVAL '1 hour'
+    ORDER BY acked_at
+    LIMIT ?
+)`
+	} else {
+		stmt = `
 DELETE FROM windows_mdm_command_queue
 WHERE acked_at IS NOT NULL AND acked_at < NOW() - INTERVAL 1 HOUR
 ORDER BY acked_at
 LIMIT ?`
+	}
 	const maxBatches = 500 // cap total work per cron tick (500k rows)
 	var totalDeleted int64
 	exhausted := true
@@ -3764,11 +3797,13 @@ LIMIT ?`
 // when the profile was edited or deleted). Once every host has moved past that version (re-installed to a newer one, drained its
 // removal, or unenrolled), the row is dropped.
 func (ds *Datastore) CleanupWindowsMDMProfilePriorContent(ctx context.Context) error {
+	// Cross-dialect: avoid MySQL-only "DELETE alias FROM table alias" syntax.
 	const stmt = `
-DELETE pc FROM mdm_windows_configuration_profiles_prior_content pc
+DELETE FROM mdm_windows_configuration_profiles_prior_content
 WHERE NOT EXISTS (
 	SELECT 1 FROM host_mdm_windows_profiles hmwp
-	WHERE hmwp.profile_uuid = pc.profile_uuid AND hmwp.checksum = pc.checksum
+	WHERE hmwp.profile_uuid = mdm_windows_configuration_profiles_prior_content.profile_uuid
+		AND hmwp.checksum = mdm_windows_configuration_profiles_prior_content.checksum
 )`
 	if _, err := ds.writer(ctx).ExecContext(ctx, stmt); err != nil {
 		return ctxerr.Wrap(ctx, err, "cleanup windows mdm profile prior content")
@@ -3792,9 +3827,9 @@ func (ds *Datastore) HasWindowsUpdateConfigProfileConfigured(ctx context.Context
 
 // trackWindowsUpdateConfigProfileDB records profileUUID as the team's OS-update
 // profile within the caller's transaction
-func trackWindowsUpdateConfigProfileDB(ctx context.Context, tx sqlx.ExtContext, teamID uint, profileUUID string) error {
-	const insertStmt = `INSERT INTO mdm_configuration_profile_update_settings (windows_profile_uuid) VALUES (?)
-		ON DUPLICATE KEY UPDATE windows_profile_uuid = windows_profile_uuid`
+func trackWindowsUpdateConfigProfileDB(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, teamID uint, profileUUID string) error {
+	insertStmt := dialect.InsertIgnoreInto() + ` mdm_configuration_profile_update_settings (windows_profile_uuid) VALUES (?)` +
+		dialect.OnConflictDoNothing("windows_profile_uuid")
 	if _, err := tx.ExecContext(ctx, insertStmt, profileUUID); err != nil {
 		return ctxerr.Wrap(ctx, err, "inserting software update profile")
 	}

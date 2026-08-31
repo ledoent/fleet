@@ -17,14 +17,16 @@ type AndroidDatastore struct {
 	logger  *slog.Logger
 	primary *sqlx.DB
 	replica fleet.DBReader // so it cannot be used to perform writes
+	dialect DialectHelper
 }
 
 // NewAndroidDatastore creates a new Android Datastore
-func NewAndroidDatastore(logger *slog.Logger, primary *sqlx.DB, replica fleet.DBReader) android.Datastore {
+func NewAndroidDatastore(logger *slog.Logger, primary *sqlx.DB, replica fleet.DBReader, dialect DialectHelper) android.Datastore {
 	return &AndroidDatastore{
 		logger:  logger,
 		primary: primary,
 		replica: replica,
+		dialect: dialect,
 	}
 }
 

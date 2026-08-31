@@ -51,6 +51,12 @@ func getTestAddress() string {
 }
 
 func newDBConnForTests(t *testing.T) *sqlx.DB {
+	// Migration tests are MySQL-only (they replay real MySQL DDL); without
+	// the gate, a POSTGRES_TEST-only environment (the PG CI job) fails on
+	// connection errors instead of skipping.
+	if _, ok := os.LookupEnv("MYSQL_TEST"); !ok {
+		t.Skip("MySQL-only migration test: requires MYSQL_TEST=1")
+	}
 	db, err := sqlx.Open(
 		"mysql",
 		fmt.Sprintf("%s:%s@tcp(%s)/?charset=utf8mb4&parseTime=true&loc=UTC&multiStatements=true", testUsername, testPassword, testAddress),

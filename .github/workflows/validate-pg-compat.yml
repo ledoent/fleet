@@ -1,0 +1,220 @@
+name: Validate PG Compatibility
+
+on:
+  push:
+    branches:
+      - main
+      - patch-*
+      - prepare-*
+      - aggregated
+      # Direct pushes to the PG branch must run this: Aggregate & Push
+      # (ledoent branch) chains off this workflow's success via workflow_run.
+      - feat/pg-compat-rebased
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'server/datastore/mysql/schema.sql'
+      - 'server/datastore/mysql/pg_baseline_schema.sql'
+      - 'server/platform/postgres/rebind_driver.go'
+      - 'server/platform/postgres/schema_bool_cols_gen.go'
+      - 'tools/pgcompat/**'
+      - '.github/workflows/validate-pg-compat.yml'
+  pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'server/datastore/mysql/schema.sql'
+      - 'server/datastore/mysql/pg_baseline_schema.sql'
+      - 'server/platform/postgres/rebind_driver.go'
+      - 'server/platform/postgres/schema_bool_cols_gen.go'
+      - 'tools/pgcompat/**'
+      - '.github/workflows/validate-pg-compat.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  validate-pg-compat:
+    name: PG compatibility checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+        with:
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: knownPrimaryKeys completeness (runtime sites)
+        run: go run ./tools/pgcompat/check_primary_keys
+
+      - name: knownPrimaryKeys completeness (including migrations)
+        run: go run ./tools/pgcompat/check_primary_keys --include-migrations
+
+      - name: MySQL ↔ PG schema drift (tables)
+        run: go run ./tools/pgcompat/check_schema_drift
+
+      - name: MySQL ↔ PG schema drift (columns)
+        run: go run ./tools/pgcompat/check_column_drift
+
+      - name: MySQL ↔ PG constraint/index drift
+        run: go run ./tools/pgcompat/check_constraint_drift
+
+      - name: Boolean/smallint split column names
+        run: go run ./tools/pgcompat/check_bool_col_split
+
+      - name: Validator regression test (gate-of-the-gate)
+        run: go test -count=1 -timeout 120s ./tools/pgcompat/
+
+      - name: schemaIdentityCols generated file is up to date
+        run: |
+          go run ./tools/pgcompat/gen_identity_cols
+          git diff --exit-code server/platform/postgres/schema_identity_cols_gen.go || \
+            { echo "schema_identity_cols_gen.go is stale — run: go run ./tools/pgcompat/gen_identity_cols"; exit 1; }
+
+      - name: updated_at trigger set is up to date
+        run: |
+          go run ./tools/pgcompat/gen_updated_at_triggers
+          git diff --exit-code server/datastore/mysql/pg_touch_triggers_gen.sql || \
+            { echo "pg_touch_triggers_gen.sql is stale — run: go run ./tools/pgcompat/gen_updated_at_triggers"; exit 1; }
+
+      # Pure-Go checks first; docker-dependent steps last so an infra hiccup
+      # (image pull, network) doesn't mask a real schema/code regression.
+      - name: schemaBoolCols generated file is up to date
+        run: |
+          go run ./tools/pgcompat/gen_bool_cols
+          git diff --exit-code server/platform/postgres/schema_bool_cols_gen.go || \
+            { echo "schema_bool_cols_gen.go is stale — run: go run ./tools/pgcompat/gen_bool_cols"; exit 1; }
+
+      # Fresh PG install smoke test. Spins up an empty PG, runs `fleet prepare
+      # db` to apply the embedded baseline + any post-marker migrations, then
+      # runs it again to verify idempotency. This catches any drift between
+      # what migrations actually do on PG vs what the baseline + seedPGMigrationHistory
+      # claim has happened. The migration_status_tables short-circuit and the
+      # goose GetDBVersion panic that shipped on 2026-05-11 would have been
+      # caught here on PR.
+      - name: Start postgres for fresh-install smoke test
+        run: docker compose -f docker-compose.yml up -d postgres_test
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 60); do
+            if docker compose exec -T postgres_test pg_isready -U fleet > /dev/null 2>&1; then
+              echo "postgres_test is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Timeout waiting for postgres_test"
+          docker compose logs postgres_test
+          exit 1
+
+      - name: Build fleet binary
+        # go mod download retries first: proxy.golang.org occasionally aborts
+        # module zips mid-stream (INTERNAL_ERROR), which is retriable but
+        # fails a single go build outright (observed 2026-07-07).
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && break
+            echo "go mod download failed (attempt $attempt); retrying..."
+            sleep 10
+          done
+          go build -o /tmp/fleet ./cmd/fleet
+
+      - name: Fresh PG install — prepare db (first run)
+        env:
+          FLEET_MYSQL_DRIVER: postgres
+          FLEET_MYSQL_ADDRESS: 127.0.0.1:5434
+          FLEET_MYSQL_USERNAME: fleet
+          FLEET_MYSQL_PASSWORD: insecure
+          FLEET_MYSQL_DATABASE: fleet
+        run: |
+          /tmp/fleet prepare db --no-prompt 2>&1 | tee /tmp/prepare-first.log
+          # The first run must apply the baseline and run any post-marker
+          # migrations. We assert the final line is "Migrations completed."
+          # (from cmd/fleet/prepare.go) — anything else indicates failure.
+          if ! tail -5 /tmp/prepare-first.log | grep -q "Migrations completed"; then
+            echo "ERROR: first prepare db did not complete cleanly"
+            exit 1
+          fi
+
+      - name: Fresh PG install — prepare db (second run, idempotency check)
+        env:
+          FLEET_MYSQL_DRIVER: postgres
+          FLEET_MYSQL_ADDRESS: 127.0.0.1:5434
+          FLEET_MYSQL_USERNAME: fleet
+          FLEET_MYSQL_PASSWORD: insecure
+          FLEET_MYSQL_DATABASE: fleet
+        run: |
+          /tmp/fleet prepare db --no-prompt 2>&1 | tee /tmp/prepare-second.log
+          # The second run must report "Migrations already completed" — we
+          # then run idempotent post-baseline fixups (trigger function etc.)
+          # which is safe. If we see "Migrations completed." without the
+          # "already" qualifier, the first run was incomplete and we have
+          # hidden drift between code and DB state.
+          if ! grep -q "Migrations already completed" /tmp/prepare-second.log; then
+            echo "ERROR: second prepare db did work — first run was incomplete"
+            cat /tmp/prepare-second.log
+            exit 1
+          fi
+
+      - name: Fresh PG install — verify table ownership
+        run: |
+          # pg_baseline_post.sql wraps ALTER OWNER in EXCEPTION blocks so
+          # individual failures don't abort the script. On the smoke-test
+          # fresh DB, every table SHOULD end up owned by `fleet`. Assert it
+          # so a regression in the ownership-fixup logic surfaces here
+          # rather than as latent breakage later.
+          docker compose exec -T postgres_test psql -U fleet -d fleet -tAc \
+            "SELECT COUNT(*) FROM pg_tables WHERE schemaname='public' AND tableowner != 'fleet'" \
+            > /tmp/wrong-owner-count
+          wrong=$(cat /tmp/wrong-owner-count | tr -d ' \n')
+          if [ "$wrong" != "0" ]; then
+            echo "ERROR: $wrong tables in public schema are not owned by fleet"
+            docker compose exec -T postgres_test psql -U fleet -d fleet -c \
+              "SELECT tablename, tableowner FROM pg_tables WHERE schemaname='public' AND tableowner != 'fleet'"
+            exit 1
+          fi
+
+      - name: Cleanup postgres
+        if: always()
+        run: docker compose -f docker-compose.yml down --volumes
+
+      - name: Inventory PG test skips
+        if: always()
+        run: |
+          set +e
+          # PG-specific skips use the isPG(ds) helper, not a TODO-string
+          # convention (the old grep matched nothing and reported Total: 0
+          # forever).
+          matches=$(grep -rEn 'isPG\(ds\)' server/datastore/mysql/ --include='*_test.go' 2>/dev/null)
+          count=$(printf '%s' "$matches" | grep -c . || true)
+          {
+            echo "## PG test skip ledger"
+            echo "Total: \`$count\`"
+            if [ "$count" -gt 0 ]; then
+              echo ''
+              echo '```'
+              echo "$matches"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -194,7 +194,7 @@ func (ds *Datastore) GetCertificateTemplatesByTeamID(ctx context.Context, teamID
 
 func (ds *Datastore) CreateCertificateTemplate(ctx context.Context, certificateTemplate *fleet.CertificateTemplate) (*fleet.CertificateTemplateResponse, error) {
 	sanArg := subjectAlternativeNameForStorage(certificateTemplate.SubjectAlternativeName)
-	result, err := ds.writer(ctx).ExecContext(ctx, `
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), `
 		INSERT INTO certificate_templates (
 			name,
 			team_id,
@@ -205,15 +205,10 @@ func (ds *Datastore) CreateCertificateTemplate(ctx context.Context, certificateT
 	`, certificateTemplate.Name, certificateTemplate.TeamID, certificateTemplate.CertificateAuthorityID,
 		certificateTemplate.SubjectName, sanArg)
 	if err != nil {
-		if IsDuplicate(err) {
+		if ds.dialect.IsDuplicate(err) {
 			return nil, ctxerr.Wrap(ctx, alreadyExists("CertificateTemplate", certificateTemplate.Name), "inserting certificate_template")
 		}
 		return nil, ctxerr.Wrap(ctx, err, "inserting certificate_template")
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return nil, ctxerr.Wrap(ctx, err, "getting last insert id for certificate_template")
 	}
 
 	storedSAN := ""
@@ -260,19 +255,17 @@ func (ds *Datastore) BatchUpsertCertificateTemplates(ctx context.Context, certif
 
 	// On duplicate (team_id, name), this is a no-op for content-bearing fields. SubjectName,
 	// CertificateAuthorityID, and SubjectAlternativeName changes are handled upstream, so the
-	// upsert intentionally does not propagate updates.
-	const sqlInsertCertificate = `
-		INSERT INTO certificate_templates (
-			name,
-			team_id,
-			certificate_authority_id,
-			subject_name,
-			subject_alternative_name
-		) VALUES (?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			name = VALUES(name),
-			team_id = VALUES(team_id)
-	`
+	// upsert intentionally does not propagate updates. The guard columns are the conflict
+	// columns themselves, so on PG the DO UPDATE never fires (RowsAffected()=0 for existing
+	// rows, matching MySQL's no-op semantics).
+	sqlInsertCertificate := `
+	INSERT INTO certificate_templates (
+		name, team_id, certificate_authority_id, subject_name, subject_alternative_name
+	) VALUES (?, ?, ?, ?, ?)
+	` + ds.dialect.OnDuplicateKeyGuarded("certificate_templates", "team_id,name", `
+		name = VALUES(name),
+		team_id = VALUES(team_id)
+	`, "name", "team_id")
 
 	teamsModifiedSet := make(map[uint]struct{})
 	for _, cert := range certificateTemplates {
@@ -327,7 +320,7 @@ func (ds *Datastore) BatchDeleteCertificateTemplates(ctx context.Context, certif
 // setCertTemplateVariableAssociations replaces the variable associations for a
 // certificate template in mdm_configuration_profile_variables. It deletes
 // existing rows and inserts fresh ones for the given fleetVars.
-func setCertTemplateVariableAssociations(ctx context.Context, tx sqlx.ExtContext, certTemplateID uint, fleetVars []fleet.FleetVarName) error {
+func setCertTemplateVariableAssociations(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, certTemplateID uint, fleetVars []fleet.FleetVarName) error {
 	// Always clear existing associations first.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM mdm_configuration_profile_variables WHERE certificate_template_id = ?`, certTemplateID); err != nil {
 		return ctxerr.Wrap(ctx, err, "deleting cert template variable associations")
@@ -369,8 +362,8 @@ func setCertTemplateVariableAssociations(ctx context.Context, tx sqlx.ExtContext
 	stmt := fmt.Sprintf(`
 		INSERT INTO mdm_configuration_profile_variables (certificate_template_id, fleet_variable_id)
 		VALUES %s
-		ON DUPLICATE KEY UPDATE fleet_variable_id = VALUES(fleet_variable_id)
-	`, strings.TrimSuffix(values.String(), ","))
+		`+dialect.OnDuplicateKey("certificate_template_id,fleet_variable_id", "fleet_variable_id = VALUES(fleet_variable_id)"),
+		strings.TrimSuffix(values.String(), ","))
 
 	if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 		return ctxerr.Wrap(ctx, err, "inserting cert template variable associations")
@@ -379,7 +372,7 @@ func setCertTemplateVariableAssociations(ctx context.Context, tx sqlx.ExtContext
 }
 
 func (ds *Datastore) SetCertificateTemplateVariables(ctx context.Context, certTemplateID uint, fleetVars []fleet.FleetVarName) error {
-	return setCertTemplateVariableAssociations(ctx, ds.writer(ctx), certTemplateID, fleetVars)
+	return setCertTemplateVariableAssociations(ctx, ds.writer(ctx), ds.dialect, certTemplateID, fleetVars)
 }
 
 func (ds *Datastore) GetHostCertificateTemplates(ctx context.Context, hostUUID string) ([]fleet.HostCertificateTemplate, error) {
@@ -437,7 +430,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForExistingHosts(
 			(hosts.team_id = ? OR (? = 0 AND hosts.team_id IS NULL)) AND
 			hosts.platform = '%s' AND
 			host_mdm.enrolled = 1
-		ON DUPLICATE KEY UPDATE host_uuid = host_uuid
+		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `host_uuid = VALUES(host_uuid)`)+`
 	`, fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall, fleet.AndroidPlatform)
 	result, err := ds.writer(ctx).ExecContext(ctx, stmt, certificateTemplateID, teamID, teamID)
 	if err != nil {
@@ -472,7 +465,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForNewHost(
 			UUID_TO_BIN(UUID(), true)
 		FROM certificate_templates
 		WHERE team_id = ?
-		ON DUPLICATE KEY UPDATE
+		`+ds.dialect.OnDuplicateKey("host_uuid,certificate_template_id", `
 		    -- Unconditionally reset to pending install with a new UUID so the certificate is
 		    -- re-delivered. This handles re-enrollment after work profile removal, where the device
 		    -- lost all certs but the old records may still exist. Clear stale certificate metadata
@@ -486,7 +479,7 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForNewHost(
 			not_valid_after = NULL,
 			serial = NULL,
 			detail = NULL
-	`, fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall,
+	`), fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall,
 		fleet.CertificateTemplatePending, fleet.MDMOperationTypeInstall)
 	result, err := ds.writer(ctx).ExecContext(ctx, stmt, hostUUID, teamID)
 	if err != nil {
@@ -499,41 +492,61 @@ func (ds *Datastore) CreatePendingCertificateTemplatesForNewHost(
 // to MaxCertificateInstallRetries so that the next failure is terminal with no automatic retry,
 // giving the resend exactly one attempt. This matches Apple resend behavior.
 func (ds *Datastore) ResendHostCertificateTemplate(ctx context.Context, hostID uint, templateID uint) error {
-	stmt := fmt.Sprintf(`
-		UPDATE
-			host_certificate_templates hct
-		INNER JOIN
-			hosts h ON h.uuid = hct.host_uuid
-		SET
-			hct.uuid = UUID_TO_BIN(UUID(), true),
-			hct.fleet_challenge = NULL,
-			hct.not_valid_before = NULL,
-			hct.not_valid_after = NULL,
-			hct.serial = NULL,
-			hct.detail = NULL,
-			hct.retry_count = %d,
-			hct.status = ?
-		WHERE
-			h.id = ? AND
-			hct.certificate_template_id = ?
-		`, fleet.MaxCertificateInstallRetries)
-
-	const deleteChallenge = `
-		DELETE c FROM
-			challenges c
-		INNER JOIN
-			host_certificate_templates hct ON hct.fleet_challenge = c.challenge
-		INNER JOIN
-			hosts h ON h.uuid = hct.host_uuid
-		WHERE
-			h.id = ? AND
-			hct.certificate_template_id = ?
+	var deleteChallenge, stmt string
+	if ds.dialect.IsPostgres() {
+		deleteChallenge = `
+			DELETE FROM challenges WHERE challenge IN (
+				SELECT hct.fleet_challenge FROM host_certificate_templates hct
+				INNER JOIN hosts h ON h.uuid = hct.host_uuid
+				WHERE h.id = ? AND hct.certificate_template_id = ?
+			)`
+		stmt = fmt.Sprintf(`
+			UPDATE host_certificate_templates hct SET
+				uuid = gen_random_uuid(),
+				fleet_challenge = NULL,
+				not_valid_before = NULL,
+				not_valid_after = NULL,
+				serial = NULL,
+				detail = NULL,
+				retry_count = %d,
+				status = ?
+			FROM hosts h WHERE h.uuid = hct.host_uuid AND h.id = ? AND hct.certificate_template_id = ?
+			`, fleet.MaxCertificateInstallRetries)
+	} else {
+		deleteChallenge = `
+			DELETE c FROM
+				challenges c
+			INNER JOIN
+				host_certificate_templates hct ON hct.fleet_challenge = c.challenge
+			INNER JOIN
+				hosts h ON h.uuid = hct.host_uuid
+			WHERE
+				h.id = ? AND
+				hct.certificate_template_id = ?
 		`
+		stmt = fmt.Sprintf(`
+			UPDATE
+				host_certificate_templates hct
+			INNER JOIN
+				hosts h ON h.uuid = hct.host_uuid
+			SET
+				hct.uuid = UUID_TO_BIN(UUID(), true),
+				hct.fleet_challenge = NULL,
+				hct.not_valid_before = NULL,
+				hct.not_valid_after = NULL,
+				hct.serial = NULL,
+				hct.detail = NULL,
+				hct.retry_count = %d,
+				hct.status = ?
+			WHERE
+				h.id = ? AND
+				hct.certificate_template_id = ?
+			`, fleet.MaxCertificateInstallRetries)
+	}
 
-	if err := ds.withTx(ctx, func(tx sqlx.ExtContext) error {
-		_, err := tx.ExecContext(ctx, deleteChallenge, hostID, templateID)
-		if err != nil {
-			return ctxerr.Wrap(ctx, err, "deleting challenges associated with resent certificate template")
+	return ds.withTx(ctx, func(tx sqlx.ExtContext) error {
+		if _, err := tx.ExecContext(ctx, deleteChallenge, hostID, templateID); err != nil {
+			return ctxerr.Wrap(ctx, err, "deleting challenge for host certificate template")
 		}
 
 		results, err := tx.ExecContext(ctx, stmt, fleet.CertificateTemplatePending, hostID, templateID)
@@ -547,9 +560,5 @@ func (ds *Datastore) ResendHostCertificateTemplate(ctx context.Context, hostID u
 		}
 
 		return nil
-	}); err != nil {
-		return ctxerr.Wrap(ctx, err, "resetting host certificate template for resend")
-	}
-
-	return nil
+	})
 }

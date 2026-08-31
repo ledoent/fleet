@@ -17,7 +17,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +31,7 @@ import (
 	activity_api "github.com/fleetdm/fleet/v4/server/activity/api"
 	activity_bootstrap "github.com/fleetdm/fleet/v4/server/activity/bootstrap"
 	"github.com/fleetdm/fleet/v4/server/config"
+	"github.com/fleetdm/fleet/v4/server/datastore/mysql/migrations/tables"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	nanodep_client "github.com/fleetdm/fleet/v4/server/mdm/nanodep/client"
 	mdmtesting "github.com/fleetdm/fleet/v4/server/mdm/testing_utils"
@@ -37,6 +40,7 @@ import (
 	common_mysql "github.com/fleetdm/fleet/v4/server/platform/mysql"
 	"github.com/fleetdm/fleet/v4/server/platform/mysql/testing_utils"
 	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib" // register pgx driver for PostgreSQL tests
 	"github.com/jmoiron/sqlx"
 	"github.com/olekukonko/tablewriter"
 	"github.com/smallstep/pkcs7"
@@ -371,7 +375,18 @@ func initializeDatabase(t testing.TB, testName string, opts *testing_utils.Datas
 	return connectMySQL(t, testName, opts)
 }
 
+// skipUnlessMySQLTest gates MySQL-only helpers the same way CreateDS does:
+// without it, an unfiltered POSTGRES_TEST-only run (the PG CI job has no
+// MySQL service) fails every MySQL-only test on connection errors instead of
+// skipping it visibly. Use this in any helper that dials MySQL directly.
+func skipUnlessMySQLTest(t testing.TB) {
+	if _, ok := os.LookupEnv("MYSQL_TEST"); !ok {
+		t.Skip("MySQL-only test: requires MYSQL_TEST=1 (not yet converted to CreateDS dual-dialect)")
+	}
+}
+
 func createMySQLDSWithOptions(t testing.TB, opts *testing_utils.DatastoreTestOptions) *Datastore {
+	skipUnlessMySQLTest(t)
 	cleanTestName, opts := testing_utils.ProcessOptions(t, opts)
 	ds := initializeDatabase(t, cleanTestName, opts)
 	t.Cleanup(func() { ds.Close() })
@@ -411,6 +426,32 @@ func CreateMySQLDS(t testing.TB) *Datastore {
 	return createMySQLDSWithOptions(t, nil)
 }
 
+// CreateDS creates a test Datastore for the active test database backend.
+// When MYSQL_TEST=1 is set, returns a MySQL-backed datastore.
+// When POSTGRES_TEST=1 is set, returns a PostgreSQL-backed datastore.
+// Skips the test if neither is set.
+func CreateDS(t testing.TB) *Datastore {
+	_, hasMysql := os.LookupEnv("MYSQL_TEST")
+	_, hasPG := os.LookupEnv("POSTGRES_TEST")
+	if !hasMysql && !hasPG {
+		t.Skip("Neither MYSQL_TEST nor POSTGRES_TEST is set")
+	}
+	if hasPG {
+		return CreatePostgresDS(t)
+	}
+	return createMySQLDSWithOptions(t, nil)
+}
+
+// isPG reports whether the datastore is backed by PostgreSQL. Used by tests
+// converted to CreateDS to skip subtests with known rebind-driver gaps; every
+// such use must reference a tracking issue in the comment so the debt stays
+// inventoried (see the skip-ledger step in validate-pg-compat.yml). Uses of
+// isPG should drop to zero as the rebind driver matures.
+func isPG(ds *Datastore) bool {
+	_, ok := ds.dialect.(postgresDialect)
+	return ok
+}
+
 func CreateNamedMySQLDS(t *testing.T, name string) *Datastore {
 	ds, _ := CreateNamedMySQLDSWithConns(t, name)
 	return ds
@@ -420,14 +461,224 @@ func CreateNamedMySQLDS(t *testing.T, name string) *Datastore {
 // and the underlying database connections. This matches the production flow where
 // DBConnections are created first and shared across datastores.
 func CreateNamedMySQLDSWithConns(t *testing.T, name string) (*Datastore, *common_mysql.DBConnections) {
-	if _, ok := os.LookupEnv("MYSQL_TEST"); !ok {
-		t.Skip("MySQL tests are disabled")
-	}
+	skipUnlessMySQLTest(t)
 
 	ds := initializeDatabase(t, name, new(testing_utils.DatastoreTestOptions))
 	t.Cleanup(func() { ds.Close() })
 
 	return ds, getTestDBConnections(t, ds)
+}
+
+// pgBaselineSchema is loaded once from pg_baseline_schema.sql
+var pgBaselineSchema string
+var pgBaselineOnce sync.Once
+
+func loadPGBaselineSchema() string {
+	pgBaselineOnce.Do(func() {
+		// Try multiple paths since tests run from different working directories
+		paths := []string{
+			"pg_baseline_schema.sql",
+			"server/datastore/mysql/pg_baseline_schema.sql",
+			"../../../server/datastore/mysql/pg_baseline_schema.sql",
+		}
+		// Also try relative to the test binary via runtime.Caller
+		_, thisFile, _, _ := runtime.Caller(0)
+		if thisFile != "" {
+			dir := filepath.Dir(thisFile)
+			paths = append(paths, filepath.Join(dir, "pg_baseline_schema.sql"))
+		}
+		for _, p := range paths {
+			data, err := os.ReadFile(p)
+			if err == nil {
+				pgBaselineSchema = string(data)
+				return
+			}
+		}
+		panic("cannot load pg_baseline_schema.sql from any known path")
+	})
+	return pgBaselineSchema
+}
+
+// CreatePostgresDS creates a test Datastore backed by PostgreSQL.
+// Requires POSTGRES_TEST=1 and a running postgres_test container (default port 5434).
+// The database is created fresh for each test with the full Fleet schema applied.
+func CreatePostgresDS(t testing.TB) *Datastore {
+	if _, ok := os.LookupEnv("POSTGRES_TEST"); !ok {
+		t.Skip("PostgreSQL tests are disabled")
+	}
+
+	port := os.Getenv("FLEET_POSTGRES_TEST_PORT")
+	if port == "" {
+		port = "5434"
+	}
+
+	// Sanitize test name into a valid PG identifier (alphanumeric + underscore only).
+	dbName := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A') // lowercase
+		}
+		return '_'
+	}, t.Name())
+	if len(dbName) > 63 {
+		dbName = dbName[:63] // PG identifier limit
+	}
+
+	// Connect to default db to create test database
+	adminDSN := fmt.Sprintf("host=localhost port=%s user=fleet password=insecure dbname=fleet sslmode=disable", port)
+	adminDB, err := sqlx.Open("pgx-rebind", adminDSN)
+	require.NoError(t, err)
+	defer adminDB.Close()
+
+	// WITH (FORCE) terminates any active connections before dropping, preventing
+	// "database ... already exists" errors if a previous test run was killed mid-flight.
+	_, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName + " WITH (FORCE)")
+	_, err = adminDB.Exec("CREATE DATABASE " + dbName)
+	require.NoError(t, err)
+	// Set the test database timezone to UTC so that timestamp columns
+	// round-trip correctly (PG timestamp without time zone uses session tz).
+	_, err = adminDB.Exec("ALTER DATABASE " + dbName + " SET timezone TO 'UTC'")
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_, _ = adminDB.Exec("DROP DATABASE IF EXISTS " + dbName + " WITH (FORCE)")
+	})
+
+	// Connect to the test database
+	testDSN := fmt.Sprintf("host=localhost port=%s user=fleet password=insecure dbname=%s sslmode=disable default_query_exec_mode=describe_exec", port, dbName)
+	testDB, err := sqlx.Open("pgx-rebind", testDSN)
+	require.NoError(t, err)
+
+	// Apply the baseline schema statement-by-statement.
+	// Split on ";\n" for statement boundaries, but NOT inside $$ dollar-quoted blocks
+	// (used by PL/pgSQL trigger functions).
+	schema := loadPGBaselineSchema()
+	var stmts []string
+	inDollarQuote := false
+	var current strings.Builder
+	for line := range strings.SplitSeq(schema, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// Count $$ occurrences — odd count toggles dollar-quote state
+		if strings.Count(trimmed, "$$")%2 == 1 {
+			inDollarQuote = !inDollarQuote
+		}
+		current.WriteString(line)
+		current.WriteString("\n")
+		if !inDollarQuote && strings.HasSuffix(trimmed, ";") {
+			stmts = append(stmts, current.String())
+			current.Reset()
+		}
+	}
+	if s := strings.TrimSpace(current.String()); s != "" {
+		stmts = append(stmts, s)
+	}
+	errCount := 0
+	for _, stmt := range stmts {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		// Strip leading comment lines
+		for strings.HasPrefix(stmt, "--") {
+			nl := strings.Index(stmt, "\n")
+			if nl < 0 {
+				stmt = ""
+				break
+			}
+			stmt = strings.TrimSpace(stmt[nl+1:])
+		}
+		if stmt == "" {
+			continue
+		}
+		execStmt := stmt
+		if !strings.HasSuffix(strings.TrimSpace(stmt), ";") {
+			execStmt = stmt + ";"
+		}
+		if _, err := testDB.DB.Exec(execStmt); err != nil {
+			errCount++
+			if errCount <= 3 {
+				first := stmt
+				if len(first) > 150 {
+					first = first[:150]
+				}
+				t.Logf("PG schema warning (%d): %v [%s]", errCount, err, first)
+			}
+		}
+	}
+	if errCount > 0 {
+		t.Logf("PG schema: %d/%d stmts had errors (non-fatal)", errCount, len(stmts))
+	}
+
+	// pg_dump emits set_config('search_path','',false) which clears search_path for the
+	// session. Reset it so unqualified table names in seed inserts and tests resolve correctly.
+	if _, err := testDB.DB.Exec("SET search_path = public"); err != nil {
+		t.Logf("PG: could not reset search_path: %v", err)
+	}
+
+	// Apply post-baseline fixups (idempotent triggers, view redefinitions) so
+	// the test environment matches what `fleet prepare db` produces at boot.
+	// Without this the embedded baseline's stale view definitions (e.g.
+	// nano_view_queue missing the name column) break tests that go through
+	// production query paths.
+	if _, err := testDB.DB.Exec(pgBaselinePostSQL); err != nil {
+		t.Logf("PG: post-baseline fixups warning: %v", err)
+	}
+	// NOTE: the updated_at trigger set is applied in CreatePostgresDS AFTER
+	// the post-baseline migration replay — it references tables that only
+	// exist once post-marker migrations have run.
+
+	// Verify minimum table count
+	var tableCount int
+	if err := testDB.Get(&tableCount, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public'"); err == nil {
+		if tableCount < 180 {
+			t.Fatalf("PG schema incomplete: only %d tables (expected 190+)", tableCount)
+		}
+	}
+
+	// Insert required seed data (app_config_json needs at least one row)
+	_, _ = testDB.Exec(`INSERT INTO app_config_json (id, json_value) VALUES (1, '{}') ON CONFLICT (id) DO NOTHING`)
+	// NO builtin-label seeding: MySQL test databases are schema-only (data
+	// migrations never run there), and upstream tests that need builtin
+	// labels create them via test.AddBuiltinLabels/AddAllHostsLabel — which
+	// collide with pre-seeded rows on idx_label_unique_name. Environment
+	// parity means starting empty exactly like MySQL.
+	// Insert mdm delivery status and operation type seed data
+	_, _ = testDB.Exec(`INSERT INTO mdm_delivery_status (status) VALUES ('failed'), ('applied'), ('pending'), ('verified'), ('verifying') ON CONFLICT (status) DO NOTHING`)
+	_, _ = testDB.Exec(`INSERT INTO mdm_operation_types (operation_type) VALUES ('install'), ('remove') ON CONFLICT (operation_type) DO NOTHING`)
+
+	logger := slog.New(slog.DiscardHandler)
+	ds := &Datastore{
+		primary:          testDB,
+		replica:          testDB,
+		logger:           logger,
+		clock:            clock.NewMockClock(),
+		dialect:          postgresDialect{},
+		writeCh:          make(chan itemToWrite),
+		serverPrivateKey: "test-private-key-for-pg-tests!!!", // 32 bytes for AES-256
+		stmtCache:        make(map[string]*sqlx.Stmt),
+	}
+	ds.Datastore = NewAndroidDatastore(logger, testDB, testDB, postgresDialect{})
+	t.Cleanup(func() { ds.Close() })
+
+	go ds.writeChanLoop()
+
+	// Replay post-baseline migrations exactly as `fleet prepare db` does on a
+	// real deployment: seed migration history <= the baseline marker, then
+	// goose-Up the newer upstream migrations through the rebind driver. This
+	// is the test gate proving new upstream migrations run on PostgreSQL.
+	tables.SetDialect("postgres")
+	t.Cleanup(func() { tables.SetDialect("mysql") })
+	migCtx := context.Background()
+	require.NoError(t, ds.seedPGMigrationHistory(migCtx, parsePGBaselineMarker(pgBaselineSchemaSQL)),
+		"seed PG migration history")
+	require.NoError(t, tables.MigrationClient.Up(ds.writer(migCtx).DB, ""),
+		"apply post-baseline migrations on PG")
+	_, terr := ds.writer(migCtx).ExecContext(migCtx, pgTouchTriggersSQL)
+	require.NoError(t, terr, "apply PG updated_at trigger set")
+
+	return ds
 }
 
 func ExecAdhocSQL(tb testing.TB, ds *Datastore, fn func(q sqlx.ExtContext) error) {
@@ -438,6 +689,22 @@ func ExecAdhocSQL(tb testing.TB, ds *Datastore, fn func(q sqlx.ExtContext) error
 
 func ExecAdhocSQLWithError(ds *Datastore, fn func(q sqlx.ExtContext) error) error {
 	return fn(ds.primary)
+}
+
+// InsertAndGetLastID executes an INSERT statement and returns the auto-generated ID.
+// On MySQL it uses LastInsertId(); on PG it appends RETURNING id and scans the result.
+func InsertAndGetLastID(ctx context.Context, ds *Datastore, query string, args ...any) (int64, error) {
+	if ds.dialect.IsPostgres() {
+		pgQuery := query + " RETURNING id"
+		var id int64
+		err := sqlx.GetContext(ctx, ds.writer(ctx), &id, pgQuery, args...)
+		return id, err
+	}
+	result, err := ds.writer(ctx).ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
 }
 
 // EncryptWithPrivateKey encrypts data with the server private key associated
@@ -464,6 +731,49 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 	_, err := ds.writer(context.Background()).ExecContext(context.Background(),
 		"DELETE FROM software_categories WHERE team_id != 0")
 	require.NoError(t, err)
+
+	if _, ok := ds.dialect.(postgresDialect); ok {
+		db := ds.writer(context.Background())
+		ctx := context.Background()
+
+		// If no specific tables given, query all tables from PG catalog
+		if len(tables) == 0 {
+			rows, err := db.QueryContext(ctx,
+				"SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
+			if err != nil {
+				t.Logf("PG truncate: list tables: %v", err)
+				return
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var tbl string
+				if err := rows.Scan(&tbl); err == nil {
+					tables = append(tables, tbl)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				t.Logf("PG truncate: rows iteration: %v", err)
+			}
+		}
+
+		for _, tbl := range tables {
+			if nonEmptyTables[tbl] {
+				continue
+			}
+			// RESTART IDENTITY so IDENTITY columns reset to their starting
+			// value after each test — MySQL's TRUNCATE behaves this way by
+			// default. Without it, tests that depend on ids starting at 1
+			// (e.g. "WHERE id <= 1250" after inserting 1500 rows) fail when
+			// a prior test left the sequence elevated.
+			_, _ = db.ExecContext(ctx, `TRUNCATE TABLE "`+tbl+`" RESTART IDENTITY CASCADE`)
+		}
+		// Same cache hygiene as the MySQL path below: the in-process Windows
+		// Fleet-maintained app cache would otherwise leak across test cases
+		// that share a Datastore.
+		ds.clearWindowsFMAMatchesCache()
+		return
+	}
+
 	testing_utils.TruncateTables(t, ds.writer(context.Background()), ds.logger, nonEmptyTables, tables...)
 	// Clear the in-process Windows Fleet-maintained app cache, which would
 	// otherwise leak across test cases that share a Datastore.
@@ -862,7 +1172,7 @@ func checkUpcomingActivities(t *testing.T, ds *Datastore, host *fleet.Host, exec
 					(activated_at IS NOT NULL) as activated_at_set
 				FROM upcoming_activities
 				WHERE host_id = ?
-				ORDER BY IF(activated_at IS NULL, 0, 1) DESC, priority DESC, created_at ASC`, host.ID)
+				ORDER BY CASE WHEN activated_at IS NULL THEN 0 ELSE 1 END DESC, priority DESC, created_at ASC`, host.ID)
 	})
 
 	var want []upcoming

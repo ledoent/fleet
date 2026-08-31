@@ -1,0 +1,18 @@
+# Allowlist of known schema differences between MySQL schema.sql and the PG
+# baseline. Each line is either:
+#
+#   mysql-only: <table>   — table exists only in server/datastore/mysql/schema.sql
+#   pg-only:    <table>   — table exists only in server/datastore/mysql/pg_baseline_schema.sql
+#
+# Blank lines and lines starting with # are ignored. Entries in this file are
+# intentional drift — e.g., PG-specific infrastructure tables that have no
+# MySQL counterpart, or MySQL tables that are added upstream after the last
+# PG baseline regeneration.
+#
+# If a table appears in the drift diff that is NOT listed here, CI fails and
+# the pg_baseline_schema.sql must be regenerated (see its file header for the
+# canonical pg_dump command) or the entry must be added here with explanation.
+
+# PG-only table — no MySQL equivalent.
+pg-only: migration_status_data
+

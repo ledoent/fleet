@@ -1,0 +1,240 @@
+-- Post-baseline fixups for PostgreSQL deployments.
+--
+-- Runs on every `fleet prepare db` (NOT on server startup), idempotent.
+-- Skips objects already owned by the connecting role, so it is a no-op when
+-- there is no work to do. It may execute while previous-version pods are
+-- still serving, so nothing in this file may leave an observable window
+-- where an object is missing (see the DO-block wrapping below).
+--
+-- Required because earlier baseline loads ran as `postgres` (superuser),
+-- leaving the application user unable to RENAME tables for atomic swaps
+-- (used by host_counts cron) and unable to ALTER its own schema.
+
+-- Each ALTER is wrapped in its own sub-block so insufficient_privilege errors
+-- on individual objects don't abort the whole fixup. Some baseline objects
+-- (e.g. nano_view_queue on existing deploys) were created by a role the
+-- current user isn't a member of; we can't take ownership of those, but the
+-- application works without that fixup, so we just skip them.
+DO $$
+DECLARE
+    app_role text := current_user;
+    obj record;
+BEGIN
+    FOR obj IN
+        SELECT tablename FROM pg_tables
+        WHERE schemaname = 'public' AND tableowner != app_role
+    LOOP
+        BEGIN
+            EXECUTE format('ALTER TABLE public.%I OWNER TO %I', obj.tablename, app_role);
+        EXCEPTION WHEN insufficient_privilege THEN
+            -- not a member of the owning role; leave ownership alone
+            NULL;
+        END;
+    END LOOP;
+
+    FOR obj IN
+        SELECT sequencename FROM pg_sequences
+        WHERE schemaname = 'public' AND sequenceowner != app_role
+    LOOP
+        BEGIN
+            EXECUTE format('ALTER SEQUENCE public.%I OWNER TO %I', obj.sequencename, app_role);
+        EXCEPTION WHEN insufficient_privilege THEN
+            NULL;
+        END;
+    END LOOP;
+
+    FOR obj IN
+        SELECT viewname FROM pg_views
+        WHERE schemaname = 'public' AND viewowner != app_role
+    LOOP
+        BEGIN
+            EXECUTE format('ALTER VIEW public.%I OWNER TO %I', obj.viewname, app_role);
+        EXCEPTION WHEN insufficient_privilege THEN
+            NULL;
+        END;
+    END LOOP;
+
+    -- Functions need the same treatment: when an earlier baseline load ran
+    -- as `postgres`, public functions (notably fleet_set_updated_at) end up
+    -- owned by `postgres`. The next startup hits CREATE OR REPLACE FUNCTION
+    -- below and PG rejects with "must be owner of function ..." because the
+    -- application user can't replace something it doesn't own.
+    --
+    -- pg_proc.proname is unqualified; we look up by schema via pg_namespace.
+    -- format() with %I emits a quoted identifier for the function name and
+    -- pg_get_function_identity_arguments() emits the argument signature so
+    -- overloads resolve unambiguously.
+    FOR obj IN
+        SELECT p.oid, p.proname,
+               pg_get_function_identity_arguments(p.oid) AS args
+        FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'public'
+          AND pg_get_userbyid(p.proowner) != app_role
+    LOOP
+        BEGIN
+            EXECUTE format('ALTER FUNCTION public.%I(%s) OWNER TO %I',
+                obj.proname, obj.args, app_role);
+        EXCEPTION WHEN insufficient_privilege THEN
+            NULL;
+        END;
+    END LOOP;
+END $$;
+
+-- fleet_set_updated_at: trigger function used by per-table updated_at triggers.
+-- MySQL has `ON UPDATE CURRENT_TIMESTAMP` as a column attribute; PG requires a
+-- BEFORE UPDATE trigger. The rebind driver strips the MySQL attribute from
+-- CREATE/ALTER TABLE statements and emits a CREATE TRIGGER referencing this
+-- function instead. CREATE OR REPLACE makes the function declaration safe to
+-- run on every startup.
+-- Semantics mirror MySQL exactly: the column is touched only when the row
+-- actually changed AND the statement did not assign updated_at itself
+-- (explicit assignments — e.g. software_cve's updated_at = ? — win, and
+-- value-identical UPDATEs leave the timestamp alone, matching
+-- CLIENT_FOUND_ROWS-era behavior that several queries compare against).
+CREATE OR REPLACE FUNCTION public.fleet_set_updated_at() RETURNS trigger AS $fleet_set_updated_at$
+BEGIN
+    -- The rebind driver sets this GUC around statements carrying MySQL's
+    -- `updated_at = updated_at` preservation idiom, which the trigger cannot
+    -- otherwise distinguish from an untouched column.
+    IF current_setting('fleet.preserve_updated_at', true) = '1' THEN
+        RETURN NEW;
+    END IF;
+    IF NEW IS DISTINCT FROM OLD
+       AND NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
+        NEW.updated_at = CURRENT_TIMESTAMP;
+    END IF;
+    RETURN NEW;
+END;
+$fleet_set_updated_at$ LANGUAGE plpgsql;
+
+-- nano_view_queue: production runtime queries (e.g. apple_mdm.go's
+-- ListMDMAppleCommands) project nano_commands.name through this view as
+-- `nvq.name`. The MySQL view definition includes the column, but the PG
+-- baseline pg_dump was taken before the column was added on PG so the
+-- embedded VIEW is missing it. Drop + recreate is necessary because
+-- CREATE OR REPLACE VIEW cannot change or add columns in the middle of
+-- the projection (PG only allows appending). Keeping column types
+-- aligned with the baseline so dependents continue to read as expected.
+-- The drop + recreate runs inside one DO block (a single atomic statement)
+-- so concurrent readers — this file runs from `prepare db` while old pods
+-- still serve — never observe a window where the view is missing.
+DO $nvq$
+BEGIN
+    DROP VIEW IF EXISTS public.nano_view_queue;
+    EXECUTE $q$
+CREATE VIEW public.nano_view_queue AS
+ SELECT q.id,
+    q.created_at,
+    q.active,
+    q.priority,
+    c.command_uuid,
+    c.request_type,
+    c.command,
+    c.name,
+    r.updated_at AS result_updated_at,
+    r.status,
+    r.result
+   FROM ((public.nano_enrollment_queue q
+     JOIN public.nano_commands c ON (((q.command_uuid)::text = (c.command_uuid)::text)))
+     LEFT JOIN public.nano_command_results r ON ((((r.command_uuid)::text = (q.command_uuid)::text) AND ((r.id)::text = (q.id)::text))))
+  ORDER BY q.priority DESC, q.created_at
+$q$;
+END $nvq$;
+
+-- MySQL AUTO_INCREMENT columns translate to PG `GENERATED BY DEFAULT AS
+-- IDENTITY`. When the embedded baseline was first captured, several tables
+-- ended up with `GENERATED ALWAYS` instead — likely because `pg_dump`
+-- preserves whichever form was created during baseline assembly. MySQL has
+-- no equivalent of the ALWAYS restriction: app code routinely inserts
+-- explicit id values (e.g. in tests, migrations, and the nano_*_serials
+-- counter-table pattern), so ALWAYS columns reject the insert with
+-- "cannot insert a non-DEFAULT value into column".
+--
+-- Switch every IDENTITY ALWAYS column to BY DEFAULT so the application
+-- (which doesn't differentiate) behaves the same as on MySQL. SET GENERATED
+-- BY DEFAULT is idempotent — re-running it on an already-BY-DEFAULT column
+-- is a no-op.
+DO $$
+DECLARE
+    col record;
+BEGIN
+    FOR col IN
+        SELECT n.nspname AS schema_name,
+               c.relname AS table_name,
+               a.attname AS column_name
+        FROM pg_attribute a
+        JOIN pg_class     c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind = 'r'
+          AND a.attidentity = 'a' -- 'a' = ALWAYS; 'd' = BY DEFAULT
+    LOOP
+        BEGIN
+            EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I SET GENERATED BY DEFAULT',
+                col.schema_name, col.table_name, col.column_name);
+        EXCEPTION WHEN insufficient_privilege THEN
+            NULL;
+        END;
+    END LOOP;
+END $$;
+
+-- software_titles.unique_identifier: MySQL stores this as a GENERATED VIRTUAL
+-- column over coalesce(bundle_identifier, application_id, nullif(upgrade_code,''), name)
+-- which keeps the column in sync without any app-side bookkeeping. On PG it's
+-- a plain text column, and Fleet's INSERTs don't populate it — so MySQL's
+-- unique constraint over (unique_identifier, source, extension_for) silently
+-- becomes "unique over (NULL, source, extension_for)" on PG (NULL never
+-- conflicts), which both lets duplicate software_titles rows accumulate AND
+-- breaks ON CONFLICT (unique_identifier, source, extension_for) against the
+-- constraint.
+--
+-- Install a trigger that mirrors MySQL's GENERATED VIRTUAL semantics:
+-- recompute unique_identifier on every INSERT and UPDATE before the row is
+-- written. CREATE OR REPLACE makes it idempotent across boots.
+CREATE OR REPLACE FUNCTION public.fleet_software_titles_set_unique_id() RETURNS trigger AS $sw_uid$
+BEGIN
+    NEW.unique_identifier = COALESCE(
+        NULLIF(NEW.bundle_identifier, ''),
+        NULLIF(NEW.application_id, ''),
+        NULLIF(NEW.upgrade_code, ''),
+        NEW.name
+    );
+    RETURN NEW;
+END;
+$sw_uid$ LANGUAGE plpgsql;
+
+-- PG 14+ CREATE OR REPLACE TRIGGER: atomic replacement, no drop window in
+-- which software_titles inserts would skip populating unique_identifier.
+CREATE OR REPLACE TRIGGER software_titles_set_unique_id
+    BEFORE INSERT OR UPDATE ON public.software_titles
+    FOR EACH ROW EXECUTE FUNCTION public.fleet_software_titles_set_unique_id();
+
+-- mdm_windows_enrollments.awaiting_configuration: the Go side uses
+-- fleet.WindowsMDMAwaitingConfiguration (uint) with three valid states —
+-- None=0, Pending=1, Active=2 — but the PG baseline declares the column
+-- as boolean (which rejects the value 2 outright and also confuses pgx's
+-- bool↔uint Scan paths). MySQL's TINYINT(1) silently accepts integers
+-- 0..255, hence the mismatch was never visible. Convert to smallint so
+-- the column accepts the full uint range the application can produce.
+--
+-- Idempotent: the IF clause only runs the ALTER when the column is
+-- still boolean.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'mdm_windows_enrollments'
+          AND column_name = 'awaiting_configuration'
+          AND data_type = 'boolean'
+    ) THEN
+        ALTER TABLE public.mdm_windows_enrollments
+            ALTER COLUMN awaiting_configuration DROP DEFAULT,
+            ALTER COLUMN awaiting_configuration TYPE smallint
+                USING (CASE WHEN awaiting_configuration THEN 1 ELSE 0 END),
+            ALTER COLUMN awaiting_configuration SET DEFAULT 0;
+    END IF;
+EXCEPTION WHEN insufficient_privilege THEN
+    NULL;
+END $$;

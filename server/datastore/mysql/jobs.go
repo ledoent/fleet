@@ -24,18 +24,25 @@ INSERT INTO jobs (
     error,
     not_before
 )
-VALUES (?, ?, ?, ?, ?, COALESCE(?, NOW()))
+VALUES (?, ?, ?, ?, ?, ?)
 `
-	var notBefore *time.Time
-	if !job.NotBefore.IsZero() {
-		notBefore = &job.NotBefore
+	// Default not_before in the application rather than SQL NOW(): callers
+	// (and tests) compare the stored value against the app clock, and a
+	// containerized DB's clock can sit hundreds of milliseconds away — on
+	// MySQL the mismatch was masked by NOW()'s whole-second truncation, on PG
+	// it surfaced as freshly-queued jobs reporting a not_before in the future.
+	notBefore := job.NotBefore
+	if notBefore.IsZero() {
+		// Whole-second: MySQL TIMESTAMP rounds sub-second values (possibly
+		// up, into the future); truncating keeps the default in the past on
+		// both dialects.
+		notBefore = time.Now().UTC().Truncate(time.Second)
 	}
-	result, err := ds.writer(ctx).ExecContext(ctx, query, job.Name, job.Args, job.State, job.Retries, job.Error, notBefore)
+	id, err := ds.insertAndGetID(ctx, ds.writer(ctx), query, job.Name, job.Args, job.State, job.Retries, job.Error, notBefore)
 	if err != nil {
 		return nil, err
 	}
 
-	id, _ := result.LastInsertId()
 	job.ID = uint(id) //nolint:gosec // dismiss G115
 
 	return job, nil
@@ -53,18 +60,28 @@ FROM
     jobs
 WHERE
     state = ? AND
-    not_before <= ?
+    not_before <= %s
 	%s
 ORDER BY
     updated_at ASC
 LIMIT ?
 `
 
+	// When the caller doesn't pin a time, compare against the DATABASE clock.
+	// NewJob writes not_before from the app clock truncated to the whole
+	// second (always in the past on both dialects), so a DB-clock comparison
+	// sees fresh default jobs immediately; comparing against the app clock
+	// instead would race container clock skew against NOW() precision
+	// differences between dialects. Residual edge: a DB clock lagging the
+	// app clock by more than the truncation slack (up to ~1s) delays a fresh
+	// job by that lag — acceptable for a polling queue.
+	nowExpr := "?"
+	args := []interface{}{fleet.JobStateQueued}
 	if now.IsZero() {
-		now = time.Now().UTC()
+		nowExpr = "NOW()"
+	} else {
+		args = append(args, now)
 	}
-
-	args := []interface{}{fleet.JobStateQueued, now}
 
 	// Add job name filter if needed
 	var nameClause string
@@ -77,7 +94,7 @@ LIMIT ?
 		args = append(args, nameArgs...)
 	}
 
-	query = fmt.Sprintf(query, nameClause)
+	query = fmt.Sprintf(query, nowExpr, nameClause)
 	args = append(args, maxNumJobs)
 	var jobs []*fleet.Job
 	err := sqlx.SelectContext(ctx, ds.reader(ctx), &jobs, query, args...)

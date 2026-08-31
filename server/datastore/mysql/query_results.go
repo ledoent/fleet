@@ -54,9 +54,9 @@ func (ds *Datastore) OverwriteQueryResultRows(ctx context.Context, rows []*fleet
 		}
 
 		//nolint:gosec // SQL query is constructed using constant strings
-		insertStmt := `
-		INSERT IGNORE INTO query_results (query_id, host_id, last_fetched, data) VALUES
-	` + strings.Join(valueStrings, ",")
+		insertStmt := ds.dialect.InsertIgnoreInto() + `
+		query_results (query_id, host_id, last_fetched, data) VALUES
+	` + strings.Join(valueStrings, ",") + ds.dialect.OnConflictDoNothing("")
 
 		result, err = tx.ExecContext(ctx, insertStmt, valueArgs...)
 		if err != nil {
@@ -83,7 +83,7 @@ func (ds *Datastore) QueryResultRows(ctx context.Context, queryID uint, filter f
 			h.hostname, h.computer_name, h.hardware_model, h.hardware_serial
 			FROM query_results qr
 			LEFT JOIN hosts h ON (qr.host_id=h.id)
-			WHERE query_id = ? AND has_data = 1 AND %s
+			WHERE query_id = ? AND has_data = true AND %s
 		`, ds.whereFilterHostsByTeams(filter, "h"))
 
 	results := []*fleet.ScheduledQueryResultRow{}
@@ -99,7 +99,7 @@ func (ds *Datastore) QueryResultRows(ctx context.Context, queryID uint, filter f
 // excluding rows with null data
 func (ds *Datastore) ResultCountForQuery(ctx context.Context, queryID uint) (int, error) {
 	var count int
-	err := sqlx.GetContext(ctx, ds.reader(ctx), &count, `SELECT COUNT(*) FROM query_results WHERE query_id = ? AND has_data = 1`, queryID)
+	err := sqlx.GetContext(ctx, ds.reader(ctx), &count, `SELECT COUNT(*) FROM query_results WHERE query_id = ? AND has_data = true`, queryID)
 	if err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "counting query results for query")
 	}
@@ -111,7 +111,7 @@ func (ds *Datastore) ResultCountForQuery(ctx context.Context, queryID uint) (int
 // excluding rows with null data
 func (ds *Datastore) ResultCountForQueryAndHost(ctx context.Context, queryID, hostID uint) (int, error) {
 	var count int
-	err := sqlx.GetContext(ctx, ds.reader(ctx), &count, `SELECT COUNT(*) FROM query_results WHERE query_id = ? AND host_id = ? AND has_data = 1`, queryID, hostID)
+	err := sqlx.GetContext(ctx, ds.reader(ctx), &count, `SELECT COUNT(*) FROM query_results WHERE query_id = ? AND host_id = ? AND has_data = true`, queryID, hostID)
 	if err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "counting query results for query and host")
 	}
@@ -167,7 +167,7 @@ func (ds *Datastore) CleanupExcessQueryResultRows(ctx context.Context, maxQueryR
 	selectStmt := `
 		SELECT id
 		FROM queries
-		WHERE saved = 1 AND discard_data = false AND logging_type = 'snapshot'
+		WHERE saved = true AND discard_data = false AND logging_type = 'snapshot'
 	`
 	if err := sqlx.SelectContext(ctx, ds.reader(ctx), &queryIDs, selectStmt); err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "selecting query IDs for cleanup")
@@ -191,7 +191,7 @@ func (ds *Datastore) CleanupExcessQueryResultRows(ctx context.Context, maxQueryR
             SELECT query_id, id,
                 ROW_NUMBER() OVER (PARTITION BY query_id ORDER BY id DESC) as rn
             FROM query_results
-            WHERE query_id IN (?) AND has_data = 1
+            WHERE query_id IN (?) AND has_data = true
         ) cutoff
         WHERE rn = ?
     `
@@ -212,10 +212,18 @@ func (ds *Datastore) CleanupExcessQueryResultRows(ctx context.Context, maxQueryR
 	// Delete excess rows from each query, in batches.
 	if len(queryCutoffs) > 0 {
 		for _, c := range queryCutoffs {
+			// Derived-table wrapper: MySQL rejects LIMIT directly inside an
+			// IN subquery (error 1235); the extra SELECT layer is accepted by
+			// both dialects.
 			deleteStmt := `
                 DELETE FROM query_results
-                WHERE query_id = ? AND id < ? AND has_data = 1
-                LIMIT ?
+                WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id FROM query_results
+                        WHERE query_id = ? AND id < ? AND has_data = true
+                        LIMIT ?
+                    ) batch
+                )
             `
 			for {
 				result, err := ds.writer(ctx).ExecContext(ctx, deleteStmt, c.QueryID, c.CutoffID, batchSize)
@@ -240,7 +248,7 @@ func (ds *Datastore) CleanupExcessQueryResultRows(ctx context.Context, maxQueryR
 	countStmt := `
         SELECT query_id, COUNT(*) as count
         FROM query_results
-        WHERE query_id IN (?) AND has_data = 1
+        WHERE query_id IN (?) AND has_data = true
         GROUP BY query_id
     `
 	for batch := range slices.Chunk(queryIDs, queryIDBatchSize) {
@@ -302,7 +310,7 @@ func (ds *Datastore) ListHostReports(
 	maxQueryReportRows int,
 ) ([]*fleet.HostReport, int, *fleet.PaginationMetadata, error) {
 	// We only care about saved queries
-	whereClause := "WHERE q.saved = 1"
+	whereClause := "WHERE q.saved = true"
 	var whereArgs []any
 
 	// We also want to show queries that have not run yet, so we need
@@ -320,7 +328,7 @@ func (ds *Datastore) ListHostReports(
 	// logging_type='snapshot'). When IncludeReportsDontStoreResults is set,
 	// all queries are returned regardless of their storage settings.
 	if !opts.IncludeReportsDontStoreResults {
-		whereClause += " AND q.discard_data = 0 AND q.logging_type = 'snapshot'"
+		whereClause += " AND q.discard_data = false AND q.logging_type = 'snapshot'"
 	}
 
 	if opts.ExcludeIncludeAllQueries {
@@ -337,7 +345,7 @@ func (ds *Datastore) ListHostReports(
 
 	// Filter by platform: include queries with no platform restriction, or
 	// whose platform list contains the host's normalized platform.
-	whereClause += " AND (q.platform = '' OR FIND_IN_SET(?, q.platform) > 0)"
+	whereClause += " AND (q.platform = '' OR " + ds.dialect.FindInSet("?", "q.platform") + ")"
 	whereArgs = append(whereArgs, hostPlatform)
 
 	matchQuery := strings.TrimSpace(opts.ListOptions.MatchQuery)
@@ -418,7 +426,7 @@ func (ds *Datastore) ListHostReports(
 	totalStmt, totalArgs, err := sqlx.In(`
 		SELECT query_id, COUNT(*) AS n_query_results
 		FROM query_results
-		WHERE query_id IN (?) AND has_data = 1
+		WHERE query_id IN (?) AND has_data = true
 		GROUP BY query_id
 	`, queryIDs)
 	if err != nil {
@@ -442,7 +450,7 @@ func (ds *Datastore) ListHostReports(
 	hostCountStmt, hostCountArgs, err := sqlx.In(`
 		SELECT query_id, COUNT(*) AS n_host_results
 		FROM query_results
-		WHERE query_id IN (?) AND host_id = ? AND has_data = 1
+		WHERE query_id IN (?) AND host_id = ? AND has_data = true
 		GROUP BY query_id
 	`, queryIDs, hostID)
 	if err != nil {
@@ -470,7 +478,7 @@ func (ds *Datastore) ListHostReports(
 				data,
 				ROW_NUMBER() OVER (PARTITION BY query_id ORDER BY last_fetched DESC) AS rn
 			FROM query_results
-			WHERE query_id IN (?) AND host_id = ? AND has_data = 1
+			WHERE query_id IN (?) AND host_id = ? AND has_data = true
 		) ranked
 		WHERE rn = 1
 	`, queryIDs, hostID)

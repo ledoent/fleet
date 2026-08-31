@@ -22,6 +22,48 @@ func init() {
 // execution_status kept the old one if the second failed. A single statement also
 // rebuilds the table once rather than twice.
 func Up_20260717152653(tx *sql.Tx) error {
+	if isPostgres() {
+		// PG models status/execution_status as plain text columns (MySQL's
+		// generated ENUM columns don't port). There is no expression to
+		// redefine; recompute the stored values once with the corrected
+		// precedence so historical rows reflect the fix.
+		if _, err := tx.Exec(`
+UPDATE host_software_installs SET status = (
+	CASE
+		WHEN removed THEN NULL
+		WHEN canceled AND NOT uninstall THEN 'canceled_install'
+		WHEN canceled AND uninstall THEN 'canceled_uninstall'
+		WHEN install_script_exit_code IS NOT NULL AND install_script_exit_code != 0 THEN 'failed_install'
+		WHEN post_install_script_exit_code IS NOT NULL AND post_install_script_exit_code = 0 THEN 'installed'
+		WHEN post_install_script_exit_code IS NOT NULL AND post_install_script_exit_code != 0 THEN 'failed_install'
+		WHEN install_script_exit_code IS NOT NULL AND install_script_exit_code = 0 THEN 'installed'
+		WHEN pre_install_query_output IS NOT NULL AND pre_install_query_output = '' THEN 'failed_install'
+		WHEN host_id IS NOT NULL AND NOT uninstall THEN 'pending_install'
+		WHEN uninstall_script_exit_code IS NOT NULL AND uninstall_script_exit_code != 0 THEN 'failed_uninstall'
+		WHEN uninstall_script_exit_code IS NOT NULL AND uninstall_script_exit_code = 0 THEN NULL
+		WHEN host_id IS NOT NULL AND uninstall THEN 'pending_uninstall'
+		ELSE NULL
+	END
+), execution_status = (
+	CASE
+		WHEN canceled AND NOT uninstall THEN 'canceled_install'
+		WHEN canceled AND uninstall THEN 'canceled_uninstall'
+		WHEN install_script_exit_code IS NOT NULL AND install_script_exit_code != 0 THEN 'failed_install'
+		WHEN post_install_script_exit_code IS NOT NULL AND post_install_script_exit_code = 0 THEN 'installed'
+		WHEN post_install_script_exit_code IS NOT NULL AND post_install_script_exit_code != 0 THEN 'failed_install'
+		WHEN install_script_exit_code IS NOT NULL AND install_script_exit_code = 0 THEN 'installed'
+		WHEN pre_install_query_output IS NOT NULL AND pre_install_query_output = '' THEN 'failed_install'
+		WHEN host_id IS NOT NULL AND NOT uninstall THEN 'pending_install'
+		WHEN uninstall_script_exit_code IS NOT NULL AND uninstall_script_exit_code != 0 THEN 'failed_uninstall'
+		WHEN uninstall_script_exit_code IS NOT NULL AND uninstall_script_exit_code = 0 THEN NULL
+		WHEN host_id IS NOT NULL AND uninstall THEN 'pending_uninstall'
+		ELSE NULL
+	END
+)`); err != nil {
+			return fmt.Errorf("fixing install status precedence generated columns: %w", err)
+		}
+		return nil
+	}
 	if _, err := tx.Exec(`
 		ALTER TABLE host_software_installs
 		MODIFY COLUMN ` + "`status`" + ` ENUM('pending_install','failed_install','installed','pending_uninstall','failed_uninstall','canceled_install','canceled_uninstall')

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,9 +20,35 @@ import (
 	"github.com/fleetdm/fleet/v4/server/contexts/license"
 	"github.com/fleetdm/fleet/v4/server/fleet"
 	"github.com/fleetdm/fleet/v4/server/ptr"
+	"github.com/fleetdm/fleet/v4/server/version"
 	"github.com/fleetdm/fleet/v4/server/vulnerabilities/nvd/tools/cvefeed"
 	feednvd "github.com/fleetdm/fleet/v4/server/vulnerabilities/nvd/tools/cvefeed/nvd"
 )
+
+// userAgentTransport injects a User-Agent header on outgoing requests when
+// the caller has not set one. Some upstream feeds (notably CISA) return 403
+// for clients that send Go's default `Go-http-client/1.1`.
+type userAgentTransport struct {
+	base http.RoundTripper
+	ua   string
+}
+
+func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("User-Agent") == "" {
+		req = req.Clone(req.Context())
+		req.Header.Set("User-Agent", t.ua)
+	}
+	return t.base.RoundTrip(req)
+}
+
+func newClientWithUserAgent() *http.Client {
+	c := fleethttp.NewClient()
+	c.Transport = &userAgentTransport{
+		base: c.Transport,
+		ua:   fmt.Sprintf("Fleet/%s (+https://fleetdm.com)", version.Version().Version),
+	}
+	return c
+}
 
 type SyncOptions struct {
 	VulnPath             string
@@ -179,7 +206,7 @@ func DownloadCISAKnownExploitsFeed(vulnPath string, cisaKnownExploitsURL string)
 		return err
 	}
 
-	client := fleethttp.NewClient()
+	client := newClientWithUserAgent()
 	err = download.Download(client, u, path)
 	if err != nil {
 		return fmt.Errorf("download cisa known exploits: %w", err)
@@ -333,7 +360,11 @@ func LoadCVEMeta(ctx context.Context, logger *slog.Logger, vulnPath string, ds f
 		meta = append(meta, score)
 	}
 
-	insertCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+	// The first-ever load (and any load after a long outage) inserts the full
+	// NVD set (~300k rows); 1 minute is not enough for that on all supported
+	// databases, and a load that never completes retries the full set every
+	// cron run without ever catching up.
+	insertCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	if err := ds.InsertCVEMeta(insertCtx, meta); err != nil {
 		return fmt.Errorf("insert cve meta: %w", err)

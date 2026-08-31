@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/fleetdm/fleet/v4/server"
@@ -254,7 +255,9 @@ func (ds *Datastore) ShouldSendStatistics(ctx context.Context, frequency time.Du
 }
 
 func (ds *Datastore) RecordStatisticsSent(ctx context.Context) error {
-	_, err := ds.writer(ctx).ExecContext(ctx, `UPDATE statistics SET updated_at = CURRENT_TIMESTAMP LIMIT 1`)
+	// No LIMIT: the statistics table holds a single row, and UPDATE ... LIMIT
+	// is MySQL-only syntax the PG driver refuses.
+	_, err := ds.writer(ctx).ExecContext(ctx, `UPDATE statistics SET updated_at = CURRENT_TIMESTAMP`)
 	return ctxerr.Wrap(ctx, err, "update statistics")
 }
 
@@ -280,7 +283,7 @@ func (ds *Datastore) getTableRowCountsViaInformationSchema(ctx context.Context) 
 		ctx,
 		ds.reader(ctx),
 		&results,
-		"SELECT table_name, COALESCE(table_rows, 0) table_rows FROM information_schema.tables WHERE table_schema = (SELECT DATABASE())",
+		fmt.Sprintf("SELECT table_name, COALESCE(table_rows, 0) table_rows FROM information_schema.tables WHERE table_schema = %s", ds.currentDatabaseFn()),
 	); err != nil {
 		return nil, err
 	}

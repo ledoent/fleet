@@ -37,7 +37,7 @@ func (ds *Datastore) Lock(ctx context.Context, name string, owner string, expira
 
 func (ds *Datastore) createLock(ctx context.Context, name string, owner string, expiration time.Duration) (sql.Result, error) {
 	return ds.writer(ctx).ExecContext(ctx,
-		`INSERT IGNORE INTO locks (name, owner, expires_at) VALUES (?, ?, ?)`,
+		ds.dialect.InsertIgnoreInto()+` locks (name, owner, expires_at) VALUES (?, ?, ?)`+ds.dialect.OnConflictDoNothing("name"),
 		name, owner, time.Now().Add(expiration),
 	)
 }
@@ -63,6 +63,29 @@ func (ds *Datastore) Unlock(ctx context.Context, name string, owner string) erro
 }
 
 func (ds *Datastore) DBLocks(ctx context.Context) ([]*fleet.DBLock, error) {
+	// PostgreSQL has no innodb_lock_waits; use pg_blocking_pids over
+	// pg_stat_activity. (Previously the driver blanket-replaced any query
+	// mentioning "innodb" with SELECT 1, which broke this method's row
+	// scanning entirely.)
+	if ds.dialect.IsPostgres() {
+		const pgStmt = `
+		SELECT
+		  a.pid::text AS waiting_trx_id,
+		  a.pid       AS waiting_thread,
+		  a.query     AS waiting_query,
+		  b.pid::text AS blocking_trx_id,
+		  b.pid       AS blocking_thread,
+		  b.query     AS blocking_query
+		FROM pg_stat_activity a
+		JOIN LATERAL unnest(pg_blocking_pids(a.pid)) AS blocked_by(pid) ON true
+		JOIN pg_stat_activity b ON b.pid = blocked_by.pid`
+		var locks []*fleet.DBLock
+		if err := ds.writer(ctx).SelectContext(ctx, &locks, pgStmt); err != nil {
+			return nil, ctxerr.Wrap(ctx, err, "get pg blocking locks")
+		}
+		return locks, nil
+	}
+
 	// information_schema.innodb_lock_waits has been deprecated in MySQL 8, so we need to check if it exists.
 	// We only need to check once.
 	localInnodbLockWaitsTableExists := innodbLockWaitsTableExists.Load()

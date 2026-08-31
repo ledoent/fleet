@@ -23,24 +23,22 @@ var maintainedAppsAllowedOrderKeys = common_mysql.OrderKeyAllowlist{
 }
 
 func (ds *Datastore) UpsertMaintainedApp(ctx context.Context, app *fleet.MaintainedApp) (*fleet.MaintainedApp, error) {
-	const upsertStmt = `
+	upsertStmt := `
 INSERT INTO
 	fleet_maintained_apps (name, slug, platform, unique_identifier)
 VALUES
 	(?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-	name = VALUES(name),
+` + ds.dialect.OnDuplicateKey("slug", `name = VALUES(name),
 	platform = VALUES(platform),
-	unique_identifier = VALUES(unique_identifier)
-`
+	unique_identifier = VALUES(unique_identifier)`)
 
 	var appID uint
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		res, err := tx.ExecContext(ctx, upsertStmt, app.Name, app.Slug, app.Platform, app.UniqueIdentifier)
+		// upsert the maintained app
+		id, err := insertAndGetIDTx(ctx, tx, ds.dialect, upsertStmt, app.Name, app.Slug, app.Platform, app.UniqueIdentifier)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "upsert maintained app")
 		}
-		id, _ := res.LastInsertId()
 		appID = uint(id) //nolint:gosec // dismiss G115
 
 		return nil
@@ -391,8 +389,37 @@ func (ds *Datastore) mergeWindowsFMATitle(ctx context.Context, destinationID uin
 			{"icons", `UPDATE IGNORE software_title_icons SET software_title_id = ? WHERE software_title_id IN (?)`},
 			{"team pins", `UPDATE IGNORE software_title_team_pins SET title_id = ? WHERE title_id IN (?)`},
 		}
+		if ds.dialect.IsPostgres() {
+			// PG has no UPDATE IGNORE; each IGNORE table above is unique on
+			// (team_id, <title column>), so move only rows whose destination
+			// slot is free. Plain equality on team_id deliberately never
+			// matches NULL teams, mirroring MySQL's unique-index treatment
+			// of NULLs as always-distinct. The delete below cascades away
+			// whatever stays behind, same as the IGNORE path.
+			pgIgnore := func(table, col string) string {
+				return `UPDATE ` + table + ` SET ` + col + ` = ? WHERE ` + col + ` IN (?) AND NOT EXISTS (
+					SELECT 1 FROM ` + table + ` dup WHERE dup.team_id = ` + table + `.team_id AND dup.` + col + ` = ?)`
+			}
+			repoint = []struct {
+				label string
+				stmt  string
+			}{
+				{"software", `UPDATE software SET title_id = ? WHERE title_id IN (?)`},
+				{"host software installs", `UPDATE host_software_installs SET software_title_id = ? WHERE software_title_id IN (?)`},
+				{"upcoming install activities", `UPDATE software_install_upcoming_activities SET software_title_id = ? WHERE software_title_id IN (?)`},
+				{"patch policies", pgIgnore("policies", "patch_software_title_id")},
+				{"update schedules", pgIgnore("software_update_schedules", "title_id")},
+				{"display names", pgIgnore("software_title_display_names", "software_title_id")},
+				{"icons", pgIgnore("software_title_icons", "software_title_id")},
+				{"team pins", pgIgnore("software_title_team_pins", "title_id")},
+			}
+		}
 		for _, r := range repoint {
-			stmt, repointArgs, err := sqlx.In(r.stmt, destinationID, staleIDs)
+			args := []any{destinationID, staleIDs}
+			if strings.Contains(r.stmt, "NOT EXISTS") {
+				args = append(args, destinationID)
+			}
+			stmt, repointArgs, err := sqlx.In(r.stmt, args...)
 			if err != nil {
 				return ctxerr.Wrapf(ctx, err, "build re-point statement for %s", r.label)
 			}

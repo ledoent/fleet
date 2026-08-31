@@ -16,6 +16,15 @@ func init() {
 // Because enrollment_status is a VIRTUAL column (not stored), MySQL recomputes
 // its value at read time; there is no stored data to migrate.
 func Up_20260624210311(tx *sql.Tx) error {
+	if isPostgres() {
+		// PG models enrollment_status as a plain text column (VIRTUAL generated
+		// enum columns don't port); rewrite any stored legacy value instead of
+		// redefining the generated expression.
+		if _, err := tx.Exec(`UPDATE host_mdm SET enrollment_status = 'On (manual - personal)' WHERE enrollment_status = 'On (personal)'`); err != nil {
+			return fmt.Errorf("rename enrollment_status personal value: %w", err)
+		}
+		return nil
+	}
 	if _, err := tx.Exec(`
 		ALTER TABLE host_mdm
 		CHANGE COLUMN enrollment_status enrollment_status

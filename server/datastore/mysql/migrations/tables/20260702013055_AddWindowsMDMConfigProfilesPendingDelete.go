@@ -22,8 +22,10 @@ func Up_20260702013055(tx *sql.Tx) error {
 	// Rows are garbage-collected (reference-counted) once no host_mdm_windows_profiles row still references the profile, so the
 	// retained content survives exactly as long as some host still needs its <Delete> (e.g. a host that was offline when the profile
 	// was deleted).
+	// Idempotent: the fork's PG baseline (regenerated from a DB that carried the
+	// pre-upstreamed version of this feature) may already contain the table and index.
 	if _, err := tx.Exec(`
-		CREATE TABLE mdm_windows_configuration_profiles_pending_delete (
+		CREATE TABLE IF NOT EXISTS mdm_windows_configuration_profiles_pending_delete (
 			profile_uuid VARCHAR(37) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
 			team_id      INT UNSIGNED NOT NULL DEFAULT 0,
 			name         VARCHAR(255) COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -37,9 +39,11 @@ func Up_20260702013055(tx *sql.Tx) error {
 	// The reference-counted GC (and the deleted-profile host-row cleanup) look up host_mdm_windows_profiles by profile_uuid, which the
 	// table's PRIMARY KEY (host_uuid, profile_uuid) cannot serve. Add a profile_uuid index so those become index probes rather than
 	// full scans. Adding a secondary index is an in-place operation by default, so this stays fast even on large fleets.
-	if _, err := tx.Exec(`ALTER TABLE host_mdm_windows_profiles
-		ADD INDEX idx_host_mdm_windows_profiles_profile_uuid (profile_uuid)`); err != nil {
-		return fmt.Errorf("add profile_uuid index to host_mdm_windows_profiles: %w", err)
+	if !indexExistsTx(tx, "host_mdm_windows_profiles", "idx_host_mdm_windows_profiles_profile_uuid") {
+		if _, err := tx.Exec(`ALTER TABLE host_mdm_windows_profiles
+			ADD INDEX idx_host_mdm_windows_profiles_profile_uuid (profile_uuid)`); err != nil {
+			return fmt.Errorf("add profile_uuid index to host_mdm_windows_profiles: %w", err)
+		}
 	}
 	return nil
 }

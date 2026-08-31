@@ -23,7 +23,7 @@ func TestAtomicTableSwapVulnerabilityCountsDropsStaleOldTable(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta("DROP TABLE IF EXISTS vulnerability_host_counts_swap")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta(vulnerabilityHostCountsSwapTableSchema)).
+	mock.ExpectExec(regexp.QuoteMeta(mysqlDialect{}.CreateTableLike(vulnerabilityHostCountsSwapTable, "vulnerability_host_counts"))).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
@@ -32,7 +32,7 @@ func TestAtomicTableSwapVulnerabilityCountsDropsStaleOldTable(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`(?s)RENAME TABLE\s+vulnerability_host_counts TO vulnerability_host_counts_old,\s+vulnerability_host_counts_swap TO vulnerability_host_counts`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("DROP TABLE vulnerability_host_counts_old")).
+	mock.ExpectExec(regexp.QuoteMeta("DROP TABLE IF EXISTS vulnerability_host_counts_old")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 

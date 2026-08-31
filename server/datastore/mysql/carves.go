@@ -28,7 +28,7 @@ var carvesAllowedOrderKeys = common_mysql.OrderKeyAllowlist{
 	"error":       "error",
 }
 
-func upsertCarveDB(ctx context.Context, writer sqlx.ExecerContext, metadata *fleet.CarveMetadata) (int64, error) {
+func upsertCarveDB(ctx context.Context, writer sqlx.ExtContext, dialect DialectHelper, metadata *fleet.CarveMetadata) (int64, error) {
 	stmt := `INSERT INTO carve_metadata (
 		host_id,
 		created_at,
@@ -53,8 +53,10 @@ func upsertCarveDB(ctx context.Context, writer sqlx.ExecerContext, metadata *fle
 		?
 	)`
 
-	result, err := writer.ExecContext(
+	id, err := insertAndGetIDTx(
 		ctx,
+		writer,
+		dialect,
 		stmt,
 		metadata.HostId,
 		metadata.CreatedAt.Format(mySQLTimestampFormat),
@@ -70,11 +72,11 @@ func upsertCarveDB(ctx context.Context, writer sqlx.ExecerContext, metadata *fle
 	if err != nil {
 		return 0, ctxerr.Wrap(ctx, err, "insert carve metadata")
 	}
-	return result.LastInsertId()
+	return id, nil
 }
 
 func (ds *Datastore) NewCarve(ctx context.Context, metadata *fleet.CarveMetadata) (*fleet.CarveMetadata, error) {
-	id, err := upsertCarveDB(ctx, ds.writer(ctx), metadata)
+	id, err := upsertCarveDB(ctx, ds.writer(ctx), ds.dialect, metadata)
 	if err != nil {
 		return nil, ctxerr.Wrap(ctx, err, "insert carve metadata")
 	}
@@ -268,7 +270,8 @@ func (ds *Datastore) ListCarves(ctx context.Context, opt fleet.CarveListOptions)
 		carveSelectFields,
 	)
 	if !opt.Expired {
-		stmt += ` WHERE NOT expired `
+		// Cross-dialect: NOT expr is invalid on smallint in PostgreSQL; use = 0 instead.
+		stmt += ` WHERE expired = 0 `
 	}
 	stmt, params, err := appendListOptionsToSQLSecure(stmt, &opt.ListOptions, carvesAllowedOrderKeys)
 	if err != nil {

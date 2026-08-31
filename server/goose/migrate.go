@@ -207,7 +207,15 @@ func (c *Client) GetDBVersion(db *sql.DB) (int64, error) {
 		return 0, err
 	}
 
-	panic("unreachable")
+	// No applied version found. The iteration completed without finding any
+	// applied row — treat as "no current version" rather than panicking. The
+	// original goose code assumed a bootstrap version=0,is_applied=true row
+	// would always be present, but on PG that row can be absent if the
+	// migration_status_tables was seeded by a different code path (e.g. our
+	// seedPGMigrationHistory function inserts only the baseline-marker
+	// migrations, no bootstrap). Returning 0 here lets callers proceed as
+	// they would on a fresh DB.
+	return 0, nil
 }
 
 // Create the goose_db_version table

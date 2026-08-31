@@ -195,22 +195,32 @@ WHERE host_uuid = ? AND %s`
 	includeVPPApps := fleetPlatform == "darwin" || fleetPlatform == "ios" || fleetPlatform == "ipados"
 
 	if includeSoftwareInstallers {
+		// CAST(NULL AS UNSIGNED) gives the NULL literal an explicit type on
+		// both dialects: MySQL leaves it as unsigned-int NULL; the PG rebind
+		// driver rewrites AS UNSIGNED → AS integer. Without this cast, the
+		// outer ORDER BY COALESCE(software_installer_id, vpp_app_team_id, 0)
+		// fails on PG with "COALESCE types integer and text cannot be
+		// matched" (SQLSTATE 42804) — the untyped NULL in this UNION leg
+		// gets resolved to text by PG before the COALESCE composes with
+		// the typed int from the other leg.
 		installerSelect := `
 SELECT
 	? AS host_uuid,
 	st.name AS name,
 	'pending' AS status,
 	si.id AS software_installer_id,
-	NULL AS vpp_app_team_id,
-	NULL AS in_house_app_id,
+	CAST(NULL AS UNSIGNED) AS vpp_app_team_id,
+	CAST(NULL AS UNSIGNED) AS in_house_app_id,
 	-- policy_gated: true when the installer has at least one policy whose install-software automation points at it (a gating policy
 	-- used as a gate during setup experience). A policy's software_installer_id already uniquely identifies the installer (and its
 	-- team), so no team check is needed; only gate on Windows/Linux. The specific policy ids are derived from the installer at
 	-- decision time, so only this marker is stored.
-	EXISTS (SELECT 1
+	-- CASE instead of bare EXISTS: policy_gated is smallint on PG (the
+	-- TINYINT(1) convention), and PG won't implicitly cast boolean→smallint.
+	CASE WHEN EXISTS (SELECT 1
 		FROM policies p
 		WHERE p.software_installer_id = si.id
-		AND ? IN ('windows', 'linux')) AS policy_gated,
+		AND ? IN ('windows', 'linux')) THEN 1 ELSE 0 END AS policy_gated,
 	COALESCE(stdn.display_name, st.name) AS sort_name,
 	st.id AS software_title_id
 FROM software_installers si
@@ -267,9 +277,9 @@ SELECT
 	st.name AS name,
 	'pending' AS status,
 	si.id AS software_installer_id,
-	NULL AS vpp_app_team_id,
-	NULL AS in_house_app_id,
-	FALSE AS policy_gated,
+	CAST(NULL AS UNSIGNED) AS vpp_app_team_id,
+	CAST(NULL AS UNSIGNED) AS in_house_app_id,
+	0 AS policy_gated,
 	COALESCE(stdn.display_name, st.name) AS sort_name,
 	st.id AS software_title_id
 FROM software_installers si
@@ -298,15 +308,17 @@ AND %s`
 	}
 
 	if includeVPPApps {
+		// CAST(NULL AS UNSIGNED) — same reasoning as the installer leg above.
+		// Cross-dialect typed-NULL so PG can resolve the outer COALESCE.
 		vppSelect := `
 SELECT
 	? AS host_uuid,
 	st.name AS name,
 	'pending' AS status,
-	NULL AS software_installer_id,
+	CAST(NULL AS UNSIGNED) AS software_installer_id,
 	vat.id AS vpp_app_team_id,
-	NULL AS in_house_app_id,
-	FALSE AS policy_gated,
+	CAST(NULL AS UNSIGNED) AS in_house_app_id,
+	0 AS policy_gated,
 	COALESCE(stdn.display_name, st.name) AS sort_name,
 	st.id AS software_title_id
 FROM vpp_apps va
@@ -343,10 +355,10 @@ SELECT
 	? AS host_uuid,
 	st.name AS name,
 	'pending' AS status,
-	NULL AS software_installer_id,
-	NULL AS vpp_app_team_id,
+	CAST(NULL AS UNSIGNED) AS software_installer_id,
+	CAST(NULL AS UNSIGNED) AS vpp_app_team_id,
 	iha.id AS in_house_app_id,
-	FALSE AS policy_gated,
+	0 AS policy_gated,
 	COALESCE(stdn.display_name, st.name) AS sort_name,
 	st.id AS software_title_id
 FROM in_house_apps iha
@@ -449,7 +461,7 @@ WHERE global_or_team_id = ?`
 		// Set setup experience on Apple hosts only if they have something configured.
 		if fleetPlatform == "darwin" || fleetPlatform == "ios" || fleetPlatform == "ipados" {
 			if totalInsertions > 0 {
-				if err := setHostAwaitingConfiguration(ctx, tx, hostUUID, true); err != nil {
+				if err := setHostAwaitingConfiguration(ctx, tx, ds.dialect, hostUUID, true); err != nil {
 					return ctxerr.Wrap(ctx, err, "setting host awaiting configuration to true")
 				}
 			}
@@ -748,7 +760,7 @@ func (ds *Datastore) GetSetupExperienceCount(ctx context.Context, platform strin
 			(SELECT COUNT(*)
 			FROM software_installers
 			WHERE global_or_team_id = ?
-			AND install_during_setup = 1
+			AND install_during_setup = true
 			AND platform = ?)
 			+
 			(SELECT COUNT(*)
@@ -761,7 +773,7 @@ func (ds *Datastore) GetSetupExperienceCount(ctx context.Context, platform strin
 			FROM vpp_apps_teams
 			WHERE global_or_team_id = ?
 			AND platform = ?
-			AND install_during_setup = 1
+			AND install_during_setup = true
 		) AS vpp,
 		(
 			SELECT COUNT(*)
@@ -1075,14 +1087,11 @@ WHERE
 func (ds *Datastore) SetSetupExperienceScript(ctx context.Context, script *fleet.Script) (bool, error) {
 	var changed bool
 	err := ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		var err error
-
 		// first insert script contents
-		scRes, err := insertScriptContents(ctx, tx, script.ScriptContents)
+		id, err := insertScriptContents(ctx, tx, ds.dialect, script.ScriptContents)
 		if err != nil {
 			return err
 		}
-		id, _ := scRes.LastInsertId()
 
 		// This clause allows for PUT semantics. The basic idea is:
 		// - no existing setup script -> go through the usual insert logic
@@ -1169,17 +1178,15 @@ func (ds *Datastore) deleteSetupExperienceScript(ctx context.Context, tx sqlx.Ex
 
 func (ds *Datastore) SetHostAwaitingConfiguration(ctx context.Context, hostUUID string, awaitingConfiguration bool) error {
 	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
-		return setHostAwaitingConfiguration(ctx, tx, hostUUID, awaitingConfiguration)
+		return setHostAwaitingConfiguration(ctx, tx, ds.dialect, hostUUID, awaitingConfiguration)
 	})
 }
 
-func setHostAwaitingConfiguration(ctx context.Context, tx sqlx.ExtContext, hostUUID string, awaitingConfiguration bool) error {
-	const stmt = `
+func setHostAwaitingConfiguration(ctx context.Context, tx sqlx.ExtContext, dialect DialectHelper, hostUUID string, awaitingConfiguration bool) error {
+	stmt := `
 INSERT INTO host_mdm_apple_awaiting_configuration (host_uuid, awaiting_configuration)
 VALUES (?, ?)
-ON DUPLICATE KEY UPDATE
-	awaiting_configuration = VALUES(awaiting_configuration)
-	`
+` + dialect.OnDuplicateKey("host_uuid", "awaiting_configuration = VALUES(awaiting_configuration)")
 
 	_, err := tx.ExecContext(ctx, stmt, hostUUID, awaitingConfiguration)
 	if err != nil {
