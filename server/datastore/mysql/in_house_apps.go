@@ -357,6 +357,21 @@ func (ds *Datastore) SaveInHouseAppUpdates(ctx context.Context, payload *fleet.U
 
 func (ds *Datastore) DeleteInHouseApp(ctx context.Context, id uint) error {
 	err := ds.withTx(ctx, func(tx sqlx.ExtContext) error {
+		// Bail early when the app is selected for setup experience, before the
+		// cleanup below cancels pending installs in transactions of its own. A
+		// plain read keeps the row unlocked during that cascade; the guarded
+		// DELETE below still catches a concurrent selection.
+		var installDuringSetup bool
+		switch err := sqlx.GetContext(ctx, tx, &installDuringSetup,
+			`SELECT install_during_setup FROM in_house_apps WHERE id = ?`, id); {
+		case errors.Is(err, sql.ErrNoRows):
+			return notFound("InHouseApp").WithID(id)
+		case err != nil:
+			return ctxerr.Wrap(ctx, err, "check if in-house app is installed during setup")
+		case installDuringSetup:
+			return errDeleteInstallerInstalledDuringSetup
+		}
+
 		err := ds.RemovePendingInHouseAppInstalls(ctx, id)
 		if err != nil && !fleet.IsNotFound(err) {
 			return ctxerr.Wrap(ctx, err, "delete in house app: remove pending in house app installs")
@@ -368,9 +383,23 @@ func (ds *Datastore) DeleteInHouseApp(ctx context.Context, id uint) error {
 			return ctxerr.Wrap(ctx, err, "delete software title display name")
 		}
 
-		_, err = tx.ExecContext(ctx, `DELETE FROM in_house_apps WHERE id = ?`, id)
+		res, err := tx.ExecContext(ctx, `DELETE FROM in_house_apps WHERE id = ? AND install_during_setup = 0`, id)
 		if err != nil {
 			return ctxerr.Wrap(ctx, err, "delete in house app")
+		}
+		if rows, _ := res.RowsAffected(); rows == 0 {
+			// either selected for setup experience or deleted concurrently
+			// between the check above and here
+			var installDuringSetup bool
+			switch err := sqlx.GetContext(ctx, tx, &installDuringSetup,
+				`SELECT install_during_setup FROM in_house_apps WHERE id = ?`, id); {
+			case errors.Is(err, sql.ErrNoRows):
+				return notFound("InHouseApp").WithID(id)
+			case err != nil:
+				return ctxerr.Wrap(ctx, err, "check why in-house app was not deleted")
+			default:
+				return errDeleteInstallerInstalledDuringSetup
+			}
 		}
 		return nil
 	})
@@ -585,8 +614,12 @@ VALUES
 			return ctxerr.Wrap(ctx, err, "insert in house app install request join table")
 		}
 
-		if _, err := ds.activateNextUpcomingActivity(ctx, tx, hostID, ""); err != nil {
-			return ctxerr.Wrap(ctx, err, "activate next activity")
+		// deferred activations are picked up by the fleet-initiated release
+		// cron within its per-minute budget
+		if !opts.DeferActivation {
+			if _, err := ds.activateNextUpcomingActivity(ctx, tx, hostID, ""); err != nil {
+				return ctxerr.Wrap(ctx, err, "activate next activity")
+			}
 		}
 		return nil
 	})
@@ -1015,9 +1048,10 @@ INSERT INTO in_house_apps (
 	platform,
 	bundle_identifier,
 	self_service,
-	url
+	url,
+	install_during_setup
 ) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, false)
 )
 ` + ds.dialect.OnDuplicateKey("global_or_team_id, filename, platform", `
   filename = VALUES(filename),
@@ -1026,7 +1060,8 @@ INSERT INTO in_house_apps (
   platform = VALUES(platform),
   bundle_identifier = VALUES(bundle_identifier),
   self_service = VALUES(self_service),
-  url = VALUES(url)
+  url = VALUES(url),
+  install_during_setup = COALESCE(?, install_during_setup)
 `)
 
 	const loadInHouseInstallerID = `
@@ -1380,6 +1415,8 @@ WHERE software_title_display_names.software_title_id = iha.title_id
 				installer.BundleIdentifier,
 				installer.SelfService,
 				installer.URL,
+				installer.InstallDuringSetup,
+				installer.InstallDuringSetup,
 			}
 			upsertQuery := insertNewOrEditedInstaller
 			if len(existing) > 0 && existing[0].IsPackageModified { // update uploaded_at for updated installer package
@@ -1539,7 +1576,8 @@ WHERE software_title_display_names.software_title_id = iha.title_id
 	if err != nil {
 		return err
 	}
-	return ds.activateNextUpcomingActivityForBatchOfHosts(ctx, activateAffectedHostIDs)
+	_, err = ds.activateNextUpcomingActivityForBatchOfHosts(ctx, activateAffectedHostIDs)
+	return err
 }
 
 func (ds *Datastore) runInHouseUpdateSideEffectsInTransaction(ctx context.Context, tx sqlx.ExtContext, installerID uint, wasMetadataUpdated bool, wasPackageUpdated bool) (affectedHostIDs []uint, err error) {

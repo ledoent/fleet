@@ -28,6 +28,7 @@ func TestScim(t *testing.T) {
 		{"ScimUserCreateValidation", testScimUserCreateValidation},
 		{"ScimUserByID", testScimUserByID},
 		{"ScimUserByUserName", testScimUserByUserName},
+		{"ScimUserFleetUserIDLink", testScimUserFleetUserIDLink},
 		{"ScimUserByUserNameOrEmail", testScimUserByUserNameOrEmail},
 		{"ScimUserByHostID", testScimUserByHostID},
 		{"ScimUserCreateAssociatesAllMatchingHosts", testScimUserCreateAssociatesAllMatchingHosts},
@@ -46,6 +47,7 @@ func TestScim(t *testing.T) {
 		{"ListScimGroups", testListScimGroups},
 		{"ScimLastRequest", testScimLastRequest},
 		{"ScimUsersExist", testScimUsersExist},
+		{"ScimNestedGroups", testScimNestedGroups},
 		{"TriggerResendIdPProfiles", testTriggerResendIdPProfiles},
 		{"TriggerResendIdPProfilesOnTeam", testTriggerResendIdPProfilesOnTeam},
 		{"TriggerResendCertTemplatesAndAppConfigs", testTriggerResendCertTemplatesAndAppConfigs},
@@ -134,6 +136,139 @@ func testScimUserCreate(t *testing.T, ds *Datastore) {
 			assert.Equal(t, u.ID, verify.Emails[i].ScimUserID)
 		}
 	}
+}
+
+// testScimNestedGroups verifies that nested SCIM group membership (as provisioned
+// by Entra ID via group-type members) is stored and expanded transitively: a user
+// who is a direct member of a child group is an effective member of every ancestor
+// group.
+func testScimNestedGroups(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+
+	// Create a user who will be a direct member of the leaf/child group.
+	user := fleet.ScimUser{UserName: "nested-user", Emails: []fleet.ScimUserEmail{}}
+	userID, err := ds.CreateScimUser(ctx, &user)
+	require.NoError(t, err)
+
+	// child group directly contains the user.
+	child := &fleet.ScimGroup{DisplayName: "Frontend B", ScimUsers: []uint{userID}}
+	childID, err := ds.CreateScimGroup(ctx, child)
+	require.NoError(t, err)
+
+	// parent group contains the child group as a nested (group-type) member.
+	parent := &fleet.ScimGroup{DisplayName: "Engineering B", ChildGroups: []uint{childID}}
+	parentID, err := ds.CreateScimGroup(ctx, parent)
+	require.NoError(t, err)
+
+	// ScimGroupByID round-trips the nested child edge and does not confuse it with
+	// a user member.
+	gotParent, err := ds.ScimGroupByID(ctx, parentID, false)
+	require.NoError(t, err)
+	require.Empty(t, gotParent.ScimUsers)
+	require.Equal(t, []uint{childID}, gotParent.ChildGroups)
+
+	// The user is an effective member of BOTH the child and the parent group.
+	gotUser, err := ds.ScimUserByID(ctx, userID)
+	require.NoError(t, err)
+	groupIDs := make([]uint, 0, len(gotUser.Groups))
+	for _, g := range gotUser.Groups {
+		groupIDs = append(groupIDs, g.ID)
+	}
+	require.ElementsMatch(t, []uint{childID, parentID}, groupIDs)
+
+	// Add a third level: grandparent contains parent. The user should now be an
+	// effective member of all three.
+	grandparent := &fleet.ScimGroup{DisplayName: "Company B", ChildGroups: []uint{parentID}}
+	grandparentID, err := ds.CreateScimGroup(ctx, grandparent)
+	require.NoError(t, err)
+
+	gotUser, err = ds.ScimUserByID(ctx, userID)
+	require.NoError(t, err)
+	groupIDs = groupIDs[:0]
+	for _, g := range gotUser.Groups {
+		groupIDs = append(groupIDs, g.ID)
+	}
+	require.ElementsMatch(t, []uint{childID, parentID, grandparentID}, groupIDs)
+
+	// Removing the parent -> child edge via ReplaceScimGroup drops the user's
+	// effective membership in parent and grandparent, but keeps the child.
+	parent.ChildGroups = []uint{}
+	require.NoError(t, ds.ReplaceScimGroup(ctx, parent))
+
+	gotUser, err = ds.ScimUserByID(ctx, userID)
+	require.NoError(t, err)
+	groupIDs = groupIDs[:0]
+	for _, g := range gotUser.Groups {
+		groupIDs = append(groupIDs, g.ID)
+	}
+	require.ElementsMatch(t, []uint{childID}, groupIDs)
+}
+
+func testScimUserFleetUserIDLink(t *testing.T, ds *Datastore) {
+	ctx := t.Context()
+
+	role := fleet.RoleObserver
+	fleetUser, err := ds.NewUser(ctx, &fleet.User{
+		Password:   []byte("p4ssw0rd.123"),
+		Salt:       "salt",
+		Name:       "SCIM Linked",
+		Email:      "linked@example.com",
+		GlobalRole: &role,
+		SSOEnabled: true,
+	})
+	require.NoError(t, err)
+
+	otherRole := fleet.RoleObserver
+	otherFleetUser, err := ds.NewUser(ctx, &fleet.User{
+		Password:   []byte("p4ssw0rd.123"),
+		Salt:       "salt",
+		Name:       "SCIM Other",
+		Email:      "other@example.com",
+		GlobalRole: &otherRole,
+		SSOEnabled: true,
+	})
+	require.NoError(t, err)
+
+	scimID, err := ds.CreateScimUser(ctx, &fleet.ScimUser{UserName: "linked@example.com"})
+	require.NoError(t, err)
+
+	// Newly created SCIM user is unlinked.
+	got, err := ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.Nil(t, got.FleetUserID)
+
+	// Set the link; both accessors load it.
+	require.NoError(t, ds.SetScimUserFleetUserID(ctx, scimID, fleetUser.ID))
+
+	got, err = ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.NotNil(t, got.FleetUserID)
+	require.Equal(t, fleetUser.ID, *got.FleetUserID)
+
+	byName, err := ds.ScimUserByUserName(ctx, "linked@example.com")
+	require.NoError(t, err)
+	require.NotNil(t, byName.FleetUserID)
+	require.Equal(t, fleetUser.ID, *byName.FleetUserID)
+
+	// Set-once: an established link cannot be re-pointed.
+	require.NoError(t, ds.SetScimUserFleetUserID(ctx, scimID, otherFleetUser.ID))
+	got, err = ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.NotNil(t, got.FleetUserID)
+	require.Equal(t, fleetUser.ID, *got.FleetUserID, "an established link must not be re-pointed")
+
+	// FK ON DELETE SET NULL: deleting the Fleet user clears the link, after
+	// which a new link can be established.
+	require.NoError(t, ds.DeleteUser(ctx, fleetUser.ID))
+	got, err = ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.Nil(t, got.FleetUserID, "FK ON DELETE SET NULL should clear the link")
+
+	require.NoError(t, ds.SetScimUserFleetUserID(ctx, scimID, otherFleetUser.ID))
+	got, err = ds.ScimUserByID(ctx, scimID)
+	require.NoError(t, err)
+	require.NotNil(t, got.FleetUserID)
+	require.Equal(t, otherFleetUser.ID, *got.FleetUserID)
 }
 
 func testScimUserByID(t *testing.T, ds *Datastore) {

@@ -658,7 +658,6 @@ func CreatePostgresDS(t testing.TB) *Datastore {
 		writeCh:                make(chan itemToWrite),
 		serverPrivateKey:       "test-private-key-for-pg-tests!!!", // 32 bytes for AES-256
 		stmtCache:              make(map[string]*sqlx.Stmt),
-		knownSoftwareTitleKeys: make(map[string]struct{}),
 	}
 	ds.Datastore = NewAndroidDatastore(logger, testDB, testDB, postgresDialect{})
 	t.Cleanup(func() { ds.Close() })
@@ -724,6 +723,7 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 		"mdm_apple_declaration_categories": true,
 		"mdm_delivery_status":              true,
 		"mdm_operation_types":              true,
+		"mdm_windows_enrollment_config":    true,
 		"migration_status_tables":          true,
 		"osquery_options":                  true,
 		"software_categories":              true,
@@ -767,17 +767,17 @@ func TruncateTables(t testing.TB, ds *Datastore, tables ...string) {
 			// a prior test left the sequence elevated.
 			_, _ = db.ExecContext(ctx, `TRUNCATE TABLE "`+tbl+`" RESTART IDENTITY CASCADE`)
 		}
-		// Same cache hygiene as the MySQL path below: without this, the
-		// in-process software-title cache says a truncated title still
-		// exists and UpdateHostSoftware skips recreating it.
-		ds.clearKnownSoftwareTitleKeys()
+		// Same cache hygiene as the MySQL path below: the in-process Windows
+		// Fleet-maintained app cache would otherwise leak across test cases
+		// that share a Datastore.
+		ds.clearWindowsFMAMatchesCache()
 		return
 	}
 
 	testing_utils.TruncateTables(t, ds.writer(context.Background()), ds.logger, nonEmptyTables, tables...)
-	// Clear the in-process software title cache so it doesn't retain entries
-	// for titles that were just truncated from the database.
-	ds.clearKnownSoftwareTitleKeys()
+	// Clear the in-process Windows Fleet-maintained app cache, which would
+	// otherwise leak across test cases that share a Datastore.
+	ds.clearWindowsFMAMatchesCache()
 }
 
 // this is meant to be used for debugging/testing that statement uses an efficient
@@ -1226,6 +1226,11 @@ func (t *testingLookupService) GetActivitiesWebhookSettings(ctx context.Context)
 	return appConfig.WebhookSettings.ActivitiesWebhook, nil
 }
 
+func (t *testingLookupService) GetHostActivitiesWebhookSettings(ctx context.Context, hostIDs []uint) ([]fleet.HostActivitiesWebhookDelivery, error) {
+	// Host activities webhooks are not exercised through this test adapter.
+	return nil, nil
+}
+
 func (t *testingLookupService) ActivateNextUpcomingActivityForHost(ctx context.Context, hostID uint, fromCompletedExecID string) error {
 	return t.ds.ActivateNextUpcomingActivityForHost(ctx, hostID, fromCompletedExecID)
 }
@@ -1276,3 +1281,10 @@ func ListActivitiesAPI(t testing.TB, ctx context.Context, svc activity_api.Servi
 // errOnly adapts RecordPolicyQueryExecutions' (stalePolicyIDs, error) return
 // for assertions that only care about the error.
 func errOnly(_ []uint, err error) error { return err }
+
+func excludeAnyLabelScope(label *fleet.Label) fleet.LabelIdentsWithScope {
+	return fleet.LabelIdentsWithScope{
+		LabelScope: fleet.LabelScopeExcludeAny,
+		ByName:     map[string]fleet.LabelIdent{label.Name: {LabelName: label.Name, LabelID: label.ID}},
+	}
+}

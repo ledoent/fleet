@@ -119,7 +119,7 @@ func SanitizeColumn(col string) string {
 // "cannot find encode plan"). MySQL is unaffected — it coerces either way.
 func AppendListOptionsWithParamsSecure(sql string, params []any, opts ListOptions, allowlist OrderKeyAllowlist, textOrderKeys ...string) (string, []any, error) {
 	if allowlist == nil {
-		panic("AppendListOptionsWithParams: allowlist cannot be nil; use empty map to disallow all sorting")
+		panic("AppendListOptionsWithParamsSecure: allowlist cannot be nil; use empty map to disallow all sorting")
 	}
 
 	userOrderKey := opts.GetOrderKey()
@@ -215,73 +215,4 @@ func AppendListOptionsWithParamsSecure(sql string, params []any, opts ListOption
 	}
 
 	return sql, params, nil
-}
-
-// AppendListOptionsWithParams appends ORDER BY, LIMIT, and OFFSET clauses to a SQL string
-// based on the provided list options. It accepts existing query params and returns
-// the extended params slice.
-//
-// Deprecated: this method will be removed in favor of AppendListOptionsWithParamsSecure
-func AppendListOptionsWithParams(sql string, params []any, opts ListOptions) (string, []any) {
-	orderKey := SanitizeColumn(opts.GetOrderKey())
-	page := opts.GetPage()
-
-	// Trim whitespace: a pure-whitespace cursor is effectively "no cursor".
-	// MySQL silently coerces such values to 0/empty when compared against
-	// typed columns; PG rejects with "invalid input syntax for type
-	// integer/boolean". Treat as absent on both sides.
-	if cursor := strings.TrimSpace(opts.GetCursorValue()); cursor != "" && orderKey != "" {
-		cursorSQL := " WHERE "
-		if strings.Contains(strings.ToLower(sql), "where") {
-			cursorSQL = " AND "
-		}
-		// Cursor value is always passed as string. MySQL automatically converts
-		// string to integer when comparing against integer columns.
-		// See: https://dev.mysql.com/doc/refman/8.0/en/type-conversion.html
-		// PG does NOT auto-convert, so pass numeric cursors as int64.
-		var cursorParam any = cursor
-		if v, err := strconv.ParseInt(cursor, 10, 64); err == nil {
-			cursorParam = v
-		}
-		params = append(params, cursorParam)
-		direction := ">" // ASC
-		if opts.IsDescending() {
-			direction = "<" // DESC
-		}
-		sql = fmt.Sprintf("%s %s %s %s ?", sql, cursorSQL, orderKey, direction)
-
-		// Cursor-based pagination supersedes page-based pagination
-		page = 0
-	}
-
-	// See AppendListOptionsWithParamsSecure for rationale: skip ORDER BY on
-	// single-aggregate SELECTs so PG doesn't reject the count-only call sites.
-	if orderKey != "" && !reSelectAggregateOnly.MatchString(sql) {
-		direction := "ASC"
-		if opts.IsDescending() {
-			direction = "DESC"
-		}
-
-		sql = fmt.Sprintf("%s ORDER BY %s %s", sql, orderKey, direction)
-		if opts.GetSecondaryOrderKey() != "" {
-			dir := "ASC"
-			if opts.IsSecondaryDescending() {
-				dir = "DESC"
-			}
-			sql += fmt.Sprintf(`, %s %s`, SanitizeColumn(opts.GetSecondaryOrderKey()), dir)
-		}
-	}
-
-	limit := opts.GetPerPage()
-	if opts.WantsPaginationInfo() {
-		limit++
-	}
-	sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
-
-	offset := opts.GetPerPage() * page
-	if offset > 0 {
-		sql = fmt.Sprintf("%s OFFSET %d", sql, offset)
-	}
-
-	return sql, params
 }

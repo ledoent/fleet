@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/fleetdm/fleet/v4/pkg/optjson"
 	"github.com/fleetdm/fleet/v4/server/mdm/nanodep/godep"
 	"github.com/fleetdm/fleet/v4/server/version"
 	"github.com/fleetdm/fleet/v4/server/websocket"
@@ -23,7 +24,7 @@ type EnterpriseOverrides struct {
 	TeamByIDOrName func(ctx context.Context, id *uint, name *string) (*Team, error)
 	// UpdateTeamMDMDiskEncryption is the team-specific service method for when
 	// a team ID is provided to the UpdateMDMDiskEncryption method.
-	UpdateTeamMDMDiskEncryption   func(ctx context.Context, tm *Team, enable *bool, requireBitLockerPIN *bool) error
+	UpdateTeamMDMDiskEncryption   func(ctx context.Context, tm *Team, changes DiskEncryptionSettingsChanges, requireBitLockerPIN *bool) error
 	UpdateTeamMDMHostNameTemplate func(ctx context.Context, tm *Team, nameTemplate string) error
 
 	// ApplyHostNameTemplateChange reconciles host-name enforcement rows and emits
@@ -36,8 +37,7 @@ type EnterpriseOverrides struct {
 	// they also need to be called from the standard server/service method (e.g.
 	// Modify AppConfig), so in this case we need to use the enterprise
 	// overrides.
-	MDMAppleEnableFileVaultAndEscrow  func(ctx context.Context, teamID *uint) error
-	MDMAppleDisableFileVaultAndEscrow func(ctx context.Context, teamID *uint) error
+	MDMAppleReconcileFileVaultProfile func(ctx context.Context, teamID *uint) error
 	DeleteMDMAppleSetupAssistant      func(ctx context.Context, teamID *uint) error
 	MDMAppleSyncDEPProfiles           func(ctx context.Context) error
 	DeleteMDMAppleBootstrapPackage    func(ctx context.Context, teamID *uint, dryRun bool) error
@@ -78,6 +78,15 @@ type OsqueryService interface {
 	SubmitStatusLogs(ctx context.Context, logs []json.RawMessage) (err error)
 	SubmitResultLogs(ctx context.Context, logs []json.RawMessage) (err error)
 	YaraRuleByName(ctx context.Context, name string) (*YaraRule, error)
+
+	// ListHostIDsDueForDistributedRead returns the subset of hostIDs whose next
+	// distributed/read would include interval work or an unanswered live query
+	// campaign, keyed by host ID with the reason it is due (an AgentWSReason
+	// constant or a live-<campaign ID> reason; the first due gate wins). Used
+	// by the WebSocket transport's interval check job; applies the same
+	// staleness gates (including per-host jitter) as GetDistributedQueries.
+	// IDs with no hosts row are returned with AgentWSReasonHostNotFound.
+	ListHostIDsDueForDistributedRead(ctx context.Context, hostIDs []uint) (map[uint]string, error)
 }
 
 // UserLookupService provides methods for looking up users.
@@ -110,6 +119,10 @@ type ActivityLookupService interface {
 
 	// GetActivitiesWebhookSettings returns the webhook settings for activities.
 	GetActivitiesWebhookSettings(ctx context.Context) (ActivitiesWebhookSettings, error)
+	// GetHostActivitiesWebhookSettings returns the enabled host-activities
+	// webhook settings of the fleets the given hosts belong to, deduplicated by
+	// fleet. Returns nil on Fleet Free.
+	GetHostActivitiesWebhookSettings(ctx context.Context, hostIDs []uint) ([]HostActivitiesWebhookDelivery, error)
 	// ActivateNextUpcomingActivityForHost activates the next upcoming activity for the given host.
 	ActivateNextUpcomingActivityForHost(ctx context.Context, hostID uint, fromCompletedExecID string) error
 }
@@ -143,6 +156,16 @@ type Service interface {
 
 	// GetFleetDesktopSummary returns a summary of the host used by Fleet Desktop to operate.
 	GetFleetDesktopSummary(ctx context.Context) (DesktopSummary, error)
+
+	// InitiateDeviceSSO starts the SAML authentication flow for the Fleet
+	// Desktop "My device" page, bound to the host resolved from the
+	// initiating device token.
+	InitiateDeviceSSO(ctx context.Context, deviceURL string) (*DeviceSSOInitiation, error)
+
+	// RequireDeviceSSOSession enforces the Fleet Desktop SSO gate for the given host.
+	// When fleet_desktop.sso_enabled is off it allows the request; when it is on,
+	// sessionID must identify a live device SSO session minted for that host.
+	RequireDeviceSSOSession(ctx context.Context, host *Host, sessionID string) error
 
 	// SetEnterpriseOverrides allows the enterprise service to override specific methods
 	// that can't be easily overridden via embedding.
@@ -236,7 +259,12 @@ type Service interface {
 	// MDMSSOCallback handles the IdP SAMLResponse and ensures the
 	// credentials are valid, then responds with a URL to the Fleet UI to
 	// handle next steps based on the query parameters provided.
-	MDMSSOCallback(ctx context.Context, sessionID string, samlResponse []byte) (redirectURL, byodCookieValue string)
+	//
+	// deviceSSOSessionID and deviceSSOSessionDurationSeconds are set when the
+	// callback was initiated by the Fleet Desktop device SSO flow
+	// (SSOInitiatorFleetDesktop), so the caller can set the device SSO session
+	// cookie.
+	MDMSSOCallback(ctx context.Context, sessionID string, samlResponse []byte) (redirectURL, byodCookieValue, deviceSSOSessionID string, deviceSSOSessionDurationSeconds int)
 
 	// GetMDMAccountDrivenEnrollmentSSOURL returns the URL to redirect to for MDM Account Driven Enrollment SSO Authentication
 	GetMDMAccountDrivenEnrollmentSSOURL(ctx context.Context, enrollmentToken string) (string, error)
@@ -432,6 +460,9 @@ type Service interface {
 	//
 	// The return value can also include policy information and CVE scores based
 	// on the values provided to `opts`
+	//
+	// A caller allowed to resolve the identifier but not to read the host
+	// (GitOps) gets a result with HostDetail.IDOnly set, see that field.
 	HostByIdentifier(ctx context.Context, identifier string, opts HostDetailOptions) (*HostDetail, error)
 	// RefetchHost requests a refetch of host details for the provided host.
 	RefetchHost(ctx context.Context, id uint) (err error)
@@ -484,6 +515,11 @@ type Service interface {
 
 	HostEncryptionKey(ctx context.Context, id uint) (*HostDiskEncryptionKey, error)
 	EscrowLUKSData(ctx context.Context, passphrase string, salt string, keySlot *uint, clientError string, keyType string) error
+
+	// EscrowWindowsManagedLocalAccountPassword stores the device-generated password that Windows fleetd escrows after
+	// creating the managed local admin account. When clientError is set no password is stored; the account is marked failed
+	// and the device-reported reason is recorded on it.
+	EscrowWindowsManagedLocalAccountPassword(ctx context.Context, password string, clientError string) error
 
 	// AddLabelsToHost adds the given label names to the host's label membership.
 	//
@@ -542,6 +578,8 @@ type Service interface {
 	AppConfigObfuscated(ctx context.Context) (info *AppConfig, err error)
 	ModifyAppConfig(ctx context.Context, p []byte, applyOpts ApplySpecOptions) (info *AppConfig, err error)
 	SandboxEnabled() bool
+	// MaxInstallerSizeBytes returns the configured maximum size for software installer uploads.
+	MaxInstallerSizeBytes() int64
 	AppConfigUrls(ctx context.Context) (urls *AppConfigUrls, err error)
 
 	// ApplyEnrollSecretSpec adds and updates the enroll secrets specified in the spec.
@@ -682,6 +720,11 @@ type Service interface {
 	// This should be called after service creation to inject the ACME service dependency.
 	SetACMEService(acmeSvc ACMEWriteService)
 
+	// SetAgentCheckInNotifier sets the notifier used to wake up agents
+	// connected over the WebSocket transport. This should be called after
+	// service creation when the transport is enabled.
+	SetAgentCheckInNotifier(notifier AgentCheckInNotifier)
+
 	// NewACMEEnrollment creates a new ACME enrollment using the ACME service module. It returns the
 	// ACME identifier for the new enrollment, which is used to track the enrollment process and link it to a host.
 	NewACMEEnrollment(ctx context.Context, hostIdentifier string) (string, error)
@@ -790,6 +833,10 @@ type Service interface {
 	// InstallVPPAppPostValidation installs a VPP app, assuming that GetVPPTokenIfCanInstallVPPApps has passed and provided a VPP token
 	InstallVPPAppPostValidation(ctx context.Context, host *Host, vppApp *VPPApp, token string, opts HostSoftwareInstallOptions) (string, error)
 
+	// InstallInHouseAppForSetupExperience validates the in-house app's managed configuration for the
+	// host and enqueues its InstallApplication command during setup experience, returning the command UUID.
+	InstallInHouseAppForSetupExperience(ctx context.Context, host *Host, inHouseAppID uint, softwareTitleID uint) (string, error)
+
 	// UninstallSoftwareTitle uninstalls a software title in the given host.
 	UninstallSoftwareTitle(ctx context.Context, hostID uint, softwareTitleID uint) error
 
@@ -800,13 +847,7 @@ type Service interface {
 	// Returns a request UUID that can be used to track an ongoing batch request (with GetBatchSetSoftwareInstallersResult).
 	BatchSetSoftwareInstallers(ctx context.Context, tmName string, payloads []*SoftwareInstallerPayload, dryRun bool) (string, error)
 	// GetBatchSetSoftwareInstallersResult polls for the status of a batch-apply started by BatchSetSoftwareInstallers.
-	// Return values:
-	//	- 'status': status of the batch-apply which can be "processing", "completed" or "failed".
-	//	- 'message': which contains error information when the status is "failed".
-	//	- 'packages': Contains the list of the applied software packages (when status is "completed"). This is always empty for a dry run.
-	//	- 'deleted_packages': Contains the list of packages the batch deleted (dry run: would delete), when status is "completed".
-	//  - 'categories': Contains the list of categories the batch uses/added, when status is "completed".
-	GetBatchSetSoftwareInstallersResult(ctx context.Context, tmName string, requestUUID string, dryRun bool) (status string, message string, packages []SoftwarePackageResponse, deletedPackages []DeletedSoftwarePackage, categories []string, err error)
+	GetBatchSetSoftwareInstallersResult(ctx context.Context, tmName string, requestUUID string, dryRun bool) (*BatchSetSoftwareInstallersResult, error)
 
 	// SelfServiceInstallSoftwareTitle installs a software title
 	// initiated by the user
@@ -814,8 +855,9 @@ type Service interface {
 
 	// SelfServiceInstallAllSoftwareTitles queues a self-service install for every available self-service software
 	// title on the host that isn't already installed. When categoryID is non-nil, only titles assigned to that
-	// self-service category on the host's fleet are queued.
-	SelfServiceInstallAllSoftwareTitles(ctx context.Context, host *Host, categoryID *uint) error
+	// self-service category on the host's fleet are queued. When matchQuery is non-empty, only titles whose name
+	// matches the query (same semantics as the self-service list endpoint) are queued.
+	SelfServiceInstallAllSoftwareTitles(ctx context.Context, host *Host, categoryID *uint, matchQuery string) error
 
 	// HasSelfServiceSoftwareInstallers returns whether the host has self-service software installers
 	HasSelfServiceSoftwareInstallers(ctx context.Context, host *Host) (bool, error)
@@ -881,11 +923,11 @@ type Service interface {
 	// Team Policies
 
 	NewTeamPolicy(ctx context.Context, teamID uint, p NewTeamPolicyPayload) (*Policy, error)
-	ListTeamPolicies(ctx context.Context, teamID uint, opts ListOptions, iopts ListOptions, mergeInherited bool, automationType string, platform string) (teamPolicies, inheritedPolicies []*Policy, err error)
+	ListTeamPolicies(ctx context.Context, teamID uint, opts ListOptions, iopts ListOptions, mergeInherited bool, automationType PolicyAutomationType, platform string) (teamPolicies, inheritedPolicies []*Policy, err error)
 	DeleteTeamPolicies(ctx context.Context, teamID uint, ids []uint) ([]uint, error)
 	ModifyTeamPolicy(ctx context.Context, teamID uint, id uint, p ModifyPolicyPayload) (*Policy, error)
 	GetTeamPolicyByID(ctx context.Context, teamID uint, policyID uint) (*Policy, error)
-	CountTeamPolicies(ctx context.Context, teamID uint, matchQuery string, mergeInherited bool, automationType string, platform string) (int, int, error)
+	CountTeamPolicies(ctx context.Context, teamID uint, matchQuery string, mergeInherited bool, automationType PolicyAutomationType, platform string) (int, int, error)
 
 	// /////////////////////////////////////////////////////////////////////////////
 	// Geolocation
@@ -938,7 +980,9 @@ type Service interface {
 	// NewMDMAppleConfigProfile creates a new configuration profile for the specified team.
 	NewMDMAppleConfigProfile(ctx context.Context, teamID uint, data []byte, labelsInclude []string, labelsMembershipMode MDMLabelsMode, labelsExcludeAny []string) (*MDMAppleConfigProfile, error)
 	// NewMDMAppleConfigProfileWithPayload creates a new declaration for the specified team.
-	NewMDMAppleDeclaration(ctx context.Context, teamID uint, data []byte, labelsInclude []string, name string, labelsMembershipMode MDMLabelsMode, labelsExcludeAny []string) (*MDMAppleDeclaration, error)
+	// activation is an optional custom activation declaration to attach to the
+	// declaration; nil or empty means Fleet generates the activation.
+	NewMDMAppleDeclaration(ctx context.Context, teamID uint, data []byte, labelsInclude []string, name string, labelsMembershipMode MDMLabelsMode, labelsExcludeAny []string, activation []byte) (*MDMAppleDeclaration, error)
 
 	// GetMDMAppleConfigProfileByDeprecatedID retrieves the specified Apple
 	// configuration profile via its numeric ID. This method is deprecated and
@@ -1080,18 +1124,15 @@ type Service interface {
 	// MDMListHostConfigurationProfiles returns configuration profiles for a given host
 	MDMListHostConfigurationProfiles(ctx context.Context, hostID uint) ([]*MDMAppleConfigProfile, error)
 
-	// MDMAppleEnableFileVaultAndEscrow adds a configuration profile for the
-	// given team that enables FileVault with a config that allows Fleet to
-	// escrow the recovery key.
-	MDMAppleEnableFileVaultAndEscrow(ctx context.Context, teamID *uint) error
+	// MDMAppleReconcileFileVaultProfile brings the FileVault configuration
+	// profile for the given team in line with its two macOS disk encryption
+	// settings: removed when both are off, and otherwise carrying only the
+	// enforcement and/or escrow payloads the settings call for.
+	MDMAppleReconcileFileVaultProfile(ctx context.Context, teamID *uint) error
 
-	// MDMAppleDisableFileVaultAndEscrow removes the FileVault configuration
-	// profile for the given team.
-	MDMAppleDisableFileVaultAndEscrow(ctx context.Context, teamID *uint) error
-
-	// UpdateMDMDiskEncryption updates the disk encryption setting for a
+	// UpdateMDMDiskEncryption updates the disk encryption settings for a
 	// specified team or for hosts with no team.
-	UpdateMDMDiskEncryption(ctx context.Context, teamID *uint, enableDiskEncryption *bool, requireBitLockerPIN *bool) error
+	UpdateMDMDiskEncryption(ctx context.Context, teamID *uint, payload MDMDiskEncryptionSettingsPayload) error
 
 	// UpdateMDMHostNameTemplate updates the host name template for the specified
 	// fleet. An empty template clears the setting; clearing never renames hosts.
@@ -1244,6 +1285,11 @@ type Service interface {
 	// unsupported extension is uploaded.
 	NewMDMUnsupportedConfigProfile(ctx context.Context, teamID uint, filename string) error
 
+	// Called when an activation is uploaded alongside a profile that isn't an
+	// Apple declaration. Exists, like the two below, so the error goes through
+	// an authorization check.
+	NewMDMActivationUnsupportedProfile(ctx context.Context, teamID uint) error
+
 	// NewMDMInvalidJSONConfigProfile is called when a JSON profile is uploaded with contents that
 	// cannot be resolved to either Apple DDM or Android format
 	NewMDMInvalidJSONConfigProfile(ctx context.Context, teamID uint, err error) error
@@ -1252,7 +1298,7 @@ type Service interface {
 	// contents and/or label targeting in place. Supported for Apple
 	// .mobileconfig profiles, Apple DDM declarations, Windows profiles, and
 	// Android profiles.
-	UpdateMDMConfigProfile(ctx context.Context, profileUUID string, profile []byte, labelsInclude []string, labelsMembershipMode MDMLabelsMode, labelsExcludeAny []string) error
+	UpdateMDMConfigProfile(ctx context.Context, profileUUID string, profile []byte, labelsInclude []string, labelsMembershipMode MDMLabelsMode, labelsExcludeAny []string, activation optjson.Slice[byte]) error
 
 	// ListMDMConfigProfiles returns a list of paginated configuration profiles.
 	ListMDMConfigProfiles(ctx context.Context, teamID *uint, opt ListOptions) ([]*MDMConfigProfilePayload, *PaginationMetadata, error)
@@ -1390,6 +1436,10 @@ type Service interface {
 	// ClearPasscode is a method that clears the passcode on a host, primarily mobile devices.
 	// Not script based, only MDM based.
 	ClearPasscode(ctx context.Context, hostID uint) (*CommandEnqueueResult, error)
+
+	// CancelHostMDMCommand cancels a pending Apple MDM command (lock, wipe,
+	// clear passcode, enable lost mode) before the host receives it.
+	CancelHostMDMCommand(ctx context.Context, hostID uint, commandUUID string) error
 
 	// RotateRecoveryLockPassword rotates the recovery lock password for a macOS host.
 	// This is only available for Apple Silicon Macs that are MDM-enrolled and have
@@ -1570,6 +1620,7 @@ type Service interface {
 	// UpdateCertificateAuthority updates the certificate authority of the given id
 	UpdateCertificateAuthority(ctx context.Context, id uint, p CertificateAuthorityUpdatePayload) error
 	RequestCertificate(ctx context.Context, p RequestCertificatePayload) (*string, error)
+
 	// BatchApplyCertificateAuthorities applies the given certificate authorities spec
 	BatchApplyCertificateAuthorities(ctx context.Context, groupedCAs GroupedCertificateAuthorities, opts BatchApplyCertificateAuthoritiesOpts) error
 	// GetGroupedCertificateAuthorities retrieves the grouped certificate authorities
@@ -1618,6 +1669,19 @@ type Service interface {
 
 	// ReleaseABDevices releases the specified Apple Business devices.
 	ReleaseABDevices(ctx context.Context, hostIDs []uint) ([]*ABReleaseDeviceResponse, error)
+
+	//////////////////////////////////////////////////////////////////////////////
+	// Microsoft Graph
+
+	// ListMicrosoftGraphCredentials returns the stored Microsoft Graph credentials with their per-tenant sync status. Client secrets are masked.
+	ListMicrosoftGraphCredentials(ctx context.Context) ([]*MicrosoftGraphCredential, error)
+	// ApplyMicrosoftGraphCredentials declaratively reconciles the stored Microsoft Graph credentials to the supplied
+	// list, verifying any new or changed credential against Graph before storing it. A tenant absent from the list is deleted.
+	ApplyMicrosoftGraphCredentials(ctx context.Context, creds []MicrosoftGraphCredential, dryRun bool) error
+
+	// SendAPNSPing sends a ping to the specified host via APNS. Only valid for Apple hosts.
+	SendAPNSPing(ctx context.Context, hostID uint) error
+	DeviceSendAPNSPing(ctx context.Context, host *Host) error
 }
 
 type KeyValueStore interface {

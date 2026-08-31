@@ -160,11 +160,3 @@ func TestAppendListOptionsWithParamsSecure_TextOrderKeyCursorBinding(t *testing.
 		})
 	}
 }
-
-func TestAppendListOptionsWithParams_SkipsOrderByOnAggregate(t *testing.T) {
-	// Deprecated sibling — should behave the same way for the count case.
-	opts := testListOptions{orderKey: "id", perPage: 10}
-	out, _ := AppendListOptionsWithParams("SELECT count(*) FROM hosts h", nil, opts)
-	require.NotContains(t, strings.ToUpper(out), "ORDER BY")
-	require.Contains(t, out, "LIMIT 10")
-}

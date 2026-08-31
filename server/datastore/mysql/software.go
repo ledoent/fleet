@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"regexp"
 	"sort"
 	"strconv"
@@ -72,18 +73,6 @@ var cleanupBatchSize = 1000
 // Any remaining orphans will be processed on the next hourly cron cycle.
 var cleanupMaxIterations = 100
 
-// softwareTitleCacheKey builds a string key for the in-process cache of known software titles.
-// It mirrors the titleKey struct used inside preInsertSoftwareInventory.
-func softwareTitleCacheKey(name, source, extensionFor, bundleID string, isKernel bool) string {
-	return strings.Join([]string{
-		strings.ToLower(normalizeForCollation(name)),
-		source,
-		extensionFor,
-		strings.ToLower(bundleID),
-		strconv.FormatBool(isKernel),
-	}, fleet.SoftwareFieldSeparator)
-}
-
 func softwareSliceToMap(softwareItems []fleet.Software) map[string]fleet.Software {
 	result := make(map[string]fleet.Software, len(softwareItems))
 	for _, s := range softwareItems {
@@ -92,54 +81,57 @@ func softwareSliceToMap(softwareItems []fleet.Software) map[string]fleet.Softwar
 	return result
 }
 
-func (ds *Datastore) cacheKnownSoftwareTitleKey(key string) {
-	ds.knownSoftwareTitleKeysMu.Lock()
-	defer ds.knownSoftwareTitleKeysMu.Unlock()
-	// Lazily initialize: not every Datastore construction path goes through New().
-	if ds.knownSoftwareTitleKeys == nil {
-		ds.knownSoftwareTitleKeys = make(map[string]struct{})
+// windowsFMAMatchesCacheTTL bounds how long ingestion may keep matching against a stale
+// set of Windows Fleet-maintained apps. Short, because it delays a newly added app from
+// collapsing titles; a var so tests can shorten it further.
+var windowsFMAMatchesCacheTTL = 30 * time.Second
+
+// getWindowsFMAMatchesCached returns the Windows FMAs to match reported program names
+// against, from a short-lived in-process cache. The returned slice is shared and must
+// not be mutated. See the field comments on Datastore for why this is TTL-only.
+func (ds *Datastore) getWindowsFMAMatchesCached(ctx context.Context) ([]fleet.MaintainedApp, error) {
+	ds.windowsFMAMatchesMu.RLock()
+	names, expiry := ds.windowsFMAMatches, ds.windowsFMAMatchesExpiry
+	ds.windowsFMAMatchesMu.RUnlock()
+	if time.Now().Before(expiry) {
+		return names, nil
 	}
-	if _, loaded := ds.knownSoftwareTitleKeys[key]; loaded {
-		return
-	}
-	if len(ds.knownSoftwareTitleKeys) >= maxKnownSoftwareTitleKeys {
-		ds.evictKnownSoftwareTitleKeysLocked()
-	}
-	// Store after potential eviction so the caller's key survives.
-	ds.knownSoftwareTitleKeys[key] = struct{}{}
-}
 
-func (ds *Datastore) clearKnownSoftwareTitleKeys() {
-	ds.knownSoftwareTitleKeysMu.Lock()
-	defer ds.knownSoftwareTitleKeysMu.Unlock()
-	ds.knownSoftwareTitleKeys = make(map[string]struct{})
-}
-
-func (ds *Datastore) deleteKnownSoftwareTitleKey(key string) {
-	ds.knownSoftwareTitleKeysMu.Lock()
-	defer ds.knownSoftwareTitleKeysMu.Unlock()
-	delete(ds.knownSoftwareTitleKeys, key)
-}
-
-func (ds *Datastore) hasKnownSoftwareTitleKey(key string) bool {
-	ds.knownSoftwareTitleKeysMu.RLock()
-	defer ds.knownSoftwareTitleKeysMu.RUnlock()
-	_, ok := ds.knownSoftwareTitleKeys[key]
-	return ok
-}
-
-func (ds *Datastore) evictKnownSoftwareTitleKeysLocked() {
-	evicted := 0
-	// Go map iteration order is randomized, so this evicts an arbitrary half of the cache.
-	// That is sufficient here because any retained title key still avoids an INSERT IGNORE, and
-	// arbitrary bulk eviction is much cheaper than maintaining a strict LRU in this hot path.
-	for key := range ds.knownSoftwareTitleKeys {
-		delete(ds.knownSoftwareTitleKeys, key)
-		evicted++
-		if evicted >= evictKnownSoftwareTitleKeys {
-			return
+	result, err, _ := ds.windowsFMAMatchesSF.Do("windowsFMANames", func() (any, error) {
+		fresh, err := ds.GetWindowsFMAMatches(ctx)
+		if err != nil {
+			return nil, err
 		}
+		ds.windowsFMAMatchesMu.Lock()
+		ds.windowsFMAMatches = fresh
+		ds.windowsFMAMatchesExpiry = time.Now().Add(windowsFMAMatchesCacheTTL)
+		ds.windowsFMAMatchesMu.Unlock()
+		return fresh, nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	fresh, _ := result.([]fleet.MaintainedApp)
+	return fresh, nil
+}
+
+// clearWindowsFMAMatchesCache drops the cached Windows FMA set, forcing the next
+// ingestion to read through. Used by tests, which share a Datastore across cases.
+func (ds *Datastore) clearWindowsFMAMatchesCache() {
+	ds.windowsFMAMatchesMu.Lock()
+	defer ds.windowsFMAMatchesMu.Unlock()
+	ds.windowsFMAMatches = nil
+	ds.windowsFMAMatchesExpiry = time.Time{}
+}
+
+// expireWindowsFMAMatchesCache backdates the cache expiry, leaving the cached set in
+// place. Lets tests exercise the TTL path without sleeping: unlike
+// clearWindowsFMAMatchesCache, the next read misses because the entry is stale rather
+// than absent, which is what expiry actually looks like.
+func (ds *Datastore) expireWindowsFMAMatchesCache() {
+	ds.windowsFMAMatchesMu.Lock()
+	defer ds.windowsFMAMatchesMu.Unlock()
+	ds.windowsFMAMatchesExpiry = time.Now().Add(-time.Second)
 }
 
 func (ds *Datastore) UpdateHostSoftware(ctx context.Context, hostID uint, software []fleet.Software) (*fleet.UpdateHostSoftwareDBResult, error) {
@@ -178,7 +170,12 @@ func (ds *Datastore) UpdateHostSoftwareInstalledPaths(
 		return nil
 	}
 
-	return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
+	// Not using withRetryTxx on purpose.
+	// If we use withRetryTxx, when this table is contended, retrying parks connections
+	// on the same locks for up to another lock-wait timeout each, multiplying the load.
+	// Failing fast is safe because the delta is recomputed from scratch on the
+	// host's next software report.
+	return ds.withTx(ctx, func(tx sqlx.ExtContext) error {
 		if err := deleteHostSoftwareInstalledPaths(ctx, tx, toD); err != nil {
 			return err
 		}
@@ -993,6 +990,84 @@ func longestCommonPrefix(strs []string) string {
 	}
 }
 
+// windowsFMAPrefix is one candidate program-name prefix, normalized for comparison,
+// paired with the software title it resolves to.
+//
+// The prefix and the destination are deliberately separate. Matching considers every
+// name an app may report under, but the destination is always the title the app's
+// installer owns: a Windows FMA's title is never renamed when the catalog name
+// changes, so resolving the destination from the catalog name could land software on a
+// title no installer owns, leaving the uninstall action hidden and the reconcile pass
+// unable to repair it.
+type windowsFMAPrefix struct {
+	prefix    string
+	titleName string
+	titleID   uint
+}
+
+// windowsFMAPrefixes flattens Windows FMAs into their candidate prefixes. Computed
+// once per ingestion batch so the per-software-row match stays allocation-free.
+func windowsFMAPrefixes(fmas []fleet.MaintainedApp) []windowsFMAPrefix {
+	prefixes := make([]windowsFMAPrefix, 0, len(fmas)*3)
+	for _, f := range fmas {
+		if f.TitleID == nil {
+			continue
+		}
+		for _, p := range f.WinMatchPrefixes() {
+			prefixes = append(prefixes, windowsFMAPrefix{
+				prefix:    normalizeSoftwareNameForMatch(p),
+				titleName: f.TitleName,
+				titleID:   *f.TitleID,
+			})
+		}
+	}
+	return prefixes
+}
+
+// normalizeSoftwareNameForMatch lowercases and strips the Unicode format and control
+// characters that MySQL's utf8mb4_unicode_ci collation ignores, so a Go-side name
+// comparison agrees with the collation the software_titles unique index uses.
+func normalizeSoftwareNameForMatch(s string) string {
+	return strings.ToLower(normalizeForCollation(s))
+}
+
+// matchWindowsFMATitle returns the software title a reported Windows program name
+// belongs to, or false when it matches no Fleet-maintained app.
+//
+// A candidate matches when the reported name equals it or begins with
+// "<candidate> " — the trailing space is what keeps "Zoombie 5.0" away from the
+// "Zoom" FMA. The longest matching candidate wins so a more specific app is
+// preferred, and a tie between candidates resolving to different titles is treated as
+// no match: there is no principled winner, and merging into the wrong app is worse
+// than leaving the title alone. This mirrors the rule the darwin reconcile passes
+// apply to a bundle identifier shared by more than one FMA.
+func matchWindowsFMATitle(name string, prefixes []windowsFMAPrefix) (windowsFMAPrefix, bool) {
+	normalized := normalizeSoftwareNameForMatch(name)
+
+	var best windowsFMAPrefix
+	var bestLen int
+	ambiguous := false
+	for _, p := range prefixes {
+		if len(p.prefix) < bestLen {
+			continue
+		}
+		if normalized != p.prefix && !strings.HasPrefix(normalized, p.prefix+" ") {
+			continue
+		}
+		switch {
+		case len(p.prefix) > bestLen:
+			best, bestLen, ambiguous = p, len(p.prefix), false
+		case p.titleID != best.titleID:
+			ambiguous = true
+		}
+	}
+
+	if ambiguous || bestLen == 0 {
+		return windowsFMAPrefix{}, false
+	}
+	return best, true
+}
+
 // preInsertSoftwareInventory pre-inserts software and software_titles outside the main transaction
 // to reduce lock contention. These operations are idempotent due to INSERT IGNORE.
 func (ds *Datastore) preInsertSoftwareInventory(
@@ -1079,6 +1154,19 @@ func (ds *Datastore) preInsertSoftwareInventory(
 		fmaNames = nil
 	}
 
+	// Windows has no bundle identifier, so a name-prefix match is the join key that
+	// collapses versioned program names onto the canonical FMA title. Read through a
+	// short-lived cache: this runs on every host software update that reports something
+	// new, which a fleet-wide rollout makes simultaneous across hosts.
+	winFMANames, winFMAErr := ds.getWindowsFMAMatchesCached(ctx)
+	if winFMAErr != nil {
+		if ds.logger != nil {
+			ds.logger.WarnContext(ctx, "failed to get Windows FMA matches", "err", winFMAErr)
+		}
+		winFMANames = nil
+	}
+	winFMAPrefixes := windowsFMAPrefixes(winFMANames)
+
 	// Process in smaller batches to reduce lock time
 	err := common_mysql.BatchProcessSimple(keys, softwareInventoryInsertBatchSize, func(batchKeys []string) error {
 		batchSoftware := make(map[string]fleet.Software, len(batchKeys))
@@ -1108,6 +1196,18 @@ func (ds *Datastore) preInsertSoftwareInventory(
 							newTitleName = computedName
 						}
 					}
+				} else if sw.Source == "programs" && (sw.UpgradeCode == nil || *sw.UpgradeCode == "") {
+					// Use the canonical FMA name so versioned program names collapse
+					// onto the single title the FMA installer owns.
+					//
+					// Only when there is no upgrade code. software_titles.unique_identifier
+					// resolves to upgrade_code ahead of name, so renaming a program that
+					// reports one would create a second title under the canonical name with
+					// a different unique_identifier: a duplicate in the UI, and still not the
+					// title the installer owns. Those programs already match by upgrade code.
+					if match, ok := matchWindowsFMATitle(sw.Name, winFMAPrefixes); ok {
+						newTitleName = match.titleName
+					}
 				}
 
 				newTitle := fleet.SoftwareTitle{
@@ -1130,66 +1230,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 			}
 		}
 
-		// INSERT IGNORE new software titles OUTSIDE the main transaction (#48719).
-		// Each INSERT IGNORE is auto-committed independently, so it holds row/gap locks
-		// for only microseconds instead of the entire transaction duration. This eliminates
-		// lock convoys when many hosts concurrently report the same software catalog.
-		if len(newTitlesNeeded) > 0 {
-			// Build the full set of unique titles (for ID resolution later).
-			uniqueTitles := make(map[titleKey]fleet.SoftwareTitle)
-			for _, title := range newTitlesNeeded {
-				bundleID := ""
-				if title.BundleIdentifier != nil {
-					bundleID = *title.BundleIdentifier
-				}
-				key := titleKey{
-					name:         strings.ToLower(normalizeForCollation(title.Name)),
-					source:       title.Source,
-					extensionFor: title.ExtensionFor,
-					bundleID:     bundleID,
-					isKernel:     title.IsKernel,
-				}
-				if _, exists := uniqueTitles[key]; !exists {
-					uniqueTitles[key] = title
-				}
-			}
-
-			// INSERT IGNORE each title individually using auto-commit (outside any transaction).
-			// singleflight ensures that for each title key, only one goroutine actually
-			// executes the INSERT; concurrent goroutines wait and share the result.
-			// The in-process cache prevents future DB hits entirely.
-			const insertTitleStmt = `INSERT IGNORE INTO software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES (?,?,?,?,?,?,?)`
-			for key, title := range uniqueTitles {
-				cacheKey := softwareTitleCacheKey(title.Name, title.Source, title.ExtensionFor, key.bundleID, title.IsKernel)
-				if ds.hasKnownSoftwareTitleKey(cacheKey) {
-					continue
-				}
-				// Capture loop variables for the closure.
-				titleCopy := title
-				_, sfErr, _ := ds.titleInsertSF.Do(cacheKey, func() (any, error) {
-					// Double-check cache after winning the singleflight race.
-					if ds.hasKnownSoftwareTitleKey(cacheKey) {
-						return nil, nil
-					}
-					// Use context.WithoutCancel so the INSERT completes even if the
-					// leader goroutine's request is canceled mid-flight (#48719).
-					insertCtx := context.WithoutCancel(ctx)
-					if _, err := ds.writer(insertCtx).ExecContext(insertCtx, insertTitleStmt,
-						titleCopy.Name, titleCopy.Source, titleCopy.ExtensionFor, titleCopy.BundleIdentifier,
-						titleCopy.IsKernel, titleCopy.ApplicationID, titleCopy.UpgradeCode,
-					); err != nil {
-						return nil, ctxerr.Wrap(ctx, err, "pre-insert software_titles")
-					}
-					ds.cacheKnownSoftwareTitleKey(cacheKey)
-					return nil, nil
-				})
-				if sfErr != nil {
-					return sfErr
-				}
-			}
-		}
-
-		// Each batch in its own transaction (for SELECT title IDs + INSERT software).
+		// Each batch in its own transaction
 		return ds.withRetryTxx(ctx, func(tx sqlx.ExtContext) error {
 			// Map to store title IDs for all titles (both existing and new)
 			titleIDsByChecksum := make(map[string]uint, len(incomingChecksumsToExistingTitleSummaries))
@@ -1199,7 +1240,6 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				titleIDsByChecksum[checksum] = titleSummary.ID
 			}
 			if len(newTitlesNeeded) > 0 {
-				// Build the set of unique titles for the SELECT query.
 				uniqueTitles := make(map[titleKey]fleet.SoftwareTitle)
 				for _, title := range newTitlesNeeded {
 					bundleID := ""
@@ -1207,6 +1247,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 						bundleID = *title.BundleIdentifier
 					}
 					key := titleKey{
+						// adjust for matching MySQL collation
 						name:         strings.ToLower(normalizeForCollation(title.Name)),
 						source:       title.Source,
 						extensionFor: title.ExtensionFor,
@@ -1218,12 +1259,26 @@ func (ds *Datastore) preInsertSoftwareInventory(
 					}
 				}
 
+				// Insert software titles
+				const numberOfArgsPerSoftwareTitles = 7
+				titlesValues := strings.TrimSuffix(strings.Repeat("(?,?,?,?,?,?,?),", len(uniqueTitles)), ",")
+				titlesStmt := fmt.Sprintf("INSERT IGNORE INTO software_titles (name, source, extension_for, bundle_identifier, is_kernel, application_id, upgrade_code) VALUES %s", titlesValues)
+				titlesArgs := make([]any, 0, len(uniqueTitles)*numberOfArgsPerSoftwareTitles)
+				for _, title := range uniqueTitles {
+					titlesArgs = append(titlesArgs, title.Name, title.Source, title.ExtensionFor, title.BundleIdentifier, title.IsKernel, title.ApplicationID, title.UpgradeCode)
+				}
+
+				if _, err := tx.ExecContext(ctx, titlesStmt, titlesArgs...); err != nil {
+					return ctxerr.Wrap(ctx, err, "pre-insert software_titles")
+				}
+
 				// Retrieve the IDs for the titles we just inserted (or that already existed).
-				// Use uniqueTitles (all unique titles) so we resolve IDs for cached titles too.
-				var retrievedTitleSummaries []fleet.SoftwareTitleSummary
-				titlePlaceholders := strings.TrimSuffix(strings.Repeat("(?,?,?,?),", len(uniqueTitles)), ",")
-				queryArgs := make([]any, 0, len(uniqueTitles)*4)
-				var upgradeCodes []string
+				// The branches are UNIONed, not ORed: a single OR across these columns causes a regression to a full table scan.
+				var (
+					bundleArgs  []any // (bundle_identifier, source, extension_for)
+					nameArgs    []any // (name, source, extension_for)
+					upgradeArgs []any // unique_identifier, which resolves to upgrade_code for Windows programs
+				)
 				for tk := range uniqueTitles {
 					title := uniqueTitles[tk]
 					bundleID := ""
@@ -1231,33 +1286,45 @@ func (ds *Datastore) preInsertSoftwareInventory(
 						bundleID = *title.BundleIdentifier
 					}
 
-					firstArg := title.Name
 					if bundleID != "" {
-						firstArg = bundleID
+						bundleArgs = append(bundleArgs, bundleID, title.Source, title.ExtensionFor)
+					} else {
+						nameArgs = append(nameArgs, title.Name, title.Source, title.ExtensionFor)
 					}
-					queryArgs = append(queryArgs, firstArg, title.Source, title.ExtensionFor, bundleID)
 
 					// Collect non-empty upgrade_codes for Windows programs
 					if title.UpgradeCode != nil && *title.UpgradeCode != "" && title.Source == "programs" {
-						upgradeCodes = append(upgradeCodes, *title.UpgradeCode)
+						upgradeArgs = append(upgradeArgs, *title.UpgradeCode)
 					}
 				}
 
-				// Build query that matches by (name/bundle_identifier, source, extension_for) OR by upgrade_code.
-				stmt := fmt.Sprintf(`SELECT id, name, source, extension_for, bundle_identifier, upgrade_code, application_id
-					FROM software_titles
-					WHERE (COALESCE(bundle_identifier, name), source, extension_for, COALESCE(bundle_identifier, '')) IN (%s)`, titlePlaceholders)
-
-				if len(upgradeCodes) > 0 {
-					ucPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(upgradeCodes)), ",")
-					stmt += fmt.Sprintf(` OR (upgrade_code IN (%s) AND source = 'programs')`, ucPlaceholders)
-					for _, uc := range upgradeCodes {
-						queryArgs = append(queryArgs, uc)
-					}
+				const titleSelect = `SELECT id, name, source, extension_for, bundle_identifier, upgrade_code, application_id ` +
+					`FROM software_titles`
+				branches := make([]string, 0, 3)
+				queryArgs := make([]any, 0, len(bundleArgs)+len(nameArgs)+len(upgradeArgs))
+				if len(bundleArgs) > 0 {
+					branches = append(branches, titleSelect+fmt.Sprintf(` WHERE (bundle_identifier, source, extension_for) IN (%s)`,
+						strings.TrimSuffix(strings.Repeat("(?,?,?),", len(bundleArgs)/3), ",")))
+					queryArgs = append(queryArgs, bundleArgs...)
+				}
+				if len(nameArgs) > 0 {
+					branches = append(branches,
+						titleSelect+fmt.Sprintf(` WHERE bundle_identifier IS NULL AND (name, source, extension_for) IN (%s)`,
+							strings.TrimSuffix(strings.Repeat("(?,?,?),", len(nameArgs)/3), ",")))
+					queryArgs = append(queryArgs, nameArgs...)
+				}
+				if len(upgradeArgs) > 0 {
+					branches = append(branches, titleSelect+fmt.Sprintf(` WHERE source = 'programs' AND unique_identifier IN (%s)`,
+						strings.TrimSuffix(strings.Repeat("?,", len(upgradeArgs)), ",")))
+					queryArgs = append(queryArgs, upgradeArgs...)
 				}
 
-				if err := sqlx.SelectContext(ctx, tx, &retrievedTitleSummaries, stmt, queryArgs...); err != nil {
-					return ctxerr.Wrap(ctx, err, "select software titles")
+				var retrievedTitleSummaries []fleet.SoftwareTitleSummary
+				if len(branches) > 0 {
+					if err := sqlx.SelectContext(ctx, tx, &retrievedTitleSummaries,
+						strings.Join(branches, " UNION "), queryArgs...); err != nil {
+						return ctxerr.Wrap(ctx, err, "select software titles")
+					}
 				}
 
 				// Map the titles back to their checksums
@@ -1381,7 +1448,7 @@ func (ds *Datastore) preInsertSoftwareInventory(
 			)
 
 			args := make([]any, 0, len(batchKeys)*numberOfArgsPerSoftware)
-			var missingChecksums []string
+			var missingSoftwareTitles []string
 			for _, checksum := range batchKeys {
 				sw := batchSoftware[checksum]
 				var titleID *uint
@@ -1389,9 +1456,9 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				if id, ok := titleIDsByChecksum[checksum]; ok {
 					titleID = &id
 				} else {
-					// Track software missing title IDs; titles inserted outside the
-					// transaction may have been deleted by a concurrent CleanupSoftwareTitles.
-					missingChecksums = append(missingChecksums, checksum)
+					// Track software missing title IDs for debugging
+					missingSoftwareTitles = append(missingSoftwareTitles,
+						fmt.Sprintf("%s %s %s", sw.Name, sw.Version, sw.Source))
 				}
 				args = append(
 					args, sw.Name, sw.Version, sw.Source, sw.Release, sw.Vendor, sw.Arch,
@@ -1399,38 +1466,14 @@ func (ds *Datastore) preInsertSoftwareInventory(
 				)
 			}
 
-			// When title IDs are missing, a concurrent CleanupSoftwareTitles likely
-			// deleted the titles we just inserted (they were orphaned briefly outside the
-			// transaction). Clear those cache entries so they are re-inserted on the next
-			// agent check-in. The software row proceeds with NULL title_id; the next
-			// ingestion cycle will re-create the title and link it.
-			if len(missingChecksums) > 0 {
-				var examples []string
-				for _, checksum := range missingChecksums {
-					sw := batchSoftware[checksum]
-					if len(examples) < 3 {
-						examples = append(examples, fmt.Sprintf("%s %s %s", sw.Name, sw.Version, sw.Source))
-					}
-					// Evict from the in-process cache so the next ingestion cycle re-inserts the title.
-					if title, ok := newTitlesNeeded[checksum]; ok {
-						bundleID := ""
-						if title.BundleIdentifier != nil {
-							bundleID = *title.BundleIdentifier
-						}
-						cacheKey := softwareTitleCacheKey(title.Name, title.Source, title.ExtensionFor, bundleID, title.IsKernel)
-						ds.deleteKnownSoftwareTitleKey(cacheKey)
-					}
-				}
-				// Log rather than return a hard error: the title INSERT is outside the
-				// transaction, so withRetryTxx cannot re-insert the title on retry.
-				// The software row proceeds with NULL title_id and the evicted cache
-				// entry ensures the title is re-created on the next ingestion cycle.
-				if ds.logger != nil {
-					ds.logger.ErrorContext(ctx, "inserting software without title_id",
-						"count", len(missingChecksums),
-						"examples", strings.Join(examples, "; "),
-					)
-				}
+			// Log an error if we have software without title IDs
+			// This shouldn't happen in normal operation. And this code is here to catch bugs.
+			if len(missingSoftwareTitles) > 0 && ds.logger != nil {
+				exampleCount := min(len(missingSoftwareTitles), 3)
+				ds.logger.ErrorContext(ctx, "inserting software without title_id",
+					"count", len(missingSoftwareTitles),
+					"examples", strings.Join(missingSoftwareTitles[:exampleCount], "; "),
+				)
 			}
 
 			if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
@@ -1854,8 +1897,10 @@ type softwareCVE struct {
 // canUseOptimizedListQuery determines if we can use the fast path query
 // that starts FROM software_host_counts instead of software.
 func canUseOptimizedListQuery(opts fleet.SoftwareListOptions) bool {
-	// Determine the effective order key
-	orderKey := opts.ListOptions.OrderKey
+	// Trim to match the ordering helper, so a key it accepts isn't routed to the
+	// slower path over spacing alone.
+	requested := strings.TrimSpace(opts.ListOptions.OrderKey)
+	orderKey := requested
 	if orderKey == "" {
 		orderKey = "hosts_count"
 	}
@@ -1873,9 +1918,15 @@ func canUseOptimizedListQuery(opts fleet.SoftwareListOptions) bool {
 	// Filters (VulnerableOnly / KnownExploit / MinimumCVSS / MaximumCVSS /
 	// MatchQuery) are now supported in the inner query via EXISTS pushdown —
 	// see buildOptimizedListSoftwareSQL.
+	// The optimized path orders by hosts_count, so it can only serve a request
+	// that also returns the column. An absent key keeps the default ordering.
+	if requested != "" && !opts.WithHostCounts {
+		return false
+	}
+
 	return opts.HostID == nil &&
 		orderKey == "hosts_count" &&
-		!isMultiColumnSort(opts.ListOptions.OrderKey)
+		!isMultiColumnSort(orderKey)
 }
 
 // isMultiColumnSort checks if the order key contains multiple columns (comma-separated)
@@ -2314,7 +2365,11 @@ func selectSoftwareSQL(opts fleet.SoftwareListOptions) (string, []interface{}, e
 
 	// Pagination is a bit more complex here due to the join with software_cve table and aggregated columns from cve_meta table.
 	// Apply order by again after joining on sub query
-	ds = appendListOptionsToSelect(ds, opts.ListOptions)
+	allowedOrderKeys := softwareOrderKeys(opts)
+	ds, err := appendListOptionsToSelect(ds, opts.ListOptions, allowedOrderKeys)
+	if err != nil {
+		return "", nil, err
+	}
 
 	// join on software_cve and cve_meta after apply pagination using the sub-query above
 	ds = goquMySQLDialect.From(ds.As("s")).
@@ -2370,7 +2425,10 @@ func selectSoftwareSQL(opts fleet.SoftwareListOptions) (string, []interface{}, e
 		)
 	}
 
-	ds = appendOrderByToSelect(ds, opts.ListOptions)
+	ds, err = appendOrderByToSelect(ds, opts.ListOptions, allowedOrderKeys)
+	if err != nil {
+		return "", nil, err
+	}
 
 	return ds.ToSQL()
 }
@@ -3171,7 +3229,7 @@ func (ds *Datastore) CleanupSoftwareTitles(ctx context.Context) error {
 			return ctxerr.Wrap(ctx, err, "find orphaned software titles for cleanup")
 		}
 		if len(ids) == 0 {
-			break
+			return nil
 		}
 		lastID = ids[len(ids)-1]
 
@@ -3186,13 +3244,6 @@ func (ds *Datastore) CleanupSoftwareTitles(ctx context.Context) error {
 		ra, _ := res.RowsAffected()
 		n += ra
 	}
-
-	// If any titles were deleted, clear the in-process title cache so that future
-	// software ingestions re-insert titles instead of skipping them.
-	if n > 0 {
-		ds.clearKnownSoftwareTitleKeys()
-	}
-
 	return nil
 }
 
@@ -3695,29 +3746,30 @@ type hostSoftware struct {
 	LastUninstallUninstalledAt     *time.Time `db:"last_uninstall_uninstalled_at"`
 	LastUninstallScriptExecutionID *string    `db:"last_uninstall_script_execution_id"`
 
-	ExitCode              *int       `db:"exit_code"`
-	LastOpenedAt          *time.Time `db:"last_opened_at"`
-	BundleIdentifier      *string    `db:"bundle_identifier"`
-	TitleBundleIdentifier *string    `db:"title_bundle_identifier"`
-	Version               *string    `db:"version"`
-	SoftwareID            *uint      `db:"software_id"`
-	SoftwareSource        *string    `db:"software_source"`
-	SoftwareExtensionFor  *string    `db:"software_extension_for"`
-	InstallerID           *uint      `db:"installer_id"`
-	PackageSelfService    *bool      `db:"package_self_service"`
-	PackageName           *string    `db:"package_name"`
-	PackagePlatform       *string    `db:"package_platform"`
-	PackageVersion        *string    `db:"package_version"`
-	VPPAppSelfService     *bool      `db:"vpp_app_self_service"`
-	VPPAppAdamID          *string    `db:"vpp_app_adam_id"`
-	VPPAppVersion         *string    `db:"vpp_app_version"`
-	VPPAppPlatform        *string    `db:"vpp_app_platform"`
-	VPPAppIconURL         *string    `db:"vpp_app_icon_url"`
-	InHouseAppID          *uint      `db:"in_house_app_id"`
-	InHouseAppName        *string    `db:"in_house_app_name"`
-	InHouseAppPlatform    *string    `db:"in_house_app_platform"`
-	InHouseAppVersion     *string    `db:"in_house_app_version"`
-	InHouseAppSelfService *bool      `db:"in_house_app_self_service"`
+	ExitCode                  *int       `db:"exit_code"`
+	LastOpenedAt              *time.Time `db:"last_opened_at"`
+	BundleIdentifier          *string    `db:"bundle_identifier"`
+	TitleBundleIdentifier     *string    `db:"title_bundle_identifier"`
+	Version                   *string    `db:"version"`
+	SoftwareID                *uint      `db:"software_id"`
+	SoftwareSource            *string    `db:"software_source"`
+	SoftwareExtensionFor      *string    `db:"software_extension_for"`
+	InstallerID               *uint      `db:"installer_id"`
+	PackageSelfService        *bool      `db:"package_self_service"`
+	PackageName               *string    `db:"package_name"`
+	PackagePlatform           *string    `db:"package_platform"`
+	PackageVersion            *string    `db:"package_version"`
+	PackageHasUninstallScript *bool      `db:"package_has_uninstall_script"`
+	VPPAppSelfService         *bool      `db:"vpp_app_self_service"`
+	VPPAppAdamID              *string    `db:"vpp_app_adam_id"`
+	VPPAppVersion             *string    `db:"vpp_app_version"`
+	VPPAppPlatform            *string    `db:"vpp_app_platform"`
+	VPPAppIconURL             *string    `db:"vpp_app_icon_url"`
+	InHouseAppID              *uint      `db:"in_house_app_id"`
+	InHouseAppName            *string    `db:"in_house_app_name"`
+	InHouseAppPlatform        *string    `db:"in_house_app_platform"`
+	InHouseAppVersion         *string    `db:"in_house_app_version"`
+	InHouseAppSelfService     *bool      `db:"in_house_app_self_service"`
 
 	VulnerabilitiesList       *string `db:"vulnerabilities_list"`
 	SoftwareIDList            *string `db:"software_id_list"`
@@ -4031,9 +4083,12 @@ func (ds *Datastore) resolveFirstAddedInstallersForHost(ctx context.Context, hos
 				COUNT(label_membership.label_id) AS count_host_labels,
 				SUM(
 					CASE
+						-- only dynamic labels (membership type 0) need to wait for the host to
+						-- report label results; manual and host vitals membership is populated by
+						-- the server.
 						WHEN labels.created_at IS NOT NULL AND (
-							labels.label_membership_type = 1 OR
-							(labels.label_membership_type = 0 AND :host_label_updated_at >= labels.created_at)
+							labels.label_membership_type <> 0 OR
+							:host_label_updated_at >= labels.created_at
 						) THEN 1
 						ELSE 0
 					END
@@ -4298,8 +4353,7 @@ func filterVPPAppsByLabel(
 					COUNT(label_membership.label_id) AS count_host_labels,
 					SUM(
 						CASE
-							WHEN labels.created_at IS NOT NULL AND labels.label_membership_type = 0 AND :host_label_updated_at >= labels.created_at THEN 1
-							WHEN labels.created_at IS NOT NULL AND labels.label_membership_type = 1 THEN 1
+							WHEN labels.created_at IS NOT NULL AND (labels.label_membership_type <> 0 OR :host_label_updated_at >= labels.created_at) THEN 1
 							ELSE 0
 						END
 					) AS count_host_updated_after_labels
@@ -4480,8 +4534,7 @@ func filterInHouseAppsByLabel(
 					COUNT(lm.label_id) AS count_host_labels,
 					SUM(
 						CASE
-							WHEN lbl.created_at IS NOT NULL AND lbl.label_membership_type = 0 AND :host_label_updated_at >= lbl.created_at THEN 1
-							WHEN lbl.created_at IS NOT NULL AND lbl.label_membership_type = 1 THEN 1
+							WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR :host_label_updated_at >= lbl.created_at) THEN 1
 							ELSE 0
 						END
 					) AS count_host_updated_after_labels
@@ -4908,10 +4961,11 @@ func hydrateHostSoftwareRecordFromDb(hydrated *hostSoftware, softwareTitle *host
 		platform = *hydrated.PackagePlatform
 	}
 	hydrated.SoftwarePackage = &fleet.SoftwarePackageOrApp{
-		Name:        *hydrated.PackageName,
-		Version:     version,
-		Platform:    platform,
-		SelfService: hydrated.PackageSelfService,
+		Name:               *hydrated.PackageName,
+		Version:            version,
+		Platform:           platform,
+		SelfService:        hydrated.PackageSelfService,
+		HasUninstallScript: hydrated.PackageHasUninstallScript,
 	}
 
 	// promote the last install info to the proper destination fields
@@ -4989,6 +5043,58 @@ func promoteSoftwareTitleInHouseApp(softwareTitleRecord *hostSoftware) {
 			softwareTitleRecord.SoftwarePackage.LastInstall.InstalledAt = *softwareTitleRecord.LastInstallInstalledAt
 		}
 	}
+}
+
+// softwareAllowedOrderKeys are the columns the software list may be sorted by:
+// the ones it returns, so ordering can't surface a value the response omits.
+// Columns are unqualified because the ordering is applied at two levels of the
+// query that reach them through different aliases, and must stay bare column
+// names because this path quotes them as identifiers.
+var softwareAllowedOrderKeys = common_mysql.OrderKeyAllowlist{
+	"id":                "id",
+	"name":              "name",
+	"version":           "version",
+	"source":            "source",
+	"bundle_identifier": "bundle_identifier",
+	"extension_id":      "extension_id",
+	"extension_for":     "extension_for",
+	"release":           "release",
+	"vendor":            "vendor",
+	"arch":              "arch",
+	"application_id":    "application_id",
+	"upgrade_code":      "upgrade_code",
+	"generated_cpe":     "generated_cpe",
+}
+
+// Sortable only when host counts are requested; that is when the query selects it.
+var softwareHostCountAllowedOrderKeys = common_mysql.OrderKeyAllowlist{
+	"hosts_count": "hosts_count",
+}
+
+// Sortable only when vulnerability details are included, for the same reason.
+var softwareCVEAllowedOrderKeys = common_mysql.OrderKeyAllowlist{
+	"cve_published":      "cve_published",
+	"cvss_score":         "cvss_score",
+	"epss_probability":   "epss_probability",
+	"cisa_known_exploit": "cisa_known_exploit",
+}
+
+// softwareOrderKeys may return one of the package-level maps above, so the
+// result must not be modified.
+func softwareOrderKeys(opts fleet.SoftwareListOptions) common_mysql.OrderKeyAllowlist {
+	if !opts.IncludeCVEScores && !opts.WithHostCounts {
+		return softwareAllowedOrderKeys
+	}
+	keys := make(common_mysql.OrderKeyAllowlist,
+		len(softwareAllowedOrderKeys)+len(softwareCVEAllowedOrderKeys)+len(softwareHostCountAllowedOrderKeys))
+	maps.Copy(keys, softwareAllowedOrderKeys)
+	if opts.IncludeCVEScores {
+		maps.Copy(keys, softwareCVEAllowedOrderKeys)
+	}
+	if opts.WithHostCounts {
+		maps.Copy(keys, softwareHostCountAllowedOrderKeys)
+	}
+	return keys
 }
 
 // hostSoftwareAllowedOrderKeys is minimal: the service layer pins OrderKey to "name".
@@ -5361,6 +5467,83 @@ func filterOutOfScopeFailedHostSoftwareInstalls(
 			}
 		}
 	}
+}
+
+// filterSelfServiceOutOfScopeHostSoftware drops self-service titles that a scope filter excluded from the inventory maps. Self
+// service impacts inventory: when a software title is excluded because of a filter, it should be excluded from the inventory as
+// well, because we cannot "reinstall" it on the self service page. Only titles flagged self-service are considered; the rest are
+// left alone. Callers apply this only when opts.SelfServiceOnly is set. Maps are mutated in place.
+func filterSelfServiceOutOfScopeHostSoftware(
+	bySoftwareTitleID map[uint]*hostSoftware,
+	byVPPAdamID map[string]*hostSoftware,
+	byInHouseID map[uint]*hostSoftware,
+	filteredBySoftwareTitleID map[uint]*hostSoftware,
+	filteredByVPPAdamID map[string]*hostSoftware,
+	filteredByInHouseID map[uint]*hostSoftware,
+) {
+	for _, software := range bySoftwareTitleID {
+		if software.PackageSelfService != nil && *software.PackageSelfService {
+			if filteredBySoftwareTitleID[software.ID] == nil {
+				// remove the software title from bySoftwareTitleID
+				delete(bySoftwareTitleID, software.ID)
+			}
+		}
+	}
+	for vppAppAdamID, software := range byVPPAdamID {
+		if software.VPPAppSelfService != nil && *software.VPPAppSelfService {
+			if filteredByVPPAdamID[vppAppAdamID] == nil {
+				// remove the software title from byVPPAdamID
+				delete(byVPPAdamID, vppAppAdamID)
+			}
+		}
+	}
+	for inHouseID, software := range byInHouseID {
+		if software.InHouseAppSelfService != nil && *software.InHouseAppSelfService {
+			if filteredByInHouseID[inHouseID] == nil {
+				// remove the software title from byInHouseID
+				delete(byInHouseID, inHouseID)
+			}
+		}
+	}
+}
+
+// filterHostSoftwareToMacOSApplications drops every title the host isn't reporting at the top level of the macOS /Applications
+// folder. Callers apply this only for macOS hosts with opts.MacOSApplicationsOnly set. Pruning the in-memory maps (rather than
+// the SQL) keeps the count and main queries consistent and applies uniformly across software, VPP, and in-house apps. Maps are
+// mutated in place.
+func (ds *Datastore) filterHostSoftwareToMacOSApplications(
+	ctx context.Context,
+	hostID uint,
+	bySoftwareTitleID map[uint]*hostSoftware,
+	bySoftwareID map[uint]*hostSoftware,
+	byVPPAdamID map[string]*hostSoftware,
+	byInHouseID map[uint]*hostSoftware,
+) error {
+	qualifyingTitleIDs, err := ds.macOSTopLevelApplicationTitleIDs(ctx, hostID)
+	if err != nil {
+		return ctxerr.Wrap(ctx, err, "filter macos applications")
+	}
+	for titleID := range bySoftwareTitleID {
+		if _, ok := qualifyingTitleIDs[titleID]; !ok {
+			delete(bySoftwareTitleID, titleID)
+		}
+	}
+	for softwareID, s := range bySoftwareID {
+		if _, ok := qualifyingTitleIDs[s.ID]; !ok {
+			delete(bySoftwareID, softwareID)
+		}
+	}
+	for adamID, s := range byVPPAdamID {
+		if _, ok := qualifyingTitleIDs[s.ID]; !ok {
+			delete(byVPPAdamID, adamID)
+		}
+	}
+	for inHouseID, s := range byInHouseID {
+		if _, ok := qualifyingTitleIDs[s.ID]; !ok {
+			delete(byInHouseID, inHouseID)
+		}
+	}
+	return nil
 }
 
 // mergeInstallDataByInstaller records the most recent install for a title's specific installer,
@@ -5773,6 +5956,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 				si.filename as package_name,
 				si.version as package_version,
 				si.platform as package_platform,
+				EXISTS(SELECT 1 FROM script_contents sc WHERE sc.id = si.uninstall_script_content_id AND ` + ds.dialect.RegexpMatch("sc.contents", `'[^ \t\n\r]'`) + `) as package_has_uninstall_script,
 				vat.self_service as vpp_app_self_service,
 				vat.adam_id as vpp_app_adam_id,
 				vap.latest_version as vpp_app_version,
@@ -5929,8 +6113,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								COUNT(*) AS count_installer_labels,
 								COUNT(lm.label_id) AS count_host_labels,
 								SUM(
-									CASE WHEN lbl.label_membership_type <> 1 AND lbl.created_at IS NOT NULL AND :host_label_updated_at >= lbl.created_at THEN 1
-									WHEN lbl.label_membership_type = 1 AND lbl.created_at IS NOT NULL THEN 1
+									CASE WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR :host_label_updated_at >= lbl.created_at) THEN 1
 									ELSE 0 END) as count_host_updated_after_labels
 							FROM
 								software_installer_labels sil
@@ -5988,8 +6171,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								COUNT(*) AS count_installer_labels,
 								COUNT(lm.label_id) AS count_host_labels,
 								SUM(CASE
-								WHEN lbl.created_at IS NOT NULL AND lbl.label_membership_type = 0 AND :host_label_updated_at >= lbl.created_at THEN 1
-								WHEN lbl.created_at IS NOT NULL AND lbl.label_membership_type = 1 THEN 1
+								WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR :host_label_updated_at >= lbl.created_at) THEN 1
 								ELSE 0 END) as count_host_updated_after_labels
 							FROM
 								vpp_app_team_labels vatl
@@ -6046,8 +6228,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 								COUNT(*) AS count_installer_labels,
 								COUNT(lm.label_id) AS count_host_labels,
 								SUM(CASE
-								WHEN lbl.created_at IS NOT NULL AND lbl.label_membership_type = 0 AND :host_label_updated_at >= lbl.created_at THEN 1
-								WHEN lbl.created_at IS NOT NULL AND lbl.label_membership_type = 1 THEN 1
+								WHEN lbl.created_at IS NOT NULL AND (lbl.label_membership_type <> 0 OR :host_label_updated_at >= lbl.created_at) THEN 1
 								ELSE 0 END) as count_host_updated_after_labels
 							FROM
 								in_house_app_labels ihl
@@ -6455,30 +6636,8 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 	// self service impacts inventory, when a software title is excluded because of a filter,
 	// it should be excluded from the inventory as well, because we cannot "reinstall" it on the self service page
 	if opts.SelfServiceOnly {
-		for _, software := range bySoftwareTitleID {
-			if software.PackageSelfService != nil && *software.PackageSelfService {
-				if filteredBySoftwareTitleID[software.ID] == nil {
-					// remove the software title from bySoftwareTitleID
-					delete(bySoftwareTitleID, software.ID)
-				}
-			}
-		}
-		for vppAppAdamID, software := range byVPPAdamID {
-			if software.VPPAppSelfService != nil && *software.VPPAppSelfService {
-				if filteredByVPPAdamID[vppAppAdamID] == nil {
-					// remove the software title from byVPPAdamID
-					delete(byVPPAdamID, vppAppAdamID)
-				}
-			}
-		}
-		for inHouseID, software := range byInHouseID {
-			if software.InHouseAppSelfService != nil && *software.InHouseAppSelfService {
-				if filteredByInHouseID[inHouseID] == nil {
-					// remove the software title from byInHouseID
-					delete(byInHouseID, inHouseID)
-				}
-			}
-		}
+		filterSelfServiceOutOfScopeHostSoftware(bySoftwareTitleID, byVPPAdamID, byInHouseID,
+			filteredBySoftwareTitleID, filteredByVPPAdamID, filteredByInHouseID)
 	}
 
 	// since these host installed vpp apps/in-house apps are already added in bySoftwareTitleID,
@@ -6501,29 +6660,9 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 	// than the SQL) keeps the count and main queries consistent and applies
 	// uniformly across software, VPP, and in-house apps.
 	if opts.MacOSApplicationsOnly && fleet.IsMacOSPlatform(host.Platform) {
-		qualifyingTitleIDs, err := ds.macOSTopLevelApplicationTitleIDs(ctx, host.ID)
-		if err != nil {
-			return nil, nil, ctxerr.Wrap(ctx, err, "filter macos applications")
-		}
-		for titleID := range bySoftwareTitleID {
-			if _, ok := qualifyingTitleIDs[titleID]; !ok {
-				delete(bySoftwareTitleID, titleID)
-			}
-		}
-		for softwareID, s := range bySoftwareID {
-			if _, ok := qualifyingTitleIDs[s.ID]; !ok {
-				delete(bySoftwareID, softwareID)
-			}
-		}
-		for adamID, s := range byVPPAdamID {
-			if _, ok := qualifyingTitleIDs[s.ID]; !ok {
-				delete(byVPPAdamID, adamID)
-			}
-		}
-		for inHouseID, s := range byInHouseID {
-			if _, ok := qualifyingTitleIDs[s.ID]; !ok {
-				delete(byInHouseID, inHouseID)
-			}
+		if err := ds.filterHostSoftwareToMacOSApplications(ctx, host.ID, bySoftwareTitleID, bySoftwareID,
+			byVPPAdamID, byInHouseID); err != nil {
+			return nil, nil, err
 		}
 	}
 
@@ -6578,7 +6717,11 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 		matchClause := ""
 		matchArgs := []interface{}{}
 		if opts.ListOptions.MatchQuery != "" {
-			matchClause, matchArgs = searchLike(matchClause, matchArgs, opts.ListOptions.MatchQuery, "software_titles.name")
+			matchClause, matchArgs = searchLike(matchClause, matchArgs, opts.ListOptions.MatchQuery,
+				"software_titles.name",
+				"software_titles.bundle_identifier",
+				"stdn.display_name",
+			)
 		}
 
 		var (
@@ -6673,6 +6816,8 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 			FROM
 				software_titles
 			LEFT JOIN
+				software_title_display_names stdn ON stdn.software_title_id = software_titles.id AND stdn.team_id = :global_or_team_id
+			LEFT JOIN
 				-- Pin to the resolved first-added in-scope package per title so a multi-package title
 				-- yields one deterministic row (no duplicate titles, no arbitrary sibling).
 				software_installers ON software_titles.id = software_installers.title_id
@@ -6733,6 +6878,8 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 				vpp_apps ON software_titles.id = vpp_apps.title_id AND vpp_apps.platform = :host_platform
 			INNER JOIN
 				vpp_apps_teams ON vpp_apps.adam_id = vpp_apps_teams.adam_id AND vpp_apps.platform = vpp_apps_teams.platform AND vpp_apps_teams.global_or_team_id = :global_or_team_id
+			LEFT JOIN
+				software_title_display_names stdn ON stdn.software_title_id = software_titles.id AND stdn.team_id = :global_or_team_id
 			WHERE
 				vpp_apps.adam_id IN (?)
 				AND true
@@ -6771,6 +6918,8 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 				software_titles
 			INNER JOIN in_house_apps ON
 				software_titles.id = in_house_apps.title_id AND in_house_apps.platform = :host_platform AND in_house_apps.global_or_team_id = :global_or_team_id
+			LEFT JOIN
+				software_title_display_names stdn ON stdn.software_title_id = software_titles.id AND stdn.team_id = :global_or_team_id
 			WHERE
 				in_house_apps.id IN (?)
 				AND true
@@ -6844,12 +6993,14 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 					software_installers.filename AS package_name,
 					software_installers.version AS package_version,
 					software_installers.platform as package_platform,
+					EXISTS(SELECT 1 FROM script_contents sc WHERE sc.id = software_installers.uninstall_script_content_id AND `+ds.dialect.RegexpMatch("sc.contents", `'[^ \t\n\r]'`)+`) AS package_has_uninstall_script,
 					`+gc("software.id", ",")+` AS software_id_list,
 					`+gc("software.source", ",")+` AS software_source_list,
 					`+gc("software.extension_for", ",")+` AS software_extension_for_list,
 					`+gc("software.upgrade_code", ",")+` AS software_upgrade_code_list,
 					`+gc("software.version", ",")+` AS version_list,
 					`+gc("software.bundle_identifier", ",")+` AS bundle_identifier_list,
+
 					NULL AS vpp_app_adam_id_list,
 					NULL AS vpp_app_version_list,
 					NULL AS vpp_app_platform_list,
@@ -6891,6 +7042,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 					NULL AS package_name,
 					NULL AS package_version,
 					NULL as package_platform,
+					NULL AS package_has_uninstall_script,
 					NULL AS software_id_list,
 					NULL AS software_source_list,
 					NULL AS software_extension_for_list,
@@ -6934,6 +7086,7 @@ func (ds *Datastore) ListHostSoftware(ctx context.Context, host *fleet.Host, opt
 					NULL AS package_name,
 					NULL AS package_version,
 					NULL as package_platform,
+					NULL AS package_has_uninstall_script,
 					NULL AS software_id_list,
 					NULL AS software_source_list,
 					NULL AS software_extension_for_list,

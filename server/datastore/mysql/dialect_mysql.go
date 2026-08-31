@@ -125,6 +125,9 @@ func (mysqlDialect) CreateTableLike(newTable, srcTable string) string {
 
 func (mysqlDialect) AtomicTableSwap(srcTable, swapTable string) []string {
 	return []string{
+		// A stale _old table from an interrupted prior cycle would make the
+		// RENAME fail.
+		"DROP TABLE IF EXISTS " + srcTable + "_old",
 		"RENAME TABLE " + srcTable + " TO " + srcTable + "_old, " + swapTable + " TO " + srcTable,
 	}
 }
