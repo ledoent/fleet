@@ -151,10 +151,15 @@ var (
 	reDDLIntUnsigned           = regexp.MustCompile(`(?i)\bINT\s+UNSIGNED\b`)
 	reDDLSmallintUnsigned      = regexp.MustCompile(`(?i)\bSMALLINT\s+UNSIGNED\b`)
 	reDDLTinyintUnsigned       = regexp.MustCompile(`(?i)\bTINYINT\s+UNSIGNED\b`)
-	// TINYINT(1) is the Fleet bool convention — map to smallint to match the
-	// rest of the codebase (PG bools are stored as smallint here, not as
-	// native boolean, for cross-dialect query consistency).
-	reDDLTinyint1 = regexp.MustCompile(`(?i)\bTINYINT\s*\(\s*1\s*\)`)
+	// TINYINT(1) is the Fleet bool convention. Historically translated to
+	// smallint (the baseline's pre-existing bool columns are smallint, kept
+	// working by smallintBoolColumns); NEW columns become native boolean so
+	// Go bool args encode without any rewrite machinery. This only affects
+	// DDL that actually runs on PG (post-marker migrations). The optional
+	// DEFAULT capture converts MySQL's 0/'0'/1/'1' defaults to FALSE/TRUE.
+	reDDLTinyint1 = regexp.MustCompile(`(?i)\bTINYINT\s*\(\s*1\s*\)((?:\s+NOT\s+NULL)?\s+DEFAULT\s+)'?([01])'?`)
+	// TINYINT(1) with no DEFAULT clause.
+	reDDLTinyint1Bare = regexp.MustCompile(`(?i)\bTINYINT\s*\(\s*1\s*\)`)
 	reDDLTinyint  = regexp.MustCompile(`(?i)\bTINYINT(?:\s*\(\s*\d+\s*\))?`)
 	// Binary types.
 	reDDLBlobTypes = regexp.MustCompile(`(?i)\b(?:MEDIUMBLOB|LONGBLOB|TINYBLOB|BLOB)\b`)
@@ -418,8 +423,17 @@ func rebindQuery(query string) string {
 		query = reDDLIntUnsigned.ReplaceAllString(query, "INTEGER")
 		query = reDDLSmallintUnsigned.ReplaceAllString(query, "SMALLINT")
 		query = reDDLTinyintUnsigned.ReplaceAllString(query, "SMALLINT")
-		// MySQL TINYINT(1) is the bool convention; PG uses smallint on this fork.
-		query = reDDLTinyint1.ReplaceAllString(query, "SMALLINT")
+		// MySQL TINYINT(1) is the bool convention; new columns become native
+		// boolean (see reDDLTinyint1). Wider TINYINTs stay smallint.
+		query = reDDLTinyint1.ReplaceAllStringFunc(query, func(m string) string {
+			sub := reDDLTinyint1.FindStringSubmatch(m)
+			def := "FALSE"
+			if sub[2] == "1" {
+				def = "TRUE"
+			}
+			return "BOOLEAN" + sub[1] + def
+		})
+		query = reDDLTinyint1Bare.ReplaceAllString(query, "BOOLEAN")
 		query = reDDLTinyint.ReplaceAllString(query, "SMALLINT")
 		// BLOB / MEDIUMBLOB / LONGBLOB → bytea
 		query = reDDLBlobTypes.ReplaceAllString(query, "BYTEA")
@@ -639,6 +653,10 @@ func rebindQuery(query string) string {
 	query = strings.ReplaceAll(query, "!pm.passes", "(NOT pm.passes)::int")
 	// SUM(1 - pm.passes): PG can't subtract boolean from integer; cast to int first
 	query = strings.ReplaceAll(query, "1 - pm.passes", "1 - (pm.passes)::int")
+	// MySQL null-safe equality `a <=> b` → PG `a IS NOT DISTINCT FROM b`.
+	if strings.Contains(query, "<=>") {
+		query = strings.ReplaceAll(query, "<=>", "IS NOT DISTINCT FROM")
+	}
 	// Raw FIND_IN_SET(val, col) > 0 in queries that don't go through dialect helpers.
 	// MySQL: FIND_IN_SET(?, q.platform) > 0 — PG has no FIND_IN_SET function.
 	if strings.Contains(query, "FIND_IN_SET(") {
@@ -2627,6 +2645,10 @@ var smallintBoolColumns = []string{
 	"continuous_automations_enabled", // policies.continuous_automations_enabled
 	"force_full",                     // trace_sampler_settings.force_full
 	"has_acme_payload",               // host_mdm_apple_profiles.has_acme_payload
+	// abm_tokens.token_invalid: created on prod under its pre-rename ID
+	// (20260721090128) through the then-current TINYINT(1)→smallint mapping
+	// and baked into the baseline as smallint; written as a Go bool.
+	"token_invalid",
 }
 
 // smallintBoolColSet is a case-insensitive lookup for smallintBoolColumns,
@@ -2643,7 +2665,7 @@ var smallintBoolColSet = func() map[string]struct{} {
 var smallintBoolPatterns = func() map[string]*regexp.Regexp {
 	out := make(map[string]*regexp.Regexp, len(smallintBoolColumns))
 	for _, col := range smallintBoolColumns {
-		out[col] = regexp.MustCompile(`\b` + regexp.QuoteMeta(col) + `\s*=\s*\?`)
+		out[col] = regexp.MustCompile(`\b` + regexp.QuoteMeta(col) + `\s*(!=|<>|=)\s*\?`)
 	}
 	return out
 }()
@@ -2654,7 +2676,7 @@ var smallintBoolPatterns = func() map[string]*regexp.Regexp {
 func rewriteSmallintBoolColumns(query string) string {
 	for _, col := range smallintBoolColumns {
 		query = smallintBoolPatterns[col].ReplaceAllString(query,
-			col+" = (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)")
+			col+" $1 (CASE WHEN ?::text = 'true' THEN 1 ELSE 0 END)")
 	}
 	return query
 }

@@ -3385,7 +3385,7 @@ func (ds *Datastore) RenewMDMManagedCertificates(ctx context.Context) error {
 		`+table+` hp
 		ON hmmc.host_uuid = hp.host_uuid AND hmmc.profile_uuid = hp.profile_uuid
 	WHERE
-		hmmc.type IS NOT DISTINCT FROM ? AND hp.status IS NOT NULL AND hp.operation_type = ?
+		hmmc.type <=> ? AND hp.status IS NOT NULL AND hp.operation_type = ?
 		AND DATEDIFF(hmmc.not_valid_after, hmmc.not_valid_before) IS NOT NULL
 		AND (
 			(DATEDIFF(hmmc.not_valid_after, hmmc.not_valid_before) > 30

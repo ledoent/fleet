@@ -178,26 +178,3 @@ mysql-only: windows_mdm_command_results|fk|response_id->windows_mdm_responses(id
 mysql-only: windows_mdm_responses|fk|enrollment_id->mdm_windows_enrollments(id)
 mysql-only: wstep_certificates|fk|serial->wstep_serials(serial)
 
-# 2026-08 upstream sync: constraints/indexes created by post-marker migrations
-# (live PG has them; the embedded baseline predates them). Regenerate the
-# baseline from prod after the next deploy, then remove all of these.
-mysql-only: mdm_android_commands|index|status,created_at
-mysql-only: mdm_configuration_profile_variables|fk|apple_ddm_activation_uuid->mdm_apple_ddm_activations(activation_uuid)
-mysql-only: mdm_configuration_profile_variables|unique|apple_ddm_activation_uuid,fleet_variable_id
-mysql-only: mdm_windows_enrollments|index|host_uuid,hardware_serial
-mysql-only: nano_cert_auth_associations|index|sha256
-mysql-only: policies|fk|resend_apple_profile_uuid->mdm_apple_configuration_profiles(profile_uuid)
-mysql-only: policies|fk|resend_windows_profile_uuid->mdm_windows_configuration_profiles(profile_uuid)
-mysql-only: policies|index|resend_apple_profile_uuid
-mysql-only: policies|index|resend_windows_profile_uuid
-mysql-only: scim_users|fk|user_id->users(id)
-mysql-only: scim_users|index|user_id
-mysql-only: sessions|index|user_id
-mysql-only: setup_experience_status_results|fk|in_house_app_id->in_house_apps(id)
-mysql-only: setup_experience_status_results|index|in_house_app_id
-mysql-only: upcoming_activities|index|activated_at,fleet_initiated,created_at,host_id
-mysql-only: upcoming_activities|index|host_id,activated_at
-# The old single-column host_uuid index was replaced upstream by the
-# (host_uuid, hardware_serial) composite; the baseline still carries it until
-# the regen.
-pg-only: mdm_windows_enrollments|index|host_uuid

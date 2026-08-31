@@ -549,10 +549,22 @@ func TestRebindDDLTypeRewrites(t *testing.T) {
 		require.NotContains(t, got, "UNSIGNED")
 	})
 
-	t.Run("TINYINT(1) → SMALLINT (Fleet bool convention)", func(t *testing.T) {
+	t.Run("TINYINT(1) → BOOLEAN with translated default", func(t *testing.T) {
 		in := "CREATE TABLE t (active TINYINT(1) NOT NULL DEFAULT 0)"
 		got := rebindQuery(in)
-		require.Contains(t, got, "active SMALLINT NOT NULL DEFAULT 0")
+		require.Contains(t, got, "active BOOLEAN NOT NULL DEFAULT FALSE")
+	})
+
+	t.Run("TINYINT(1) → BOOLEAN with quoted true default", func(t *testing.T) {
+		in := "ALTER TABLE t ADD COLUMN active TINYINT(1) NOT NULL DEFAULT '1'"
+		got := rebindQuery(in)
+		require.Contains(t, got, "active BOOLEAN NOT NULL DEFAULT TRUE")
+	})
+
+	t.Run("TINYINT(1) → BOOLEAN without default", func(t *testing.T) {
+		in := "CREATE TABLE t (flag TINYINT(1) DEFAULT NULL)"
+		got := rebindQuery(in)
+		require.Contains(t, got, "flag BOOLEAN DEFAULT NULL")
 	})
 
 	t.Run("TINYINT (no precision) → SMALLINT", func(t *testing.T) {
@@ -674,7 +686,7 @@ func TestRebindDDLTypeRewrites(t *testing.T) {
 		got := rebindQuery(in)
 		require.Contains(t, got, "TIMESTAMP(6)")
 		require.Contains(t, got, "BYTEA")
-		require.Contains(t, got, "SMALLINT")
+		require.Contains(t, got, "BOOLEAN")
 		require.NotContains(t, got, "TINYINT")
 		require.NotContains(t, got, "BLOB ")
 	})

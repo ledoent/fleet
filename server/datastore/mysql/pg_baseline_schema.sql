@@ -1,5 +1,6 @@
 -- Fleet PostgreSQL Baseline Schema
--- Generated from production database via pg_dump --no-owner --no-privileges.
+-- Generated via pg_dump --schema-only --no-owner --no-privileges (this
+-- revision: from a freshly-migrated scratch PG 16, docker compose postgres_test).
 -- To regenerate:
 --   kubectl exec -n fleet fleet-db-1 -- pg_dump -U postgres -d fleet \
 --     --schema-only --no-owner --no-privileges
@@ -25,15 +26,10 @@
 -- Then run the schema-drift validator:
 --   make check-pg-compat
 --
--- pg-baseline-up-to-migration: 20260729190000
+-- pg-baseline-up-to-migration: 20260831130000
 --
---
--- PostgreSQL database dump
---
-
-
--- Dumped from database version 16.14 (Debian 16.14-1.pgdg13+1)
--- Dumped by pg_dump version 16.14 (Debian 16.14-1.pgdg13+1)
+-- Dumped from database version 16.15 (Debian 16.15-1.pgdg13+2)
+-- Dumped by pg_dump version 16.15 (Debian 16.15-1.pgdg13+2)
 
 
 --
@@ -152,6 +148,19 @@ CREATE FUNCTION public.host_software_installs_set_statuses() RETURNS trigger
 				END;
 			NEW.execution_status := exec_status;
 			NEW.status := CASE WHEN NEW.removed = true THEN NULL ELSE exec_status END;
+			RETURN NEW;
+		END $$;
+
+
+--
+-- Name: mdm_apple_ddm_activations_set_token(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.mdm_apple_ddm_activations_set_token() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+		BEGIN
+			NEW.token := decode(md5(NEW.raw_json || COALESCE(extract(epoch from NEW.secrets_updated_at)::text, '')), 'hex');
 			RETURN NEW;
 		END $$;
 
@@ -489,7 +498,9 @@ CREATE TABLE public.android_devices (
     updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     applied_policy_id character varying(100) DEFAULT NULL::character varying,
     applied_policy_version integer,
-    team_id integer
+    team_id integer,
+    last_pubsub_message_id character varying(255) DEFAULT NULL::character varying,
+    last_pubsub_event_time timestamp(6) without time zone DEFAULT NULL::timestamp without time zone
 );
 
 
@@ -582,7 +593,7 @@ CREATE TABLE public.apple_software_update_assets (
     first_seen_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     created_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    CONSTRAINT apple_software_update_assets_class_check CHECK (((class)::text = ANY ((ARRAY['macos'::character varying, 'ios'::character varying])::text[])))
+    CONSTRAINT apple_software_update_assets_class_check CHECK (((class)::text = ANY (ARRAY[('macos'::character varying)::text, ('ios'::character varying)::text])))
 );
 
 
@@ -1152,6 +1163,23 @@ CREATE TABLE public.host_additional (
 
 
 --
+-- Name: host_autopilot_devices; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.host_autopilot_devices (
+    host_id integer NOT NULL,
+    autopilot_device_id character varying(255) DEFAULT ''::character varying NOT NULL,
+    entra_device_id character varying(255) DEFAULT ''::character varying NOT NULL,
+    group_tag character varying(2048) DEFAULT ''::character varying NOT NULL,
+    hardware_serial character varying(255) DEFAULT ''::character varying NOT NULL,
+    tenant_id character varying(255) DEFAULT ''::character varying NOT NULL,
+    created_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    deleted_at timestamp(6) without time zone DEFAULT NULL::timestamp without time zone
+);
+
+
+--
 -- Name: host_batteries; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1619,8 +1647,8 @@ CREATE TABLE public.host_last_known_locations (
 
 CREATE TABLE public.host_managed_local_account_passwords (
     host_uuid character varying(255) NOT NULL,
-    encrypted_password bytea NOT NULL,
-    command_uuid character varying(127) NOT NULL,
+    encrypted_password bytea,
+    command_uuid character varying(127),
     status character varying(20) DEFAULT NULL::character varying,
     created_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -1628,7 +1656,9 @@ CREATE TABLE public.host_managed_local_account_passwords (
     auto_rotate_at timestamp(6) without time zone DEFAULT NULL::timestamp without time zone,
     pending_encrypted_password bytea,
     pending_command_uuid character varying(127) DEFAULT NULL::character varying,
-    initiated_by_fleet smallint DEFAULT 0 NOT NULL
+    initiated_by_fleet smallint DEFAULT 0 NOT NULL,
+    client_error character varying(255) DEFAULT ''::character varying NOT NULL,
+    deleted boolean DEFAULT false NOT NULL
 );
 
 
@@ -1728,7 +1758,8 @@ CREATE TABLE public.host_mdm_apple_declarations (
     resync boolean DEFAULT false NOT NULL,
     scope text DEFAULT 'System'::text NOT NULL,
     variables_updated_at timestamp without time zone,
-    assets_updated_at timestamp(6) without time zone DEFAULT NULL::timestamp without time zone
+    assets_updated_at timestamp(6) without time zone DEFAULT NULL::timestamp without time zone,
+    activation_updated_at timestamp(6) without time zone DEFAULT NULL::timestamp without time zone
 );
 
 
@@ -1744,6 +1775,45 @@ CREATE TABLE public.host_mdm_apple_device_names (
     detail text,
     created_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: host_mdm_apple_device_vitals; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.host_mdm_apple_device_vitals (
+    host_uuid character varying(255) NOT NULL,
+    udid character varying(255) DEFAULT NULL::character varying,
+    model_number character varying(255) DEFAULT NULL::character varying,
+    modem_firmware_version character varying(255) DEFAULT NULL::character varying,
+    supplemental_build_version character varying(255) DEFAULT NULL::character varying,
+    supplemental_os_version_extra character varying(255) DEFAULT NULL::character varying,
+    bluetooth_mac character varying(255) DEFAULT NULL::character varying,
+    wifi_mac character varying(255) DEFAULT NULL::character varying,
+    eas_device_identifier character varying(255) DEFAULT NULL::character varying,
+    itunes_store_account_hash character varying(255) DEFAULT NULL::character varying,
+    push_token bytea,
+    battery_level double precision,
+    cellular_technology integer,
+    app_analytics_enabled boolean,
+    awaiting_configuration boolean,
+    data_roaming_enabled boolean,
+    diagnostic_submission_enabled boolean,
+    is_cloud_backup_enabled boolean,
+    is_device_locator_service_enabled boolean,
+    is_do_not_disturb_in_effect boolean,
+    is_mdm_lost_mode_enabled boolean,
+    is_network_tethered boolean,
+    itunes_store_account_is_active boolean,
+    personal_hotspot_enabled boolean,
+    last_cloud_backup_date timestamp without time zone,
+    accessibility_settings jsonb,
+    organization_info jsonb,
+    mdm_options jsonb,
+    device_properties_attestation jsonb,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
 
@@ -1795,6 +1865,33 @@ CREATE TABLE public.host_mdm_apple_profiles (
     variables_updated_at timestamp without time zone,
     scope text DEFAULT 'System'::text NOT NULL,
     has_acme_payload smallint DEFAULT 0 NOT NULL
+);
+
+
+--
+-- Name: host_mdm_apple_service_subscriptions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.host_mdm_apple_service_subscriptions (
+    host_uuid character varying(255) NOT NULL,
+    slot character varying(255) NOT NULL,
+    carrier_settings_version character varying(255) DEFAULT NULL::character varying,
+    current_carrier_network character varying(255) DEFAULT NULL::character varying,
+    current_mcc character varying(255) DEFAULT NULL::character varying,
+    current_mnc character varying(255) DEFAULT NULL::character varying,
+    eid character varying(255) DEFAULT NULL::character varying,
+    iccid character varying(255) DEFAULT NULL::character varying,
+    imei character varying(255) DEFAULT NULL::character varying,
+    is_data_preferred boolean,
+    is_roaming boolean,
+    is_voice_preferred boolean,
+    label character varying(255) DEFAULT NULL::character varying,
+    label_id character varying(255) DEFAULT NULL::character varying,
+    meid character varying(255) DEFAULT NULL::character varying,
+    phone_number character varying(255) DEFAULT NULL::character varying,
+    subscriber_carrier_network character varying(255) DEFAULT NULL::character varying,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
 
@@ -2422,7 +2519,8 @@ CREATE TABLE public.in_house_apps (
     platform character varying(10) NOT NULL,
     bundle_identifier character varying(255) DEFAULT ''::character varying NOT NULL,
     self_service boolean DEFAULT false NOT NULL,
-    url character varying(4095) DEFAULT ''::character varying NOT NULL
+    url character varying(4095) DEFAULT ''::character varying NOT NULL,
+    install_during_setup boolean DEFAULT false NOT NULL
 );
 
 
@@ -2746,6 +2844,8 @@ CREATE TABLE public.mdm_android_commands (
     error_message character varying(1024) DEFAULT NULL::character varying,
     created_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    raw_command text,
+    raw_result text,
     CONSTRAINT mdm_android_commands_status_check CHECK (((status)::text = ANY (ARRAY[('pending'::character varying)::text, ('acknowledged'::character varying)::text, ('error'::character varying)::text])))
 );
 
@@ -2829,12 +2929,20 @@ ALTER TABLE public.mdm_apple_configuration_profiles ALTER COLUMN profile_id ADD 
 
 
 --
--- Name: mdm_apple_declaration_activation_references; Type: TABLE; Schema: public; Owner: -
+-- Name: mdm_apple_ddm_activations; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.mdm_apple_declaration_activation_references (
-    declaration_uuid character varying(37) DEFAULT ''::character varying NOT NULL,
-    reference character varying(37) DEFAULT ''::character varying NOT NULL
+CREATE TABLE public.mdm_apple_ddm_activations (
+    activation_uuid character varying(37) DEFAULT ''::character varying NOT NULL,
+    team_id integer DEFAULT 0 NOT NULL,
+    identifier character varying(255) NOT NULL,
+    raw_json text NOT NULL,
+    declaration_uuid character varying(37) NOT NULL,
+    configuration_identifier character varying(255) NOT NULL,
+    secrets_updated_at timestamp(6) without time zone DEFAULT NULL::timestamp without time zone,
+    created_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    uploaded_at timestamp(6) without time zone DEFAULT NULL::timestamp without time zone,
+    token bytea
 );
 
 
@@ -3203,8 +3311,9 @@ CREATE TABLE public.mdm_configuration_profile_variables (
     android_profile_uuid character varying(37) DEFAULT NULL::character varying,
     certificate_template_id integer,
     android_app_configuration_id integer,
+    apple_ddm_activation_uuid character varying(37) DEFAULT NULL::character varying,
     CONSTRAINT ck_mdm_configuration_profile_variables_apple_or_windows CHECK (((apple_profile_uuid IS NULL) <> (windows_profile_uuid IS NULL))),
-    CONSTRAINT ck_mdm_configuration_profile_variables_exactly_one CHECK (((((((
+    CONSTRAINT ck_mdm_configuration_profile_variables_exactly_one CHECK ((((((((
 CASE
     WHEN (apple_profile_uuid IS NULL) THEN 0
     ELSE 1
@@ -3227,6 +3336,10 @@ CASE
 END) +
 CASE
     WHEN (android_app_configuration_id IS NULL) THEN 0
+    ELSE 1
+END) +
+CASE
+    WHEN (apple_ddm_activation_uuid IS NULL) THEN 0
     ELSE 1
 END) = 1))
 );
@@ -3300,6 +3413,37 @@ CREATE TABLE public.mdm_idp_accounts (
 
 
 --
+-- Name: mdm_microsoft_graph_credentials; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.mdm_microsoft_graph_credentials (
+    id integer NOT NULL,
+    tenant_id character varying(255) NOT NULL,
+    client_id character varying(255) NOT NULL,
+    client_secret bytea NOT NULL,
+    credential_invalid boolean DEFAULT false NOT NULL,
+    last_synced_at timestamp(6) without time zone DEFAULT NULL::timestamp without time zone,
+    last_sync_error text,
+    created_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: mdm_microsoft_graph_credentials_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.mdm_microsoft_graph_credentials ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (
+    SEQUENCE NAME public.mdm_microsoft_graph_credentials_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: mdm_operation_types; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3352,6 +3496,19 @@ CREATE TABLE public.mdm_windows_configuration_profiles_prior_content (
 
 
 --
+-- Name: mdm_windows_enrollment_config; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.mdm_windows_enrollment_config (
+    id integer NOT NULL,
+    default_team_id integer,
+    created_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp(6) without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT ck_mdm_windows_enrollment_config_singleton CHECK ((id = 1))
+);
+
+
+--
 -- Name: mdm_windows_enrollments; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3376,7 +3533,12 @@ CREATE TABLE public.mdm_windows_enrollments (
     awaiting_configuration_at timestamp without time zone,
     poll_schedule_relaxed smallint DEFAULT 0 NOT NULL,
     has_pending_commands smallint DEFAULT 0 NOT NULL,
-    fleetd_sync_capable smallint DEFAULT 0 NOT NULL
+    fleetd_sync_capable smallint DEFAULT 0 NOT NULL,
+    managed_local_account_escrowed boolean DEFAULT false NOT NULL,
+    hardware_serial character varying(255) DEFAULT NULL::character varying,
+    ztd_registration_id character varying(255) DEFAULT ''::character varying NOT NULL,
+    last_login_status character varying(16),
+    last_login_status_at timestamp(6) without time zone
 );
 
 
@@ -4035,7 +4197,19 @@ CREATE TABLE public.policies (
     type character varying(255) DEFAULT 'dynamic'::character varying NOT NULL,
     patch_software_title_id integer,
     needs_full_membership_cleanup boolean DEFAULT false NOT NULL,
-    continuous_automations_enabled smallint DEFAULT 0 NOT NULL
+    continuous_automations_enabled smallint DEFAULT 0 NOT NULL,
+    patch_when_closed boolean DEFAULT false NOT NULL,
+    resend_apple_profile_uuid character varying(37) DEFAULT NULL::character varying,
+    resend_windows_profile_uuid character varying(37) DEFAULT NULL::character varying,
+    CONSTRAINT ck_policies_resend_profile_uuid CHECK (((
+CASE
+    WHEN (resend_apple_profile_uuid IS NULL) THEN 0
+    ELSE 1
+END +
+CASE
+    WHEN (resend_windows_profile_uuid IS NULL) THEN 0
+    ELSE 1
+END) <= 1))
 );
 
 
@@ -4311,6 +4485,17 @@ CREATE TABLE public.scheduled_query_stats (
 
 
 --
+-- Name: scim_group_group; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.scim_group_group (
+    parent_group_id integer NOT NULL,
+    child_group_id integer NOT NULL,
+    created_at timestamp(6) without time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: scim_groups; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -4403,7 +4588,8 @@ CREATE TABLE public.scim_users (
     active boolean,
     created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    department character varying(255) DEFAULT NULL::character varying
+    department character varying(255) DEFAULT NULL::character varying,
+    user_id integer
 );
 
 
@@ -4602,7 +4788,8 @@ CREATE TABLE public.setup_experience_status_results (
     setup_experience_script_id integer,
     script_execution_id character varying(255) DEFAULT NULL::character varying,
     error character varying(255) DEFAULT NULL::character varying,
-    policy_gated smallint DEFAULT 0 NOT NULL
+    policy_gated smallint DEFAULT 0 NOT NULL,
+    in_house_app_id integer
 );
 
 
@@ -4860,7 +5047,10 @@ CREATE TABLE public.software_installers (
 CASE
     WHEN (fleet_maintained_app_id IS NULL) THEN storage_id
     ELSE version
-END) STORED
+END) STORED,
+    app_open_query text DEFAULT ''::text NOT NULL,
+    install_script_edited boolean DEFAULT false NOT NULL,
+    uninstall_script_edited boolean DEFAULT false NOT NULL
 );
 
 
@@ -5166,7 +5356,8 @@ CREATE TABLE public.users (
     api_only boolean DEFAULT false NOT NULL,
     mfa_enabled boolean DEFAULT false NOT NULL,
     settings jsonb DEFAULT '{}'::jsonb NOT NULL,
-    invite_id integer
+    invite_id integer,
+    last_login_at timestamp without time zone
 );
 
 
@@ -5945,6 +6136,14 @@ ALTER TABLE ONLY public.host_additional
 
 
 --
+-- Name: host_autopilot_devices host_autopilot_devices_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.host_autopilot_devices
+    ADD CONSTRAINT host_autopilot_devices_pkey PRIMARY KEY (host_id);
+
+
+--
 -- Name: host_batteries host_batteries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6153,6 +6352,14 @@ ALTER TABLE ONLY public.host_mdm_apple_device_names
 
 
 --
+-- Name: host_mdm_apple_device_vitals host_mdm_apple_device_vitals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.host_mdm_apple_device_vitals
+    ADD CONSTRAINT host_mdm_apple_device_vitals_pkey PRIMARY KEY (host_uuid);
+
+
+--
 -- Name: host_mdm_apple_enrollment_permissions host_mdm_apple_enrollment_permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6174,6 +6381,14 @@ ALTER TABLE ONLY public.host_mdm_apple_os_updates
 
 ALTER TABLE ONLY public.host_mdm_apple_profiles
     ADD CONSTRAINT host_mdm_apple_profiles_pkey PRIMARY KEY (host_uuid, profile_uuid);
+
+
+--
+-- Name: host_mdm_apple_service_subscriptions host_mdm_apple_service_subscriptions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.host_mdm_apple_service_subscriptions
+    ADD CONSTRAINT host_mdm_apple_service_subscriptions_pkey PRIMARY KEY (host_uuid, slot);
 
 
 --
@@ -6713,6 +6928,30 @@ ALTER TABLE ONLY public.mdm_apple_configuration_profiles
 
 
 --
+-- Name: mdm_apple_ddm_activations idx_mdm_apple_ddm_activation_declaration; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_apple_ddm_activations
+    ADD CONSTRAINT idx_mdm_apple_ddm_activation_declaration UNIQUE (declaration_uuid);
+
+
+--
+-- Name: mdm_apple_ddm_activations idx_mdm_apple_ddm_activation_team_config; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_apple_ddm_activations
+    ADD CONSTRAINT idx_mdm_apple_ddm_activation_team_config UNIQUE (team_id, configuration_identifier);
+
+
+--
+-- Name: mdm_apple_ddm_activations idx_mdm_apple_ddm_activation_team_identifier; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_apple_ddm_activations
+    ADD CONSTRAINT idx_mdm_apple_ddm_activation_team_identifier UNIQUE (team_id, identifier);
+
+
+--
 -- Name: mdm_apple_declaration_assets idx_mdm_apple_decl_asset_team_identifier; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6785,6 +7024,14 @@ ALTER TABLE ONLY public.mdm_configuration_profile_update_settings
 
 
 --
+-- Name: mdm_configuration_profile_variables idx_mdm_config_profile_vars_ddm_activation_variable; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_configuration_profile_variables
+    ADD CONSTRAINT idx_mdm_config_profile_vars_ddm_activation_variable UNIQUE (apple_ddm_activation_uuid, fleet_variable_id);
+
+
+--
 -- Name: mdm_configuration_profile_labels idx_mdm_configuration_profile_labels_android_label_name; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6838,6 +7085,14 @@ ALTER TABLE ONLY public.mdm_declaration_labels
 
 ALTER TABLE ONLY public.mdm_apple_default_setup_assistants
     ADD CONSTRAINT idx_mdm_default_setup_assistant_global_or_team_id_abm_token_id UNIQUE (global_or_team_id, abm_token_id);
+
+
+--
+-- Name: mdm_microsoft_graph_credentials idx_mdm_microsoft_graph_credentials_tenant_id; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_microsoft_graph_credentials
+    ADD CONSTRAINT idx_mdm_microsoft_graph_credentials_tenant_id UNIQUE (tenant_id);
 
 
 --
@@ -7465,11 +7720,11 @@ ALTER TABLE ONLY public.mdm_apple_configuration_profiles
 
 
 --
--- Name: mdm_apple_declaration_activation_references mdm_apple_declaration_activation_references_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: mdm_apple_ddm_activations mdm_apple_ddm_activations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.mdm_apple_declaration_activation_references
-    ADD CONSTRAINT mdm_apple_declaration_activation_references_pkey PRIMARY KEY (declaration_uuid, reference);
+ALTER TABLE ONLY public.mdm_apple_ddm_activations
+    ADD CONSTRAINT mdm_apple_ddm_activations_pkey PRIMARY KEY (activation_uuid);
 
 
 --
@@ -7617,6 +7872,14 @@ ALTER TABLE ONLY public.mdm_idp_accounts
 
 
 --
+-- Name: mdm_microsoft_graph_credentials mdm_microsoft_graph_credentials_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_microsoft_graph_credentials
+    ADD CONSTRAINT mdm_microsoft_graph_credentials_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: mdm_operation_types mdm_operation_types_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -7638,6 +7901,14 @@ ALTER TABLE ONLY public.mdm_windows_configuration_profiles
 
 ALTER TABLE ONLY public.mdm_windows_configuration_profiles_prior_content
     ADD CONSTRAINT mdm_windows_configuration_profiles_prior_content_pkey PRIMARY KEY (profile_uuid, checksum);
+
+
+--
+-- Name: mdm_windows_enrollment_config mdm_windows_enrollment_config_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_windows_enrollment_config
+    ADD CONSTRAINT mdm_windows_enrollment_config_pkey PRIMARY KEY (id);
 
 
 --
@@ -7950,6 +8221,14 @@ ALTER TABLE ONLY public.scheduled_queries
 
 ALTER TABLE ONLY public.scheduled_query_stats
     ADD CONSTRAINT scheduled_query_stats_pkey PRIMARY KEY (host_id, scheduled_query_id, query_type);
+
+
+--
+-- Name: scim_group_group scim_group_group_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scim_group_group
+    ADD CONSTRAINT scim_group_group_pkey PRIMARY KEY (parent_group_id, child_group_id);
 
 
 --
@@ -9227,6 +9506,27 @@ CREATE INDEX idx_hmlap_command_uuid ON public.host_managed_local_account_passwor
 
 
 --
+-- Name: idx_host_autopilot_device_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_host_autopilot_device_id ON public.host_autopilot_devices USING btree (autopilot_device_id, deleted_at);
+
+
+--
+-- Name: idx_host_autopilot_hardware_serial; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_host_autopilot_hardware_serial ON public.host_autopilot_devices USING btree (hardware_serial);
+
+
+--
+-- Name: idx_host_autopilot_tenant_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_host_autopilot_tenant_id ON public.host_autopilot_devices USING btree (tenant_id, deleted_at);
+
+
+--
 -- Name: idx_host_certificate_templates_not_valid_after; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9591,6 +9891,13 @@ CREATE UNIQUE INDEX idx_mdm_android_commands_operation_name ON public.mdm_androi
 
 
 --
+-- Name: idx_mdm_android_commands_status_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mdm_android_commands_status_created_at ON public.mdm_android_commands USING btree (status, created_at);
+
+
+--
 -- Name: idx_mdm_apple_declaration_asset_refs_asset_uuid; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9647,10 +9954,17 @@ CREATE INDEX idx_mdm_declaration_labels_label_id ON public.mdm_declaration_label
 
 
 --
--- Name: idx_mdm_windows_enrollments_host_uuid; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_mdm_windows_enrollment_config_default_team_id; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_mdm_windows_enrollments_host_uuid ON public.mdm_windows_enrollments USING btree (host_uuid);
+CREATE INDEX idx_mdm_windows_enrollment_config_default_team_id ON public.mdm_windows_enrollment_config USING btree (default_team_id);
+
+
+--
+-- Name: idx_mdm_windows_enrollments_host_uuid_hardware_serial; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_mdm_windows_enrollments_host_uuid_hardware_serial ON public.mdm_windows_enrollments USING btree (host_uuid, hardware_serial);
 
 
 --
@@ -9759,6 +10073,20 @@ CREATE INDEX idx_policies_needs_full_membership_cleanup ON public.policies USING
 
 
 --
+-- Name: idx_policies_resend_apple_profile_uuid; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_policies_resend_apple_profile_uuid ON public.policies USING btree (resend_apple_profile_uuid);
+
+
+--
+-- Name: idx_policies_resend_windows_profile_uuid; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_policies_resend_windows_profile_uuid ON public.policies USING btree (resend_windows_profile_uuid);
+
+
+--
 -- Name: idx_policies_team_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9808,6 +10136,13 @@ CREATE INDEX idx_query_id_host_id_last_fetched ON public.query_results USING btr
 
 
 --
+-- Name: idx_scim_group_group_child; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_scim_group_group_child ON public.scim_group_group USING btree (child_group_id);
+
+
+--
 -- Name: idx_scim_groups_external_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9829,6 +10164,13 @@ CREATE INDEX idx_scim_users_external_id ON public.scim_users USING btree (extern
 
 
 --
+-- Name: idx_scim_users_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_scim_users_user_id ON public.scim_users USING btree (user_id);
+
+
+--
 -- Name: idx_script_content_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9840,6 +10182,13 @@ CREATE INDEX idx_script_content_id ON public.setup_experience_scripts USING btre
 --
 
 CREATE INDEX idx_scripts_script_content_id ON public.scripts USING btree (script_content_id);
+
+
+--
+-- Name: idx_sessions_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sessions_user_id ON public.sessions USING btree (user_id);
 
 
 --
@@ -9875,6 +10224,20 @@ CREATE INDEX idx_setup_experience_scripts_nano_command_uuid ON public.setup_expe
 --
 
 CREATE INDEX idx_setup_experience_scripts_script_execution_id ON public.setup_experience_status_results USING btree (script_execution_id);
+
+
+--
+-- Name: idx_setup_experience_status_results_in_house_app_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_setup_experience_status_results_in_house_app_id ON public.setup_experience_status_results USING btree (in_house_app_id);
+
+
+--
+-- Name: idx_sha256; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sha256 ON public.nano_cert_auth_associations USING btree (sha256);
 
 
 --
@@ -9980,6 +10343,20 @@ CREATE INDEX idx_team_id_saved_auto_interval ON public.queries USING btree (team
 --
 
 CREATE UNIQUE INDEX idx_type ON public.mdm_apple_enrollment_profiles USING btree (type);
+
+
+--
+-- Name: idx_upcoming_activities_activated_at_fleet_initiated; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_upcoming_activities_activated_at_fleet_initiated ON public.upcoming_activities USING btree (activated_at, fleet_initiated, created_at, host_id);
+
+
+--
+-- Name: idx_upcoming_activities_host_id_activated_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_upcoming_activities_host_id_activated_at ON public.upcoming_activities USING btree (host_id, activated_at);
 
 
 --
@@ -10155,13 +10532,6 @@ CREATE INDEX priority ON public.nano_enrollment_queue USING btree (priority DESC
 --
 
 CREATE INDEX query_labels_label_id ON public.query_labels USING btree (label_id);
-
-
---
--- Name: reference; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX reference ON public.mdm_apple_declaration_activation_references USING btree (reference);
 
 
 --
@@ -10508,6 +10878,13 @@ CREATE TRIGGER fleet_maintained_apps_set_updated_at BEFORE UPDATE ON public.flee
 
 
 --
+-- Name: host_autopilot_devices host_autopilot_devices_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_autopilot_devices_set_updated_at BEFORE UPDATE ON public.host_autopilot_devices FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: host_batteries host_batteries_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -10620,6 +10997,13 @@ CREATE TRIGGER host_mdm_apple_device_names_set_updated_at BEFORE UPDATE ON publi
 
 
 --
+-- Name: host_mdm_apple_device_vitals host_mdm_apple_device_vitals_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_apple_device_vitals_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_device_vitals FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: host_mdm_apple_enrollment_permissions host_mdm_apple_enrollment_permissions_set_delivered_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -10645,6 +11029,13 @@ CREATE TRIGGER host_mdm_apple_os_updates_set_updated_at BEFORE UPDATE ON public.
 --
 
 CREATE TRIGGER host_mdm_apple_profiles_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_profiles FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
+-- Name: host_mdm_apple_service_subscriptions host_mdm_apple_service_subscriptions_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER host_mdm_apple_service_subscriptions_set_updated_at BEFORE UPDATE ON public.host_mdm_apple_service_subscriptions FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 
 
 --
@@ -10830,6 +11221,13 @@ CREATE TRIGGER mdm_apple_bootstrap_packages_set_updated_at BEFORE UPDATE ON publ
 
 
 --
+-- Name: mdm_apple_ddm_activations mdm_apple_ddm_activations_token; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_apple_ddm_activations_token BEFORE INSERT OR UPDATE ON public.mdm_apple_ddm_activations FOR EACH ROW EXECUTE FUNCTION public.mdm_apple_ddm_activations_set_token();
+
+
+--
 -- Name: mdm_apple_declarations mdm_apple_declarations_token; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -10893,10 +11291,24 @@ CREATE TRIGGER mdm_idp_accounts_set_updated_at BEFORE UPDATE ON public.mdm_idp_a
 
 
 --
+-- Name: mdm_microsoft_graph_credentials mdm_microsoft_graph_credentials_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_microsoft_graph_credentials_set_updated_at BEFORE UPDATE ON public.mdm_microsoft_graph_credentials FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
+
+
+--
 -- Name: mdm_windows_configuration_profiles mdm_windows_configuration_profiles_checksum; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER mdm_windows_configuration_profiles_checksum BEFORE INSERT OR UPDATE ON public.mdm_windows_configuration_profiles FOR EACH ROW EXECUTE FUNCTION public.mdm_windows_configuration_profiles_set_checksum();
+
+
+--
+-- Name: mdm_windows_enrollment_config mdm_windows_enrollment_config_set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER mdm_windows_enrollment_config_set_updated_at BEFORE UPDATE ON public.mdm_windows_enrollment_config FOR EACH ROW EXECUTE FUNCTION public.fleet_set_updated_at();
 
 
 --
@@ -11427,6 +11839,14 @@ ALTER TABLE ONLY public.in_house_app_configurations
 
 
 --
+-- Name: mdm_apple_ddm_activations fk_mdm_apple_ddm_activations_declaration_uuid; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_apple_ddm_activations
+    ADD CONSTRAINT fk_mdm_apple_ddm_activations_declaration_uuid FOREIGN KEY (declaration_uuid) REFERENCES public.mdm_apple_declarations(declaration_uuid) ON DELETE CASCADE;
+
+
+--
 -- Name: mdm_apple_psso_keys fk_mdm_apple_psso_keys_host_uuid; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11475,6 +11895,14 @@ ALTER TABLE ONLY public.mdm_configuration_profile_variables
 
 
 --
+-- Name: mdm_windows_enrollment_config fk_mdm_windows_enrollment_config_default_team_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_windows_enrollment_config
+    ADD CONSTRAINT fk_mdm_windows_enrollment_config_default_team_id FOREIGN KEY (default_team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+
+
+--
 -- Name: software_title_team_pins fk_pin_title; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11483,11 +11911,59 @@ ALTER TABLE ONLY public.software_title_team_pins
 
 
 --
+-- Name: policies fk_policies_resend_apple_profile; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.policies
+    ADD CONSTRAINT fk_policies_resend_apple_profile FOREIGN KEY (resend_apple_profile_uuid) REFERENCES public.mdm_apple_configuration_profiles(profile_uuid);
+
+
+--
+-- Name: policies fk_policies_resend_windows_profile; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.policies
+    ADD CONSTRAINT fk_policies_resend_windows_profile FOREIGN KEY (resend_windows_profile_uuid) REFERENCES public.mdm_windows_configuration_profiles(profile_uuid);
+
+
+--
+-- Name: scim_group_group fk_scim_group_group_child; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scim_group_group
+    ADD CONSTRAINT fk_scim_group_group_child FOREIGN KEY (child_group_id) REFERENCES public.scim_groups(id) ON DELETE CASCADE;
+
+
+--
+-- Name: scim_group_group fk_scim_group_group_parent; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scim_group_group
+    ADD CONSTRAINT fk_scim_group_group_parent FOREIGN KEY (parent_group_id) REFERENCES public.scim_groups(id) ON DELETE CASCADE;
+
+
+--
+-- Name: scim_users fk_scim_users_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scim_users
+    ADD CONSTRAINT fk_scim_users_user_id FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
 -- Name: setup_experience_software_installers fk_seti_installer; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.setup_experience_software_installers
     ADD CONSTRAINT fk_seti_installer FOREIGN KEY (software_installer_id) REFERENCES public.software_installers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: setup_experience_status_results fk_setup_experience_status_results_iha_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.setup_experience_status_results
+    ADD CONSTRAINT fk_setup_experience_status_results_iha_id FOREIGN KEY (in_house_app_id) REFERENCES public.in_house_apps(id) ON DELETE CASCADE;
 
 
 --
@@ -11552,6 +12028,14 @@ ALTER TABLE ONLY public.mdm_apple_declaration_asset_references
 
 ALTER TABLE ONLY public.mdm_apple_declaration_asset_references
     ADD CONSTRAINT mdm_apple_declaration_asset_references_declaration_uuid_fkey FOREIGN KEY (declaration_uuid) REFERENCES public.mdm_apple_declarations(declaration_uuid) ON DELETE CASCADE;
+
+
+--
+-- Name: mdm_configuration_profile_variables mdm_config_profile_variables_ddm_activation_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.mdm_configuration_profile_variables
+    ADD CONSTRAINT mdm_config_profile_variables_ddm_activation_fk FOREIGN KEY (apple_ddm_activation_uuid) REFERENCES public.mdm_apple_ddm_activations(activation_uuid) ON DELETE CASCADE;
 
 
 --

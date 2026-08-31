@@ -16,14 +16,3 @@
 # PG-only table — no MySQL equivalent.
 pg-only: migration_status_data
 
-# 2026-08 upstream sync: new tables created by post-marker migrations (and one
-# table dropped upstream) — regenerate the baseline from prod after the next
-# deploy, then remove these entries.
-mysql-only: host_autopilot_devices
-mysql-only: host_mdm_apple_device_vitals
-mysql-only: host_mdm_apple_service_subscriptions
-mysql-only: mdm_apple_ddm_activations
-mysql-only: mdm_microsoft_graph_credentials
-mysql-only: mdm_windows_enrollment_config
-mysql-only: scim_group_group
-pg-only: mdm_apple_declaration_activation_references
