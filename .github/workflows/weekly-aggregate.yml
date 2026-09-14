@@ -1,0 +1,135 @@
+name: Aggregate & Push
+
+on:
+  # push only fires when the pushed ref contains this workflow file, i.e.
+  # the ledoent branch. feat/pg-compat-rebased doesn't carry the fork CI
+  # files, so it chains in via workflow_run below instead; pushes to
+  # patches/* are rare and covered by the cron + manual dispatch.
+  push:
+    branches:
+      - ledoent
+  # Aggregate after PG CI succeeds on the PG branch — workflow_run executes
+  # from the default branch, so the PG branch not carrying this file doesn't
+  # matter, and it guarantees we never aggregate a red PG tip. Validate PG
+  # Compatibility also runs on `aggregated` pushes; the branches filter
+  # stops that from re-triggering us (no loop).
+  workflow_run:
+    workflows: ["Validate PG Compatibility"]
+    types: [completed]
+    branches: [feat/pg-compat-rebased]
+  schedule:
+    - cron: '0 8 * * 1'  # Weekly safety net; the triggers above are primary
+  workflow_dispatch:
+
+concurrency:
+  group: aggregate
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  aggregate:
+    # Skip on upstream, and only chain from a *successful* PG CI run.
+    if: >
+      github.repository != 'fleetdm/fleet' &&
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ledoent
+          fetch-depth: 0
+          token: ${{ secrets.FLEET_RELEASE_GITHUB_PAT }}
+
+      - name: Set up git identity and credentials
+        env:
+          GH_PAT: ${{ secrets.FLEET_RELEASE_GITHUB_PAT }}
+        run: |
+          # --global so config applies inside the ./fleet subrepo that
+          # git-aggregator clones (local config wouldn't propagate there).
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          # Authenticate pushes from inside the cloned subrepo. We can't use
+          # an http.<host>.extraheader because actions/checkout already set
+          # one on the outer repo and a global duplicate triggers "Duplicate
+          # header: Authorization". URL rewriting with insteadOf is safe:
+          # it embeds the token only in subprocess `git` invocations, not in
+          # the configured remote URLs of the outer repo.
+          git config --global "url.https://x-access-token:${GH_PAT}@github.com/.insteadOf" "https://github.com/"
+
+      - name: Install git-aggregator
+        run: pip install 'git-aggregator==4.1'
+
+      - name: Run git-aggregator
+        id: aggregate
+        run: |
+          set -o pipefail
+          # repos.yaml is in the repo root (from ledoent branch checkout).
+          # The -p flag instructs git-aggregator to push the resulting
+          # `aggregated` branch back to the `fork` remote after merging.
+          # Without it, aggregations succeed locally but never reach origin.
+          if gitaggregate -c repos.yaml -p aggregate 2>&1 | tee /tmp/aggregate.log; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ "${{ steps.aggregate.outputs.ok }}" = "true" ]; then
+            echo "## Aggregation succeeded" >> $GITHUB_STEP_SUMMARY
+            echo "The \`aggregated\` branch has been pushed." >> $GITHUB_STEP_SUMMARY
+            echo "\`build-ledo.yml\` will trigger automatically to build the image." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Aggregation FAILED" >> $GITHUB_STEP_SUMMARY
+            conflicts=$(git -C fleet diff --name-only --diff-filter=U 2>/dev/null || true)
+            if [ -n "$conflicts" ]; then
+              echo "Merge conflict — usually means \`feat/pg-compat-rebased\` needs porting work for these files:" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "$conflicts" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "**Last 30 lines of output:**" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -30 /tmp/aggregate.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Notification must never mask the real failure: tolerate disabled
+      # Issues, and comment on an existing open failure issue instead of
+      # opening a new one every run.
+      - name: Notify failure via issue (non-fatal)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.FLEET_RELEASE_GITHUB_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "The aggregation workflow failed and requires manual attention."
+            echo
+            echo "**Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "**Last 30 lines of output:**"
+            echo '```'
+            tail -30 /tmp/aggregate.log 2>/dev/null || echo "No log available"
+            echo '```'
+          } > /tmp/issue-body.md
+          {
+            existing=$(gh issue list --repo "$REPO" --state open \
+              --search 'Aggregate & Push failed in:title' \
+              --json number --jq '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "$REPO" --body-file /tmp/issue-body.md
+            else
+              gh issue create \
+                --repo "$REPO" \
+                --title "Aggregate & Push failed — $(date -u '+%Y-%m-%d')" \
+                --assignee dkendall \
+                --body-file /tmp/issue-body.md
+            fi
+          } || echo "::warning::Could not file failure issue (are Issues enabled on $REPO?). See the step summary for details."
