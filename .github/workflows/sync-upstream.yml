@@ -1,0 +1,41 @@
+name: Sync upstream main
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.repository != 'fleetdm/fleet'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.FLEET_RELEASE_GITHUB_PAT }}
+
+      - name: Sync from upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/fleetdm/fleet.git || true
+          git fetch upstream main
+
+          # Paranoia: refuse to force-push if `main` has commits not in
+          # `upstream/main` from anyone other than github-actions[bot].
+          # Local work belongs on a feature branch, never on `main`.
+          unexpected=$(git log upstream/main..HEAD \
+            --pretty='%an <%ae>' \
+            | grep -v 'github-actions\[bot\]' || true)
+          if [[ -n "$unexpected" ]]; then
+            echo "❌ Refusing to force-push: main has non-bot commits not in upstream/main:"
+            echo "$unexpected"
+            exit 1
+          fi
+
+          git reset --hard upstream/main
+          git push --force-with-lease origin main

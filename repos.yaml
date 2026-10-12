@@ -1,0 +1,30 @@
+# Fleet git-aggregator configuration
+# Builds the deployable `aggregated` branch.
+#
+# Base = feat/pg-compat-rebased (first merge entry): the PG layer is rebased
+# onto a specific, tested upstream commit, so IT pins which upstream lands in
+# the deployable artifact — not the live `main` mirror. Basing on `main` made
+# every scheduled run conflict as soon as the mirror drifted past the PG
+# layer's rebase point (runs of 2026-06-29 and 2026-07-06). `ledoent` and
+# `patches/premium-license` carry only fork-owned commits on top of older
+# upstream history, so merging them into the PG base stays conflict-free
+# regardless of mirror drift.
+#
+# Local usage:
+#   gitaggregate -c repos.yaml -p aggregate
+#
+# CI: weekly-aggregate.yml runs on pushes to the three source branches,
+# a weekly cron safety net, and workflow_dispatch.
+
+./fleet:
+  remotes:
+    upstream: https://github.com/fleetdm/fleet.git
+    fork: https://github.com/ledoent/fleet.git
+  target: fork aggregated
+  merges:
+    - remote: fork
+      ref: feat/pg-compat-rebased
+    - remote: fork
+      ref: ledoent
+    - remote: fork
+      ref: patches/premium-license
