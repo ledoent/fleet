@@ -5,7 +5,7 @@ ARG FLEET_VERSION=dev
 
 # Stage 1: Build frontend assets
 # Pinned by digest — bump together with the tag when refreshing base images.
-FROM node:24-bookworm@sha256:33cf7f057918860b043c307751ef621d74ac96f875b79b6724dcebf2dfd0db6d AS frontend
+FROM node:24-bookworm@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a AS frontend
 WORKDIR /build
 COPY package.json yarn.lock ./
 RUN yarn install --frozen-lockfile --network-timeout 600000
